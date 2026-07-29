@@ -1,0 +1,10 @@
+[package]
+name = "live-keys-lv2-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+live-keys-core = { path = "../core" }
+livi = "0.7"
+anyhow = "1"
+log = "0.4"

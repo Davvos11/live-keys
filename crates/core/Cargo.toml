@@ -1,0 +1,7 @@
+[package]
+name = "live-keys-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rtrb = "0.3"
