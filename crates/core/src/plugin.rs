@@ -18,4 +18,9 @@ pub trait HostedPlugin: Send {
     /// channel `channel`. The returned slice has length equal to the `frames`
     /// passed to that call.
     fn audio_output(&self, channel: usize) -> &[f32];
+
+    /// Set a control-port input to a new value. `port_index` matches the plugin's
+    /// own port indexing (as exposed by the format-specific adapter); an
+    /// out-of-range or non-control-port index is a no-op.
+    fn set_control(&mut self, port_index: u32, value: f32);
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/lv2-host"]
+members = ["crates/core", "crates/lv2-host", "crates/engine", "crates/gui", "crates/lv2-ui-host"]
 resolver = "2"
 
 [workspace.package]
@@ -12,10 +12,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-live-keys-core = { path = "crates/core" }
-live-keys-lv2-host = { path = "crates/lv2-host" }
-cpal = "0.18"
-midir = "0.11"
+live-keys-engine = { path = "crates/engine" }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"

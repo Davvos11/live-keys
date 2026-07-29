@@ -1,0 +1,31 @@
+export struct PluginRow {
+    uri: string,
+    name: string,
+}
+
+// State the host (Rust) pushes into the UI.
+export global AppState {
+    in property <[string]> audio-devices;
+    // ComboBox writes to `current-value` don't update its visual selection
+    // (https://github.com/slint-ui/slint/issues/11970) — drive it by index instead.
+    in property <int> selected-audio-index: -1;
+    in property <[string]> midi-ports;
+    in property <int> selected-midi-index: -1;
+    in property <[string]> default-plugin-folders;
+    in property <[string]> extra-plugin-folders;
+    in property <[PluginRow]> plugins;
+    in property <string> loaded-plugin-name;
+    in property <bool> plugin-gui-available;
+    in property <string> plugin-gui-status;
+}
+
+// Actions the UI triggers that the host (Rust) handles.
+export global AppLogic {
+    callback select-audio-device(string);
+    callback select-midi-port(string);
+    callback add-plugin-folder();
+    callback remove-plugin-folder(string);
+    callback rescan-plugins();
+    callback load-plugin(string);
+    callback open-plugin-gui();
+}

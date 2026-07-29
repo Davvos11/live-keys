@@ -1,0 +1,21 @@
+[package]
+name = "live-keys-lv2-ui"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+livi = "0.7"
+lv2_raw = "0.2"
+libloading = "0.8"
+x11rb = "0.13"
+anyhow = "1"
+log = "0.4"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[dev-dependencies]
+live-keys-core = { path = "../core" }
+live-keys-lv2-host = { path = "../lv2-host" }
+env_logger = "0.11"

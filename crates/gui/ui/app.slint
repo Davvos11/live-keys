@@ -1,0 +1,23 @@
+import { TabWidget } from "std-widgets.slint";
+import { SettingsTab } from "settings_tab.slint";
+import { LiveTab } from "live_tab.slint";
+import { AppState, AppLogic, PluginRow } from "globals.slint";
+
+export { AppState, AppLogic, PluginRow }
+
+export component AppWindow inherits Window {
+    title: "Live Keys";
+    preferred-width: 900px;
+    preferred-height: 640px;
+
+    TabWidget {
+        Tab {
+            title: "Settings";
+            SettingsTab { }
+        }
+        Tab {
+            title: "Live";
+            LiveTab { }
+        }
+    }
+}

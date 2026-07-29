@@ -1,0 +1,28 @@
+import { Button, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { AppState, AppLogic } from "globals.slint";
+
+export component LiveTab inherits VerticalBox {
+    Text {
+        text: AppState.loaded-plugin-name == "" ? "No plugin loaded" : "Loaded: \{AppState.loaded-plugin-name}";
+        font-size: 18px;
+    }
+
+    Button {
+        text: AppState.plugin-gui-available ? "Open Plugin GUI" : "Open Plugin GUI (\{AppState.plugin-gui-status})";
+        enabled: AppState.plugin-gui-available;
+        clicked => { AppLogic.open-plugin-gui(); }
+    }
+
+    ListView {
+        for plugin in AppState.plugins : HorizontalBox {
+            Text {
+                text: plugin.name;
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "Load";
+                clicked => { AppLogic.load-plugin(plugin.uri); }
+            }
+        }
+    }
+}

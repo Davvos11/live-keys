@@ -4,6 +4,7 @@ use live_keys_core::{HostedPlugin, MidiEvent};
 use livi::event::LV2AtomSequence;
 
 pub use livi;
+pub use lv2_raw;
 
 /// Capacity, in bytes, of the atom sequence buffer used to hand MIDI events to a
 /// plugin each block. Generous enough for a dense chord/arpeggio burst.
@@ -80,6 +81,8 @@ impl Lv2Host {
 
         Ok(Lv2Plugin {
             name,
+            plugin,
+            features: self.features.clone(),
             instance,
             midi_in: LV2AtomSequence::new(&self.features, MIDI_EVENT_BUFFER_BYTES),
             midi_urid: self.features.midi_urid(),
@@ -92,11 +95,35 @@ impl Lv2Host {
 /// A running instance of an LV2 instrument plugin.
 pub struct Lv2Plugin {
     name: String,
+    plugin: livi::Plugin,
+    features: Arc<livi::Features>,
     instance: livi::Instance,
     midi_in: LV2AtomSequence,
     midi_urid: u32,
     output_buffers: Vec<Vec<f32>>,
     frames_rendered: usize,
+}
+
+impl Lv2Plugin {
+    /// The plugin's metadata handle (URI, port list, `uis()`, ...) — everything
+    /// needed to discover and launch this plugin's own GUI without needing a
+    /// reference back to the [`Lv2Host`] it came from.
+    pub fn plugin(&self) -> &livi::Plugin {
+        &self.plugin
+    }
+
+    /// The real-time features (URID map, block size) this instance was created
+    /// with. A plugin's own GUI must be instantiated with the *same* URID map, or
+    /// port/atom types won't match between the DSP instance and its UI.
+    pub fn features(&self) -> &Arc<livi::Features> {
+        &self.features
+    }
+
+    /// The raw handle to the running DSP instance, for the LV2 `instance-access`
+    /// feature — some plugin UIs (e.g. Helm's) require direct access to it.
+    pub fn raw_handle(&self) -> lv2_raw::core::LV2Handle {
+        self.instance.raw().instance().handle()
+    }
 }
 
 impl HostedPlugin for Lv2Plugin {
@@ -133,5 +160,10 @@ impl HostedPlugin for Lv2Plugin {
 
     fn audio_output(&self, channel: usize) -> &[f32] {
         &self.output_buffers[channel][..self.frames_rendered]
+    }
+
+    fn set_control(&mut self, port_index: u32, value: f32) {
+        self.instance
+            .set_control_input(livi::PortIndex(port_index as usize), value);
     }
 }

@@ -1,0 +1,61 @@
+import { Button, ComboBox, GroupBox, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { AppState, AppLogic } from "globals.slint";
+
+export component SettingsTab inherits VerticalBox {
+    GroupBox {
+        title: "Audio Output";
+        ComboBox {
+            model: AppState.audio-devices;
+            current-index: AppState.selected-audio-index;
+            selected(value) => { AppLogic.select-audio-device(value); }
+        }
+    }
+
+    GroupBox {
+        title: "MIDI Input";
+        ComboBox {
+            model: AppState.midi-ports;
+            current-index: AppState.selected-midi-index;
+            selected(value) => { AppLogic.select-midi-port(value); }
+        }
+    }
+
+    GroupBox {
+        title: "Plugin Folders";
+        VerticalBox {
+            for folder in AppState.default-plugin-folders : Text {
+                text: folder;
+                color: gray;
+            }
+            for folder in AppState.extra-plugin-folders : HorizontalBox {
+                Text {
+                    text: folder;
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "Remove";
+                    clicked => { AppLogic.remove-plugin-folder(folder); }
+                }
+            }
+            HorizontalBox {
+                Button {
+                    text: "Add folder...";
+                    clicked => { AppLogic.add-plugin-folder(); }
+                }
+                Button {
+                    text: "Rescan";
+                    clicked => { AppLogic.rescan-plugins(); }
+                }
+            }
+        }
+    }
+
+    GroupBox {
+        title: "Discovered Plugins";
+        ListView {
+            for plugin in AppState.plugins : Text {
+                text: plugin.name;
+            }
+        }
+    }
+}

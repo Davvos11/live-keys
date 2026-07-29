@@ -1,0 +1,13 @@
+[package]
+name = "live-keys-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+live-keys-core = { path = "../core" }
+live-keys-lv2-host = { path = "../lv2-host" }
+cpal = "0.18"
+midir = "0.11"
+anyhow = "1"
+log = "0.4"
+dirs = "6"
