@@ -145,6 +145,7 @@ fn main() -> anyhow::Result<()> {
                         engine.borrow().loaded_plugin_name().unwrap_or_default().into(),
                     );
                     refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
+                    refresh_control_ports(&app, &engine.borrow());
                 }
                 Err(err) => {
                     log::error!("failed to load plugin '{uri}': {err:#}");
@@ -152,6 +153,7 @@ fn main() -> anyhow::Result<()> {
                     app.global::<AppState>().set_plugin_gui_supported(false);
                     app.global::<AppState>()
                         .set_plugin_gui_status(format!("load failed: {err}").into());
+                    app.global::<AppState>().set_control_ports(ModelRc::new(VecModel::from(Vec::new())));
                 }
             }
         });
@@ -222,6 +224,13 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    {
+        let engine = engine.clone();
+        logic.on_set_control_param(move |port_index, value| {
+            engine.borrow_mut().send_param_change(port_index as u32, value);
+        });
+    }
+
     let poll_timer = slint::Timer::default();
     {
         let app_weak = app.as_weak();
@@ -278,6 +287,21 @@ fn refresh_plugin_list(app: &AppWindow, engine: &Engine) {
         })
         .collect();
     app.global::<AppState>().set_plugins(ModelRc::new(VecModel::from(rows)));
+}
+
+fn refresh_control_ports(app: &AppWindow, engine: &Engine) {
+    let rows: Vec<ControlPortRow> = engine
+        .control_ports()
+        .iter()
+        .map(|port| ControlPortRow {
+            port_index: port.port_index as i32,
+            name: port.name.clone().into(),
+            min_value: port.min_value,
+            max_value: port.max_value,
+            default_value: port.default_value,
+        })
+        .collect();
+    app.global::<AppState>().set_control_ports(ModelRc::new(VecModel::from(rows)));
 }
 
 /// Recomputes whether "Open Plugin GUI" should be enabled (and why not if it

@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ListView, Slider } from "std-widgets.slint";
 import { AppState, AppLogic } from "globals.slint";
 
 export component LiveTab inherits VerticalBox {
@@ -17,6 +17,29 @@ export component LiveTab inherits VerticalBox {
             text: "Close Plugin GUI";
             enabled: AppState.plugin-gui-open;
             clicked => { AppLogic.close-plugin-gui(); }
+        }
+    }
+
+    if AppState.control-ports.length > 0 : Text {
+        text: "Parameters";
+        font-size: 18px;
+    }
+
+    ListView {
+        height: AppState.control-ports.length > 0 ? 200px : 0px;
+        for port in AppState.control-ports : HorizontalBox {
+            Text {
+                text: port.name;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            Slider {
+                width: 200px;
+                minimum: port.min-value;
+                maximum: port.max-value;
+                value: port.default-value;
+                changed(value) => { AppLogic.set-control-param(port.port-index, value); }
+            }
         }
     }
 

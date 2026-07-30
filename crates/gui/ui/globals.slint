@@ -3,6 +3,14 @@ export struct PluginRow {
     name: string,
 }
 
+export struct ControlPortRow {
+    port-index: int,
+    name: string,
+    min-value: float,
+    max-value: float,
+    default-value: float,
+}
+
 // State the host (Rust) pushes into the UI.
 export global AppState {
     in property <[string]> audio-devices;
@@ -24,6 +32,9 @@ export global AppState {
     // whatever the previous one's hosting thread is stuck doing.
     in property <bool> plugin-gui-open;
     in property <string> plugin-gui-status;
+    // Control-input ports of the currently loaded plugin — a parameter editor
+    // usable whether or not the plugin has its own GUI.
+    in property <[ControlPortRow]> control-ports;
 }
 
 // Actions the UI triggers that the host (Rust) handles.
@@ -36,4 +47,5 @@ export global AppLogic {
     callback load-plugin(string);
     callback open-plugin-gui();
     callback close-plugin-gui();
+    callback set-control-param(int, float);
 }

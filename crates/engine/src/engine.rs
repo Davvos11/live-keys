@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use live_keys_core::{HostedPlugin, MidiEvent, ParamChange, ParamProducer, midi_ring_buffer, param_ring_buffer};
-use live_keys_lv2_host::{Lv2Host, PluginInfo, livi, lv2_raw};
+use live_keys_lv2_host::{ControlPortInfo, Lv2Host, PluginInfo, livi, lv2_raw};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +20,11 @@ pub struct LoadedPluginMeta {
     pub plugin: livi::Plugin,
     pub features: Arc<livi::Features>,
     pub raw_handle: lv2_raw::core::LV2Handle,
+    /// Control-input port metadata, for a parameter-editor UI (macro knobs, a
+    /// fallback UI for GUI-less plugins, future MIDI binding). Captured at load
+    /// time alongside the rest of this struct since the running `Lv2Plugin`
+    /// itself isn't reachable once it's moved into the audio callback.
+    pub control_ports: Vec<ControlPortInfo>,
 }
 
 /// Owns the LV2 plugin world and the currently running audio/MIDI stream, if any.
@@ -58,6 +63,14 @@ impl Engine {
 
     pub fn loaded_plugin_meta(&self) -> Option<&LoadedPluginMeta> {
         self.loaded_plugin_meta.as_ref()
+    }
+
+    /// Control-input ports of the currently loaded plugin, or an empty slice if
+    /// nothing is loaded or it has none.
+    pub fn control_ports(&self) -> &[ControlPortInfo] {
+        self.loaded_plugin_meta
+            .as_ref()
+            .map_or(&[], |meta| meta.control_ports.as_slice())
     }
 
     /// Rebuilds the plugin world so it also searches `extra_dirs`, in addition to the
@@ -147,6 +160,7 @@ impl Engine {
             plugin: plugin.plugin().clone(),
             features: plugin.features().clone(),
             raw_handle: plugin.raw_handle(),
+            control_ports: plugin.control_ports(),
         };
         let plugin_channels = plugin.audio_output_count().max(1);
 

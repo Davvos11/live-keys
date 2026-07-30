@@ -45,7 +45,8 @@ cargo run --release -- --list-audio            # list logical audio output devic
 cargo run --release                            # run with defaults (Helm synth, first MIDI port, default output)
 cargo run --release -- --plugin-uri <uri> --midi-port <substr> --audio-device <substr>
 
-# GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (load + open plugin GUI)
+# GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (load, open plugin
+# GUI, edit control-port parameters)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
 # folders, last-loaded plugin URI), loaded on startup.
@@ -95,26 +96,49 @@ behind format-agnostic cores:
 
 - **`crates/lv2-host`** (`live-keys-lv2-host`) — wraps `livi` (built on `lilv`) for LV2 plugin
   discovery/hosting. `Lv2Host` owns the `livi::World` and the shared real-time `Features`
-  (URID map, block size bounds); `Lv2Host::instantiate` only accepts plugins with **zero audio
-  input ports** — pure instruments driven by MIDI only. Effects (plugins with audio inputs)
-  aren't supported yet; that needs a real audio graph, which doesn't exist yet either (see
-  Roadmap). `Lv2Plugin::process` pushes MIDI into a persistent `LV2AtomSequence` and renders into
-  persistent per-channel `Vec<f32>` buffers sized to `max_block_size` at instantiation — no
-  allocation happens on the audio thread. `Lv2Plugin` also exposes `plugin()`/`features()`/
-  `raw_handle()` — not used by audio processing itself, but needed by `live-keys-lv2-ui` to open
-  a plugin's own GUI against the *same* running instance (see below). Re-exports `livi`/`lv2_raw`
-  so downstream crates don't each need their own dependency on them.
+  (URID map, block size bounds). `Lv2Host::instantiate` accepts plugins with audio input ports
+  (e.g. effects, not just MIDI-only instruments) — see "Known simplifications" below for what
+  feeds those inputs, since there's no real audio graph yet (see Roadmap). It also accepts
+  plugins that write an atom-sequence or CV output port (e.g. an arpeggiator's MIDI-out, or a
+  synth's combined MIDI/UI-state port — seen on Surge XT and the LSP samplers) by wiring that
+  output to a discarded scratch buffer, same treatment as the always-allocated audio-output
+  buffers; nothing downstream consumes it yet (no MIDI-out or CV-out routing exists), but the
+  plugin runs without erroring instead of being rejected outright. `Lv2Plugin::process` pushes
+  MIDI into a persistent `LV2AtomSequence` — duplicated across however many atom-sequence input
+  ports the plugin actually declares (most effects have zero, unlike instruments) — and renders
+  into persistent per-channel `Vec<f32>` buffers sized to `max_block_size` at instantiation — no
+  allocation happens on the audio thread. `Lv2Plugin::control_ports()` returns
+  `ControlPortInfo` (name, index, default/min/max) for every control-input port, for a
+  parameter-editor UI; `min`/`max` always come back finite (an LV2 port with no declared range
+  falls back to a span around its default) since a UI can't usefully expose an infinite slider.
+  `Lv2Plugin` also exposes `plugin()`/`features()`/`raw_handle()` — not used by audio processing
+  itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
+  instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
+  own dependency on them.
 
 - **`crates/engine`** (`live-keys-engine`) — the real-time wiring (`cpal` + `midir` + an
   `Lv2Host`) shared by both the CLI and the GUI, so there's exactly one implementation instead of
   two drifting copies. `Engine::load_and_start` builds the MIDI and param ring buffers, connects
   MIDI input, and starts the `cpal` output stream, whose callback: drains MIDI → drains param
-  changes → `plugin.process(...)` → reads back per-channel output and interleaves it into cpal's
-  buffer. All buffers involved are pre-allocated before `stream.play()`, never inside the
-  callback. `Engine::rescan_plugins` rebuilds the whole `Lv2Host` with `LV2_PATH` extended by
+  changes → renders in one or more `plugin.process(...)` calls of at most `max_block_size` frames
+  each → reads back per-channel output and interleaves it into cpal's buffer. The callback's
+  `data` buffer can span more frames than `max_block_size` in one call — observed with a
+  Bluetooth output device, whose PipeWire-negotiated period can reach/exceed it — so the callback
+  loops over `data` in `max_block_size`-sized sub-chunks rather than assuming one `process` call
+  always covers the whole buffer; only the first sub-chunk gets that callback's freshly drained
+  MIDI, since no further real time has passed for the rest (consistent with the frame_offset
+  simplification below). Getting this wrong previously left the tail of any oversized callback
+  buffer unwritten — heard as short bursts of correct audio cutting to stale/silent output on
+  outputs with a large negotiated period. All buffers involved are pre-allocated before
+  `stream.play()`, never inside the callback. `Engine::rescan_plugins` rebuilds the whole
+  `Lv2Host` with `LV2_PATH` extended by
   extra folders (see `paths.rs`) — it stops any running plugin first, since an `Lv2Plugin`
   shouldn't outlive the `World` it came from. `Engine::send_param_change`/`loaded_plugin_meta`
   are the two hooks a plugin-GUI integration needs (see `live-keys-lv2-ui` below).
+  `Engine::control_ports()` (backed by `LoadedPluginMeta::control_ports`, captured at load time
+  same as the rest of that struct) exposes the loaded plugin's control-input port metadata for a
+  parameter-editor UI; `send_param_change` is the same queue used to apply edits from either that
+  UI or a plugin's own open GUI, so both sources of control-port writes go through one path.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
   (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI and
   the Settings tab in the GUI.
@@ -160,7 +184,12 @@ behind format-agnostic cores:
   via `TabWidget`/`Tab` from `std-widgets.slint`; `globals.slint` defines the host/UI interop
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
   per the project's Slint skill guidance. `config.rs` handles settings persistence (`dirs` +
-  `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`.
+  `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`. The Live tab's
+  parameter editor (`ControlPortRow`/`AppState.control-ports`/`AppLogic.set-control-param`) renders
+  one `Slider` per control-input port of the loaded plugin, populated from
+  `Engine::control_ports()` on load; dragging a slider calls `Engine::send_param_change` — the
+  same call a plugin's own GUI uses — so it works identically whether or not the plugin has its
+  own GUI, and is meant as the base for future macro knobs/MIDI-bound parameters.
 
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
   around `live-keys-engine`. Uses `clap` (derive) for CLI args.
@@ -205,6 +234,12 @@ each specific one).
   and would make routing plugin output through our own EQ/compression/mixing code
   impossible once the OS has already mixed it). This was decided explicitly when
   weighing out-of-process plugin isolation (see below) against this direction.
+  Plugins with audio input ports (effects, not just MIDI-only instruments) *are* loadable
+  today, ahead of that graph landing — `Lv2Host::instantiate`/`Lv2Plugin::process` just feed
+  those inputs (and any CV inputs) silence every block, since there's nothing upstream yet to
+  route real audio into them. This makes an effect's control ports usable (e.g. for the
+  parameter editor below) even though its audio processing itself currently has nothing to
+  act on.
 - LV2 UI hosting: no `ui:resize` protocol support (X11UI windows are sized once, from the
   widget's initial geometry, not kept in sync afterward); Gtk/Qt-wrapped UIs may work via suil's
   adapter modules but aren't the validated/primary target (bare X11UI and External UI are); only
