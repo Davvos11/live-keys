@@ -16,6 +16,12 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 const MAX_BLOCK_SIZE: usize = 8192;
 /// How often the plugin-GUI-closed check and param-change forwarding run.
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// Sentinel entry always shown first in the audio device list, mapping to
+/// `AppConfig.audio_device: None` — lets the OS pick the output device (e.g.
+/// PipeWire's current default sink) instead of a specific one pinned by name.
+/// Without this there's no way back to "no preference" once a specific device
+/// has been selected once.
+const SYSTEM_DEFAULT_LABEL: &str = "System Default";
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -38,8 +44,13 @@ fn main() -> anyhow::Result<()> {
     let app = AppWindow::new()?;
     let state = app.global::<AppState>();
 
-    let audio_devices = list_logical_output_devices().unwrap_or_default();
-    state.set_selected_audio_index(index_of(&audio_devices, config.borrow().audio_device.as_deref()));
+    let audio_devices: Vec<String> = std::iter::once(SYSTEM_DEFAULT_LABEL.to_string())
+        .chain(list_logical_output_devices().unwrap_or_default())
+        .collect();
+    state.set_selected_audio_index(match config.borrow().audio_device.as_deref() {
+        None => 0,
+        Some(selected) => index_of(&audio_devices, Some(selected)).max(0),
+    });
     state.set_audio_devices(string_model(audio_devices));
 
     let midi_ports = list_midi_ports().unwrap_or_default();
@@ -56,7 +67,11 @@ fn main() -> anyhow::Result<()> {
     {
         let config = config.clone();
         logic.on_select_audio_device(move |value| {
-            config.borrow_mut().audio_device = Some(value.to_string());
+            config.borrow_mut().audio_device = if value == SYSTEM_DEFAULT_LABEL {
+                None
+            } else {
+                Some(value.to_string())
+            };
             log_on_err(config::save(&config.borrow()));
         });
     }

@@ -199,8 +199,6 @@ impl Engine {
         let stream = output_device.build_output_stream(
             stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let frames = (data.len() / channels).min(max_block_size);
-
                 midi_batch.clear();
                 while let Ok(event) = midi_rx.pop() {
                     midi_batch.push(event);
@@ -208,11 +206,25 @@ impl Engine {
                 while let Ok(change) = param_rx.pop() {
                     plugin.set_control(change.port_index, change.value);
                 }
-                plugin.process(&midi_batch, frames);
 
-                for (frame_idx, frame) in data.chunks_mut(channels).enumerate().take(frames) {
-                    for (ch, sample) in frame.iter_mut().enumerate() {
-                        *sample = plugin.audio_output(ch % plugin_channels)[frame_idx];
+                // The backend can hand back a buffer spanning more frames than
+                // `max_block_size` in one callback (observed with a Bluetooth output
+                // device, whose negotiated period can reach/exceed it) — render it as
+                // multiple `process` calls instead of silently leaving the tail of
+                // `data` unwritten. Only the first sub-block gets this callback's
+                // freshly drained MIDI; later sub-blocks get none, since no further
+                // real time has passed for them (see "MIDI events always get
+                // frame_offset = 0" in CLAUDE.md).
+                let mut remaining_midi: &[MidiEvent] = &midi_batch;
+                for data_chunk in data.chunks_mut(channels * max_block_size) {
+                    let frames = data_chunk.len() / channels;
+                    plugin.process(remaining_midi, frames);
+                    remaining_midi = &[];
+
+                    for (frame_idx, frame) in data_chunk.chunks_mut(channels).enumerate() {
+                        for (ch, sample) in frame.iter_mut().enumerate() {
+                            *sample = plugin.audio_output(ch % plugin_channels)[frame_idx];
+                        }
                     }
                 }
             },
