@@ -28,6 +28,12 @@ fn main() -> anyhow::Result<()> {
             engine.borrow_mut().rescan_plugins(&extra_dirs);
         }
     }
+    // Param changes from a plugin's own open GUI arrive on its hosting thread;
+    // they're forwarded here and applied to the engine from this (the control)
+    // thread by the poll timer below, since only one thread may drive the audio
+    // engine's param queue.
+    let (param_tx, param_rx) = mpsc::channel::<(u32, f32)>();
+    let open_plugin_ui: Rc<RefCell<Option<PluginUiHandle>>> = Rc::new(RefCell::new(None));
 
     let app = AppWindow::new()?;
     let state = app.global::<AppState>();
@@ -43,7 +49,7 @@ fn main() -> anyhow::Result<()> {
     state.set_default_plugin_folders(string_model(default_plugin_search_paths()));
     refresh_plugin_folders(&app, &config.borrow());
     refresh_plugin_list(&app, &engine.borrow());
-    refresh_plugin_gui_state(&app, &engine.borrow());
+    refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
 
     let logic = app.global::<AppLogic>();
 
@@ -99,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app.as_weak();
         let config = config.clone();
         let engine = engine.clone();
+        let open_plugin_ui = open_plugin_ui.clone();
         logic.on_rescan_plugins(move || {
             let Some(app) = app_weak.upgrade() else {
                 return;
@@ -107,7 +114,7 @@ fn main() -> anyhow::Result<()> {
                 .borrow_mut()
                 .rescan_plugins(&config.borrow().extra_plugin_dirs);
             refresh_plugin_list(&app, &engine.borrow());
-            refresh_plugin_gui_state(&app, &engine.borrow());
+            refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
         });
     }
 
@@ -115,6 +122,7 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app.as_weak();
         let config = config.clone();
         let engine = engine.clone();
+        let open_plugin_ui = open_plugin_ui.clone();
         logic.on_load_plugin(move |uri| {
             let Some(app) = app_weak.upgrade() else {
                 return;
@@ -136,24 +144,18 @@ fn main() -> anyhow::Result<()> {
                     app.global::<AppState>().set_loaded_plugin_name(
                         engine.borrow().loaded_plugin_name().unwrap_or_default().into(),
                     );
-                    refresh_plugin_gui_state(&app, &engine.borrow());
+                    refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
                 }
                 Err(err) => {
                     log::error!("failed to load plugin '{uri}': {err:#}");
                     app.global::<AppState>().set_loaded_plugin_name("".into());
-                    app.global::<AppState>().set_plugin_gui_available(false);
+                    app.global::<AppState>().set_plugin_gui_supported(false);
                     app.global::<AppState>()
                         .set_plugin_gui_status(format!("load failed: {err}").into());
                 }
             }
         });
     }
-
-    // Param changes from a plugin's own open GUI arrive on the hosting thread; they're
-    // forwarded here and applied to the engine from this (the control) thread by the
-    // poll timer below, since only one thread may drive the audio engine's param queue.
-    let (param_tx, param_rx) = mpsc::channel::<(u32, f32)>();
-    let open_plugin_ui: Rc<RefCell<Option<PluginUiHandle>>> = Rc::new(RefCell::new(None));
 
     {
         let app_weak = app.as_weak();
@@ -184,7 +186,11 @@ fn main() -> anyhow::Result<()> {
                 }),
             };
             match launch_ui(request) {
-                Ok(handle) => *open_plugin_ui.borrow_mut() = Some(handle),
+                Ok(handle) => {
+                    *open_plugin_ui.borrow_mut() = Some(handle);
+                    drop(engine_ref);
+                    refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
+                }
                 Err(err) => {
                     log::error!("failed to open plugin GUI: {err:#}");
                     app.global::<AppState>()
@@ -194,10 +200,33 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    {
+        let app_weak = app.as_weak();
+        let engine = engine.clone();
+        let open_plugin_ui = open_plugin_ui.clone();
+        logic.on_close_plugin_gui(move || {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            // Best-effort signal in case the hosting thread is still responsive;
+            // either way, our own bookkeeping is cleared unconditionally below so
+            // the user can try a fresh session even if the previous one's plugin
+            // code has wedged and will never confirm closing itself (observed with
+            // Helm's own UI). The old thread, if genuinely stuck, is abandoned —
+            // it leaks until the app exits, which beats leaving the button
+            // permanently disabled.
+            if let Some(mut handle) = open_plugin_ui.borrow_mut().take() {
+                handle.request_close();
+            }
+            refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
+        });
+    }
+
     let poll_timer = slint::Timer::default();
     {
         let app_weak = app.as_weak();
         let engine = engine.clone();
+        let open_plugin_ui = open_plugin_ui.clone();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             while let Ok((port_index, value)) = param_rx.try_recv() {
                 engine.borrow_mut().send_param_change(port_index, value);
@@ -205,8 +234,9 @@ fn main() -> anyhow::Result<()> {
             let mut open_ui = open_plugin_ui.borrow_mut();
             if open_ui.as_ref().is_some_and(PluginUiHandle::is_closed) {
                 *open_ui = None;
+                drop(open_ui);
                 if let Some(app) = app_weak.upgrade() {
-                    refresh_plugin_gui_state(&app, &engine.borrow());
+                    refresh_plugin_gui_state(&app, &engine.borrow(), &open_plugin_ui);
                 }
             }
         });
@@ -250,19 +280,24 @@ fn refresh_plugin_list(app: &AppWindow, engine: &Engine) {
     app.global::<AppState>().set_plugins(ModelRc::new(VecModel::from(rows)));
 }
 
-/// Recomputes whether "Open Plugin GUI" should be enabled, and why not if it isn't,
-/// from whichever plugin (if any) is currently loaded.
-fn refresh_plugin_gui_state(app: &AppWindow, engine: &Engine) {
+/// Recomputes whether "Open Plugin GUI" should be enabled (and why not if it
+/// isn't), and whether a plugin GUI session is currently considered open.
+fn refresh_plugin_gui_state(
+    app: &AppWindow,
+    engine: &Engine,
+    open_plugin_ui: &RefCell<Option<PluginUiHandle>>,
+) {
     let state = app.global::<AppState>();
-    let (available, status) = match engine.loaded_plugin_meta() {
+    let (supported, status) = match engine.loaded_plugin_meta() {
         None => (false, "no plugin loaded"),
         Some(meta) => match best_supported_ui(&meta.plugin) {
             Some((_, UiKind::ExternalUi | UiKind::X11Ui)) => (true, ""),
             None => (false, "this plugin has no GUI"),
         },
     };
-    state.set_plugin_gui_available(available);
+    state.set_plugin_gui_supported(supported);
     state.set_plugin_gui_status(status.into());
+    state.set_plugin_gui_open(open_plugin_ui.borrow().is_some());
 }
 
 fn log_on_err(result: anyhow::Result<()>) {

@@ -52,7 +52,8 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let closed = Arc::new(AtomicBool::new(false));
     let closed_for_thread = closed.clone();
 
-    let join_handle = std::thread::Builder::new()
+    // Intentionally not kept/joined — see `PluginUiHandle`'s docs for why.
+    std::thread::Builder::new()
         .name("lv2-external-ui".to_string())
         .spawn(move || {
             if let Err(err) = run(
@@ -72,7 +73,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
         })
         .context("failed to spawn external UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, join_handle, closed))
+    Ok(PluginUiHandle::new(close_tx, closed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,7 +110,18 @@ fn run(
         data: instance_ptr.0,
     };
     let external_ui_host = LV2UIExternalUIHost {
-        ui_closed,
+        // SAFETY: `lv2_raw`'s binding types this field as `extern "C" fn(...) ->
+        // libc::c_void`, but `c_void` has no legally constructible value in Rust —
+        // it's a mistranscription of a true C `void`-returning function. Function
+        // pointers that differ only in a `void`/`()` return are ABI-compatible on
+        // every platform we target, so transmuting the *pointer* (never a value)
+        // bridges the two safely, without ever needing to "return" a `c_void`.
+        ui_closed: unsafe {
+            std::mem::transmute::<
+                extern "C" fn(LV2UIControllerRaw),
+                extern "C" fn(LV2UIControllerRaw) -> c_void,
+            >(ui_closed)
+        },
         plugin_human_id: std::ptr::null(),
     };
     let external_ui_host_feature = LV2Feature {
@@ -229,9 +241,13 @@ extern "C" fn write_function(
     (callbacks.port_write)(port_index, value);
 }
 
-extern "C" fn ui_closed(host: LV2UIControllerRaw) -> c_void {
+/// Called by the plugin's own UI (often from its own toolkit's thread, not our
+/// hosting thread) whenever the user closes its window — the normal, expected close
+/// path, not a rare corner case. Must not panic: it's invoked across an `extern "C"`
+/// boundary from arbitrary plugin code, and an unwind that tries to cross that
+/// boundary aborts the whole process rather than propagate.
+extern "C" fn ui_closed(host: LV2UIControllerRaw) {
     // SAFETY: same as write_function's controller.
     let callbacks = unsafe { &*(host as *const UiCallbacks) };
     callbacks.closed.store(true, Ordering::SeqCst);
-    unreachable!("LV2_External_UI_Host::ui_closed has no meaningful return value")
 }

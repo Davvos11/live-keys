@@ -34,6 +34,9 @@ this, not a code bug.
 ```shell
 cargo check --workspace                        # fast type-check across the whole workspace
 cargo build --release                          # LV2 hosting is real-time audio; always test in release
+# Note: the workspace's [profile.release] sets debug = true (keeps debug symbols in the
+# optimized binary). Negligible perf/disk cost, and needed for useful gdb backtraces
+# when diagnosing real-time-thread issues (e.g. a plugin's UI thread wedging).
 
 # CLI (live-keys)
 cargo run --release -- --list                  # list discovered LV2 instrument plugins (uri + name)
@@ -125,6 +128,16 @@ behind format-agnostic cores:
     `lv2ui_descriptor` + calling `show`/`run`/`hide`/`cleanup`. No window creation needed on our
     side. Requires the `instance-access` feature (the DSP instance's raw `LV2_Handle`, from
     `Lv2Plugin::raw_handle()`) — confirmed via Helm.
+    **Gotcha:** `lv2_raw`'s binding for `LV2_External_UI_Host::ui_closed` types it as
+    `extern "C" fn(...) -> libc::c_void` — impossible to honestly implement, since `c_void` has
+    no legally constructible value. This callback fires on the plugin's *own* thread the moment
+    the user closes its window (the normal path, not an edge case — confirmed via Helm's JUCE
+    wrapper calling it from its own timer thread), so panicking to satisfy the type checker
+    (e.g. `unreachable!()`) aborts the whole process the instant anyone closes a plugin window.
+    The fix: implement the real function with a plain `()` return, then `transmute` the
+    *function pointer* (never a value) to the field's declared type when building the struct —
+    function pointers differing only in a `void`/`()` return are ABI-compatible on every
+    platform this project targets.
   - **X11UI** (`x11_ui.rs`, `suil_sys.rs`) — a plain X11 window the host must create and embed
     the plugin's widget into. Uses hand-written bindings to `suil` (the reference LV2
     UI-wrapping library; no Rust crate exists, hence `suil_sys.rs` instead of a `suil-sys`
@@ -190,6 +203,26 @@ each specific one).
   widget's initial geometry, not kept in sync afterward); Gtk/Qt-wrapped UIs may work via suil's
   adapter modules but aren't the validated/primary target (bare X11UI and External UI are); only
   `ui:floatProtocol` (plain float control-port writes) is handled, not other port protocols.
+- `PluginUiHandle` never joins its hosting thread (see its doc comment in
+  `crates/lv2-ui-host/src/lib.rs`) — closing/reopening a plugin's GUI must never block the
+  caller (typically the GUI's main thread) on that plugin's own teardown code finishing.
+  Observed concretely with Helm: closing its window very soon after opening (before its JUCE
+  wrapper finishes initializing) can wedge its internal message pump inside our `run_fn` call —
+  the window goes permanently unresponsive/black and the hosting thread never returns from that
+  call. This is a bug in Helm's own JUCE-based UI wrapper, not something the host can reach in
+  or fix; the mitigation here is only that it no longer takes the rest of the app down with it.
+  A wedged thread like this can still make the *whole process* hang on exit later, if a
+  library's `atexit`/global-destructor logic tries to synchronize with it — not addressed here.
+- Because a plugin's own UI can wedge (see above) and — for External UI specifically — the host
+  has *no* channel to detect a closed window except the plugin itself calling `ui_closed`, a
+  wedged plugin can never report closed on its own. `AppState.plugin-gui-open` is therefore
+  tracked independently of that: the GUI's "Close Plugin GUI" button
+  (`on_close_plugin_gui` in `crates/gui/src/main.rs`) sends a best-effort close request and then
+  unconditionally clears the local `open_plugin_ui` state, regardless of whether the hosting
+  thread ever actually finishes. Confirmed via `/proc/<pid>/task/<tid>/stat` CPU-time snapshots
+  (frozen solid across multiple checks = genuinely stuck, not just slow) that a wedged hosting
+  thread does *not* block the GUI's own main thread (which keeps cycling normally) — the button
+  existing is purely to recover the ability to open a *fresh* session, since nothing else can.
 
 ## Plugin format roadmap
 

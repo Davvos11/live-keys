@@ -6,45 +6,47 @@ mod x11_ui;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::thread::JoinHandle;
 
 pub use discovery::{UiKind, best_supported_ui};
 
 /// A handle to a plugin's currently open GUI window, hosted on a dedicated
 /// background thread (never the audio thread, never the GUI's own event-loop
-/// thread). Dropping it closes the window and joins that thread.
+/// thread).
+///
+/// Deliberately never joins that thread. `closed` flips true as soon as the plugin
+/// itself reports its window closed (see `ui_closed`/the X11UI idle loop), which can
+/// be well before the hosting thread finishes its own teardown — a plugin's
+/// `cleanup()` may need to keep pumping its internal message loop a little longer,
+/// and occasionally (observed with Helm, intermittently, after interacting with its
+/// UI) that teardown stalls. Blocking the caller — typically the GUI's main thread,
+/// dropping the previous handle the moment it notices `is_closed()` so the user can
+/// reopen — on a `join()` here would freeze the whole GUI waiting for a plugin's own
+/// (buggy) cleanup code. Instead the hosting thread is left to finish, or hang, on
+/// its own; a hang leaks that one OS thread, which is a far better outcome than
+/// freezing the app.
 pub struct PluginUiHandle {
     close_tx: mpsc::Sender<()>,
-    join_handle: Option<JoinHandle<()>>,
     closed: Arc<AtomicBool>,
 }
 
 impl PluginUiHandle {
-    fn new(close_tx: mpsc::Sender<()>, join_handle: JoinHandle<()>, closed: Arc<AtomicBool>) -> Self {
-        Self {
-            close_tx,
-            join_handle: Some(join_handle),
-            closed,
-        }
+    fn new(close_tx: mpsc::Sender<()>, closed: Arc<AtomicBool>) -> Self {
+        Self { close_tx, closed }
     }
 
     /// True once the UI has closed, whether the user closed the window themselves
-    /// or [`Self::request_close`] was called.
+    /// or [`Self::request_close`] was called. Note this can be true slightly before
+    /// the hosting thread has finished tearing down (see the type's docs).
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
-    /// Asks the hosting thread to close the UI and waits for it to finish. A no-op
-    /// if already closed.
+    /// Asks the hosting thread to close the UI. Does not wait for it to finish —
+    /// see the type's docs for why. A no-op if already closed.
     pub fn request_close(&mut self) {
         // Fails only if the hosting thread already exited on its own (e.g. the user
         // already closed the window) — nothing to signal in that case.
         let _ = self.close_tx.send(());
-        if let Some(handle) = self.join_handle.take()
-            && let Err(panic) = handle.join()
-        {
-            log::error!("LV2 UI hosting thread panicked: {panic:?}");
-        }
     }
 }
 

@@ -103,7 +103,8 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let closed = Arc::new(AtomicBool::new(false));
     let closed_for_thread = closed.clone();
 
-    let join_handle = std::thread::Builder::new()
+    // Intentionally not kept/joined — see `PluginUiHandle`'s docs for why.
+    std::thread::Builder::new()
         .name("lv2-x11-ui".to_string())
         .spawn(move || {
             if let Err(err) = run(
@@ -126,7 +127,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
         })
         .context("failed to spawn X11 UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, join_handle, closed))
+    Ok(PluginUiHandle::new(close_tx, closed))
 }
 
 #[allow(clippy::too_many_arguments)]

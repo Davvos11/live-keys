@@ -15,7 +15,14 @@ export global AppState {
     in property <[string]> extra-plugin-folders;
     in property <[PluginRow]> plugins;
     in property <string> loaded-plugin-name;
-    in property <bool> plugin-gui-available;
+    // Whether the loaded plugin has any GUI this host can show at all.
+    in property <bool> plugin-gui-supported;
+    // Whether we currently believe a plugin GUI session is open. A plugin's own UI
+    // can wedge internally (observed with some External UI plugins) and never
+    // signal back that it closed — "Close Plugin GUI" lets the user force this
+    // back to false so they can at least try a fresh session, independent of
+    // whatever the previous one's hosting thread is stuck doing.
+    in property <bool> plugin-gui-open;
     in property <string> plugin-gui-status;
 }
 
@@ -28,4 +35,5 @@ export global AppLogic {
     callback rescan-plugins();
     callback load-plugin(string);
     callback open-plugin-gui();
+    callback close-plugin-gui();
 }

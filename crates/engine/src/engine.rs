@@ -78,11 +78,29 @@ impl Engine {
 
     /// Stops the running stream and MIDI connection, if any.
     pub fn stop(&mut self) {
-        self.stream = None;
-        self.midi_connection = None;
+        self.drop_stream_async();
         self.loaded_plugin_name = None;
         self.loaded_plugin_meta = None;
         self.param_tx = None;
+    }
+
+    /// Moves any currently running stream/MIDI connection to a throwaway thread for
+    /// teardown, rather than dropping them in place. `cpal`'s ALSA `Stream::drop()`
+    /// joins its own internal audio thread; if that thread is stuck for any reason
+    /// (observed after a previous session's plugin UI wedged internally — see
+    /// `live-keys-lv2-ui`'s docs), dropping in place would block the caller —
+    /// typically the GUI thread, e.g. when loading a new plugin — waiting on it
+    /// forever. A stuck old thread is abandoned (leaked until the app exits) rather
+    /// than allowed to freeze anything new.
+    fn drop_stream_async(&mut self) {
+        let stream = self.stream.take();
+        let midi_connection = self.midi_connection.take();
+        if stream.is_some() || midi_connection.is_some() {
+            std::thread::spawn(move || {
+                drop(stream);
+                drop(midi_connection);
+            });
+        }
     }
 
     /// Requests that a control-port input on the currently loaded plugin be set to
@@ -189,6 +207,9 @@ impl Engine {
         )?;
         stream.play()?;
 
+        // Tear down any previously running stream/connection asynchronously — see
+        // `drop_stream_async`'s docs for why this must never block here.
+        self.drop_stream_async();
         self.stream = Some(stream);
         self.midi_connection = Some(midi_connection);
         self.loaded_plugin_name = Some(plugin_name);

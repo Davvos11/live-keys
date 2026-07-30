@@ -6,6 +6,11 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 
+# Keep debug symbols in release builds — negligible perf/disk cost, and needed for
+# useful backtraces/gdb output when diagnosing real-time-thread issues like this one.
+[profile.release]
+debug = true
+
 [package]
 name = "live-keys"
 version.workspace = true

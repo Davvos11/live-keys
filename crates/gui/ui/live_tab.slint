@@ -7,10 +7,17 @@ export component LiveTab inherits VerticalBox {
         font-size: 18px;
     }
 
-    Button {
-        text: AppState.plugin-gui-available ? "Open Plugin GUI" : "Open Plugin GUI (\{AppState.plugin-gui-status})";
-        enabled: AppState.plugin-gui-available;
-        clicked => { AppLogic.open-plugin-gui(); }
+    HorizontalBox {
+        Button {
+            text: AppState.plugin-gui-supported ? "Open Plugin GUI" : "Open Plugin GUI (\{AppState.plugin-gui-status})";
+            enabled: AppState.plugin-gui-supported && !AppState.plugin-gui-open;
+            clicked => { AppLogic.open-plugin-gui(); }
+        }
+        Button {
+            text: "Close Plugin GUI";
+            enabled: AppState.plugin-gui-open;
+            clicked => { AppLogic.close-plugin-gui(); }
+        }
     }
 
     ListView {
