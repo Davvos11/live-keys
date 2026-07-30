@@ -198,7 +198,13 @@ each specific one).
   share the card's display name) — these are genuinely different logical PCM configs, not a
   filter bug; cpal's `Display` just doesn't expose the distinguishing driver id.
 - Only one plugin can be hosted (and one plugin GUI open) at a time; there's no audio
-  graph/rack/chaining yet.
+  graph/rack/chaining yet. When that lands, it's expected to be **in-process**: every
+  loaded plugin's audio flows into one mixing/FX stage in our own code, with only the
+  final stereo mix reaching `cpal` — not one independent OS audio stream per plugin
+  (which would only work via OS-level mixing like PipeWire/JACK, isn't cross-platform,
+  and would make routing plugin output through our own EQ/compression/mixing code
+  impossible once the OS has already mixed it). This was decided explicitly when
+  weighing out-of-process plugin isolation (see below) against this direction.
 - LV2 UI hosting: no `ui:resize` protocol support (X11UI windows are sized once, from the
   widget's initial geometry, not kept in sync afterward); Gtk/Qt-wrapped UIs may work via suil's
   adapter modules but aren't the validated/primary target (bare X11UI and External UI are); only
@@ -206,13 +212,29 @@ each specific one).
 - `PluginUiHandle` never joins its hosting thread (see its doc comment in
   `crates/lv2-ui-host/src/lib.rs`) — closing/reopening a plugin's GUI must never block the
   caller (typically the GUI's main thread) on that plugin's own teardown code finishing.
-  Observed concretely with Helm: closing its window very soon after opening (before its JUCE
-  wrapper finishes initializing) can wedge its internal message pump inside our `run_fn` call —
-  the window goes permanently unresponsive/black and the hosting thread never returns from that
-  call. This is a bug in Helm's own JUCE-based UI wrapper, not something the host can reach in
-  or fix; the mitigation here is only that it no longer takes the rest of the app down with it.
-  A wedged thread like this can still make the *whole process* hang on exit later, if a
-  library's `atexit`/global-destructor logic tries to synchronize with it — not addressed here.
+  Observed concretely with Helm's LV2 build: closing its window very soon after opening
+  (before its JUCE wrapper finishes initializing) can wedge its internal message pump inside
+  our `run_fn` call — the window goes permanently unresponsive/black and the hosting thread
+  never returns from that call. This is a bug in Helm's own JUCE-based UI wrapper, not
+  something the host can reach in or fix; the mitigation here is only that it no longer takes
+  the rest of the app down with it. A wedged thread like this can still make the *whole
+  process* hang on exit later, if a library's `atexit`/global-destructor logic tries to
+  synchronize with it — not addressed here.
+- **Accepted limitation, decided against fixing further**: JUCE keeps one `MessageManager`
+  lock shared by every instance of a JUCE plugin loaded from the same `.so` in a process, not
+  per-instance. Once Helm's UI wedges (see above), that shared lock is poisoned — *any* later
+  attempt to instantiate Helm again (even fresh DSP with no UI involved) hangs inside
+  `JuceLv2Wrapper`'s constructor for the rest of the process's life; only restarting the whole
+  app recovers it. No other loaded plugin is affected (each has its own `.so`/lock), and audio
+  already playing is unaffected. The obvious full fix — one OS process per loaded plugin, with
+  `SIGKILL` as an unconditional last resort (REAPER ships exactly this for crash isolation) —
+  was designed in detail and then explicitly rejected: it requires each plugin to own an
+  independent OS audio stream (mixed only via the OS/audio server), which conflicts with the
+  in-process mixing/FX direction above, isn't cross-platform, and is disproportionate effort
+  for what may be specific to this one LV2 port (the VST3 build of Helm, once that phase
+  exists, is a plausible workaround). Don't re-propose out-of-process isolation reactively
+  against a single plugin bug — if it's revisited, design it together with the in-process
+  mixing engine above, not standalone.
 - Because a plugin's own UI can wedge (see above) and — for External UI specifically — the host
   has *no* channel to detect a closed window except the plugin itself calling `ui_closed`, a
   wedged plugin can never report closed on its own. `AppState.plugin-gui-open` is therefore
