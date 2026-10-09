@@ -14,10 +14,22 @@ const STANDARD_LV2_PATHS: &[&str] = &[
     "/usr/local/lib/x86_64-linux-gnu/lv2",
 ];
 
+/// Every folder searched for plugins when no extra folders have been added: LV2's,
+/// then VST3's. Extra folders are searched for both formats.
+pub fn default_plugin_search_paths() -> Vec<String> {
+    let mut paths = default_lv2_search_paths();
+    paths.extend(
+        live_keys_vst3_host::default_search_paths()
+            .iter()
+            .map(|path| path.display().to_string()),
+    );
+    paths
+}
+
 /// The LV2 plugin search paths in effect when no extra folders have been added: the
 /// process's own `LV2_PATH` if already set (respects however the system/user already
 /// configured it), otherwise [`STANDARD_LV2_PATHS`].
-pub fn default_plugin_search_paths() -> Vec<String> {
+fn default_lv2_search_paths() -> Vec<String> {
     if let Ok(existing) = std::env::var("LV2_PATH") {
         existing.split(':').map(str::to_string).collect()
     } else {
@@ -35,7 +47,7 @@ fn expand_tilde(path: &str) -> String {
 }
 
 pub(crate) fn build_lv2_path(extra_dirs: &[PathBuf]) -> String {
-    let mut paths = default_plugin_search_paths();
+    let mut paths = default_lv2_search_paths();
     paths.extend(extra_dirs.iter().map(|p| p.display().to_string()));
     paths.join(":")
 }

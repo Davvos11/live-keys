@@ -1,0 +1,113 @@
+import { Palette } from "std-widgets.slint";
+
+component Handle inherits Rectangle {
+    in property <bool> active;
+
+    width: 18px;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: Palette.background;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    Rectangle {
+        width: root.active ? 12px : 10px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Palette.accent-background;
+        animate width { duration: 100ms; }
+    }
+}
+
+// A slider with two handles selecting an inclusive integer range. Pressing
+// anywhere grabs the nearer handle; dragging one handle past the other hands the
+// drag over to it, so `low <= high` always holds.
+export component RangeSlider inherits Rectangle {
+    in property <int> minimum: 0;
+    in property <int> maximum: 127;
+    in-out property <int> low: root.minimum;
+    in-out property <int> high: root.maximum;
+    // Fired on every change made by the user, after `low`/`high` are updated.
+    callback changed(/* low */ int, /* high */ int);
+
+    private property <length> handle-size: 18px;
+    private property <length> track-width: root.width - root.handle-size;
+    private property <length> track-y: (root.height - 4px) / 2;
+    // Which handle the current drag moves.
+    private property <bool> dragging-high;
+
+    function x-for(value: int) -> length {
+        return root.track-width * (value - root.minimum) / max(1, root.maximum - root.minimum);
+    }
+
+    function value-at(x: length) -> int {
+        return Math.clamp(Math.round(root.minimum + (x - root.handle-size / 2) / root.track-width * (root.maximum - root.minimum)), root.minimum, root.maximum);
+    }
+
+    function drag-to(x: length) {
+        let value = root.value-at(x);
+        if (root.dragging-high && value < root.low) {
+            root.dragging-high = false;
+        } else if (!root.dragging-high && value > root.high) {
+            root.dragging-high = true;
+        }
+        if (root.dragging-high) {
+            root.high = value;
+        } else {
+            root.low = value;
+        }
+        root.changed(root.low, root.high);
+    }
+
+    min-width: 60px;
+    min-height: 28px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+
+    // Track
+    Rectangle {
+        x: root.handle-size / 2;
+        y: root.track-y;
+        width: root.track-width;
+        height: 4px;
+        border-radius: 2px;
+        background: Palette.border;
+    }
+
+    // Selected range
+    Rectangle {
+        x: root.handle-size / 2 + root.x-for(root.low);
+        y: root.track-y;
+        width: root.x-for(root.high) - root.x-for(root.low);
+        height: 4px;
+        border-radius: 2px;
+        background: Palette.accent-background;
+    }
+
+    Handle {
+        x: root.x-for(root.low);
+        active: touch.pressed && !root.dragging-high;
+    }
+
+    Handle {
+        x: root.x-for(root.high);
+        active: touch.pressed && root.dragging-high;
+    }
+
+    touch := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                let value = root.value-at(self.mouse-x);
+                // When both handles sit on the same value, the direction of the
+                // first drag picks one (see `drag-to`).
+                root.dragging-high = Math.abs(value - root.high) < Math.abs(value - root.low) || (root.low == root.high && value >= root.high);
+                root.drag-to(self.mouse-x);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.drag-to(self.mouse-x);
+            }
+        }
+    }
+}

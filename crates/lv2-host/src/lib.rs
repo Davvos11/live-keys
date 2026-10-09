@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use live_keys_core::{HostedPlugin, MidiEvent};
+use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginFormat, PluginInfo};
 use livi::event::LV2AtomSequence;
 
 pub use livi;
@@ -11,29 +11,6 @@ pub use lv2_raw;
 const MIDI_EVENT_BUFFER_BYTES: usize = 4096;
 /// Upper bound on the size of a single MIDI message written into the atom sequence.
 const MAX_MIDI_MESSAGE_BYTES: usize = 32;
-
-/// Metadata for a discovered LV2 plugin, used to populate a plugin picker before
-/// instantiating one.
-#[derive(Debug, Clone)]
-pub struct PluginInfo {
-    pub uri: String,
-    pub name: String,
-    pub is_instrument: bool,
-}
-
-/// Metadata for one control-input port, used to populate a parameter editor UI
-/// (macro knobs, a fallback UI for GUI-less plugins, future MIDI binding).
-/// `min_value`/`max_value` are always finite: an LV2 port that declares no bound
-/// falls back to a range around `default_value` since a UI can't usefully expose
-/// an infinite slider.
-#[derive(Debug, Clone)]
-pub struct ControlPortInfo {
-    pub port_index: u32,
-    pub name: String,
-    pub default_value: f32,
-    pub min_value: f32,
-    pub max_value: f32,
-}
 
 /// Owns the LV2 plugin world and the real-time features (URID map, block size) that
 /// every plugin instantiated from it shares.
@@ -63,8 +40,9 @@ impl Lv2Host {
         self.world
             .iter_plugins()
             .map(|p| PluginInfo {
-                uri: p.uri(),
+                id: p.uri(),
                 name: p.name(),
+                format: PluginFormat::Lv2,
                 is_instrument: p.is_instrument(),
             })
             .collect()
@@ -170,9 +148,11 @@ impl Lv2Plugin {
         self.instance.raw().instance().handle()
     }
 
-    /// Metadata for every control-input port, for a parameter-editor UI. Order
-    /// matches the plugin's own port order, not necessarily display priority.
-    pub fn control_ports(&self) -> Vec<ControlPortInfo> {
+    /// Metadata for every control-input port, for a parameter-editor UI, with the
+    /// port index as the param ID. Order matches the plugin's own port order, not
+    /// necessarily display priority. An LV2 port that declares no bound gets a
+    /// range around its default.
+    pub fn params(&self) -> Vec<ParamInfo> {
         self.plugin
             .ports_with_type(livi::PortType::ControlInput)
             .map(|port| {
@@ -184,8 +164,8 @@ impl Lv2Plugin {
                 } else {
                     min_value + 1.0
                 });
-                ControlPortInfo {
-                    port_index: port.index.0 as u32,
+                ParamInfo {
+                    id: port.index.0 as u32,
                     name: port.name,
                     default_value: port.default_value,
                     min_value,
@@ -241,8 +221,8 @@ impl HostedPlugin for Lv2Plugin {
         &self.output_buffers[channel][..self.frames_rendered]
     }
 
-    fn set_control(&mut self, port_index: u32, value: f32) {
+    fn set_param(&mut self, id: u32, value: f32) {
         self.instance
-            .set_control_input(livi::PortIndex(port_index as usize), value);
+            .set_control_input(livi::PortIndex(id as usize), value);
     }
 }

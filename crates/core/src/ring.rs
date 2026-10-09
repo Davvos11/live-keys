@@ -1,5 +1,7 @@
 use crate::{MidiEvent, ParamChange};
 
+pub use rtrb::{Consumer, Producer, PushError};
+
 /// Creates a lock-free, single-producer/single-consumer ring buffer of `capacity`
 /// slots. Used to move data from a control thread (MIDI input, a plugin's own GUI)
 /// into the real-time audio thread without allocating or locking there.

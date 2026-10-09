@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 live-keys-engine = { path = "../engine" }
 live-keys-lv2-ui = { path = "../lv2-ui-host" }
+live-keys-vst3-ui = { path = "../vst3-ui-host" }
 slint = "1.17"
 anyhow = "1"
 log = "0.4"

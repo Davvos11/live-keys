@@ -13,8 +13,8 @@ that same piece of work, not as a follow-up. Treat a stale CLAUDE.md as a bug in
 
 A cross-platform audio plugin host in Rust, optimized for live performance driven by a MIDI
 keyboard — an "instrument rack" for a live set, not a DAW/timeline. Primary target is Linux,
-with Windows/macOS as secondary goals. LV2 is the only hosted plugin format so far (see "Plugin
-format roadmap" below); a Slint GUI now exists alongside the original headless CLI.
+with Windows/macOS as secondary goals. LV2 and VST3 are the hosted plugin formats so far (see
+"Plugin format roadmap" below); a Slint GUI now exists alongside the original headless CLI.
 
 ## Dev dependencies
 
@@ -27,33 +27,46 @@ sudo apt install liblilv-dev lv2-dev libsuil-dev
 
 Without these, `cargo check`/`cargo build` fails at a build script (`lilv-sys`'s or
 `live-keys-lv2-ui`'s) with a `pkg-config` error, not a Rust compile error — if you see that, it's
-this, not a code bug.
+this, not a code bug. VST3 needs no system packages: the `vst3` crate ships pre-generated
+bindings (no Steinberg SDK at build time), and the editor host only needs `x11rb` + `libc`.
 
 ## Common commands
 
 ```shell
 cargo check --workspace                        # fast type-check across the whole workspace
-cargo build --release                          # LV2 hosting is real-time audio; always test in release
+cargo build --release                          # plugin hosting is real-time audio; always test in release
 # Note: the workspace's [profile.release] sets debug = true (keeps debug symbols in the
 # optimized binary). Negligible perf/disk cost, and needed for useful gdb backtraces
 # when diagnosing real-time-thread issues (e.g. a plugin's UI thread wedging).
 
 # CLI (live-keys)
-cargo run --release -- --list                  # list discovered LV2 instrument plugins (uri + name)
+cargo run --release -- --list                  # list discovered instrument plugins (id, format, name)
 cargo run --release -- --list-midi             # list MIDI input port names
 cargo run --release -- --list-audio            # list logical audio output devices
 cargo run --release                            # run with defaults (Helm synth, first MIDI port, default output)
-cargo run --release -- --plugin-uri <uri> --midi-port <substr> --audio-device <substr>
+cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr>
+# <id> as printed by --list: an LV2 URI, or `vst3:` + class ID. `--plugin-uri` is an alias.
 
-# GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (load, open plugin
-# GUI, edit control-port parameters)
+# GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (3 side-by-side rack
+# slots, each: load/unload a plugin, open its GUI, MIDI channel/note-range/velocity-range
+# filter, volume fader, edit its control-port parameters)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
-# folders, last-loaded plugin URI), loaded on startup.
+# folders, and per slot: last-loaded plugin id, MIDI filter, volume), loaded on startup.
+# Slot plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
 cargo run -p live-keys-lv2-ui --example test_surge   # X11UI path (needs Surge XT installed)
+
+# Manual VST3 smoke tests (not part of the app)
+cargo run -p live-keys-vst3-host --example smoke --release   # scan, then render a chord offline
+                                                             # through every instrument found
+SMOKE_WAIT_SECS=10 cargo run -p live-keys-vst3-host --example smoke --release
+  # ^ first processes silence at real-time pace for 10 s — sample-based plugins (e.g. HISE ones)
+  #   only finish loading while they see `process` running, and render silence until then
+cargo run -p live-keys-vst3-ui --example open_editor --release -- "surge xt" 10
+  # opens a VST3 plugin's editor (name substring, exact match preferred) for N seconds
 
 cargo test -p live-keys-core                   # only crate with meaningful unit tests today
 ```
@@ -74,25 +87,39 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with five crates, isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with seven crates, isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
   - `MidiEvent` (`src/midi.rs`) — fixed-size (3-byte) MIDI channel-voice message + frame offset.
     Fixed size is deliberate: it has to move through a lock-free ring buffer without allocation,
     so sysex/variable-length messages are dropped at `MidiEvent::from_raw`.
-  - `ParamChange` (`src/param.rs`) — a control-port write request (`port_index` + `value`),
-    carried the same way as `MidiEvent`. This is how a plugin's own open GUI (turning a knob, on
-    its own hosting thread) reaches the audio thread.
+  - `ParamChange` (`src/param.rs`) — a parameter write request (`param_id` + `value`), carried
+    the same way as `MidiEvent`. This is how a parameter slider or a plugin's own open GUI
+    (turning a knob) reaches the audio thread.
   - `HostedPlugin` trait (`src/plugin.rs`) — the format-agnostic plugin abstraction:
     `process(midi_in, frames)` renders into the plugin's own internal buffers, then
     `audio_output(channel)` reads the result back. This split (render, then read) is intentional
     — it lets adapters hand real-time-safe *iterators* to their underlying plugin API instead of
-    materializing a `Vec<&mut [f32]>`/slice-of-slices on every audio callback. `set_control`
-    applies one `ParamChange` to a control-port input.
+    materializing a `Vec<&mut [f32]>`/slice-of-slices on every audio callback. `set_param`
+    applies one `ParamChange`.
+  - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`),
+    `PluginInfo` (`id`, name, format, `is_instrument` — `id` is unique across formats: an LV2
+    URI, or `vst3:` + the VST3 class ID in hex), and `ParamInfo` (`id`, name, default/min/max).
+    A `ParamInfo`'s id and values are in the format's own terms — an LV2 control-input port
+    index and its real range, or a VST3 `ParamID` and its normalized `0.0..=1.0` — so the
+    generic parameter editor needs no per-format logic.
   - `ring_buffer<T>()` (`src/ring.rs`) — generic thin wrapper over `rtrb::RingBuffer` (SPSC,
     lock-free); `midi_ring_buffer()`/`param_ring_buffer()` are the `MidiEvent`/`ParamChange`
     instantiations actually used.
+  - `MidiFilter`/`MidiRouter` (`src/filter.rs`) — a slot's keyboard zone (channel or omni,
+    inclusive note range, inclusive velocity range) and the fixed-size, allocation-free router
+    that applies it on the audio thread. **Invariant:** note-offs are routed by tracking, not
+    by the filter — the router keeps a `[u128; 16]` bitset of the (channel, note) pairs it
+    passed note-ons for, and a note-off passes iff its note-on did. So changing a filter while
+    keys are held never strands a note, and a note-off meant for another slot's zone never
+    cuts this slot's voice. Velocity applies only to note-ons; poly aftertouch follows held
+    notes; CCs/pitch bend/program change only check the channel. Unit-tested.
 
 - **`crates/lv2-host`** (`live-keys-lv2-host`) — wraps `livi` (built on `lilv`) for LV2 plugin
   discovery/hosting. `Lv2Host` owns the `livi::World` and the shared real-time `Features`
@@ -107,21 +134,91 @@ behind format-agnostic cores:
   MIDI into a persistent `LV2AtomSequence` — duplicated across however many atom-sequence input
   ports the plugin actually declares (most effects have zero, unlike instruments) — and renders
   into persistent per-channel `Vec<f32>` buffers sized to `max_block_size` at instantiation — no
-  allocation happens on the audio thread. `Lv2Plugin::control_ports()` returns
-  `ControlPortInfo` (name, index, default/min/max) for every control-input port, for a
-  parameter-editor UI; `min`/`max` always come back finite (an LV2 port with no declared range
+  allocation happens on the audio thread. `Lv2Plugin::params()` returns a `ParamInfo` (port
+  index as id) for every control-input port, for a parameter-editor UI; `min`/`max` always come
+  back finite (an LV2 port with no declared range
   falls back to a span around its default) since a UI can't usefully expose an infinite slider.
   `Lv2Plugin` also exposes `plugin()`/`features()`/`raw_handle()` — not used by audio processing
   itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
   instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
   own dependency on them.
 
+- **`crates/vst3-host`** (`live-keys-vst3-host`) — VST3 hosting on the MIT-licensed `vst3`
+  bindings crate (COM smart pointers `ComPtr`/`ComWrapper` from `com-scrape-types`; all calls
+  `unsafe`). Modules:
+  - `module.rs` — finds `.vst3` bundles (`default_search_paths()`: `~/.vst3`, `/usr/lib/vst3`,
+    `/usr/local/lib/vst3`, plus extra folders; walks a few levels deep), resolves
+    `<name>.vst3/Contents/<arch>-linux/<name>.so`, `dlopen`s it, calls `ModuleEntry(handle)` and
+    `GetPluginFactory`, and lists the factory's "Audio Module Class" classes (instrument iff
+    `PClassInfo2::subCategories` contains `Instrument`). **Modules are loaded once per process
+    and never unloaded** (`ModuleExit` is never called; a global cache keyed by path) — JUCE and
+    similar frameworks keep process-wide state that doesn't survive unload/reload, and every
+    rescan would otherwise do exactly that. Scanning has to load every module (VST3 has no
+    metadata-only discovery), so a plugin that crashes on load crashes the scan.
+  - `com.rs` — host-side COM objects implemented in Rust: `HostApplication` (the `initialize`
+    context), `ComponentHandler` (receives `performEdit` from the plugin's editor and forwards
+    it to a settable `EditCallback`), and the per-block `EventList`/`ParameterChanges`/
+    `ParamValueQueue` — fixed-capacity, pre-allocated, never reallocating, using
+    `UnsafeCell`/`Cell` with `unsafe impl Send/Sync` justified by only ever being touched by the
+    thread running `process`. Every parameter change lands at sample offset 0 (no
+    sample-accurate source exists), so each queue holds a single point; a later change in the
+    same block overwrites it. Plus `MemoryStream` (`IBStream`) for the load-time
+    `component.getState` → `controller.setComponentState` sync.
+  - `plugin.rs` — `instantiate` creates and initializes the component, gets the edit controller
+    (same object via `queryInterface`, or a separate class via `getControllerClassId`, then
+    connected over `IConnectionPoint`), syncs state, installs the component handler, activates
+    the main audio in/out and event-in buses, and sets up 32-bit realtime processing. The result
+    is split in two halves sharing an `Arc<Instance>` whose `Drop` disconnects and `terminate`s
+    once neither half is left: **`Vst3Plugin`** (the `HostedPlugin`, moved to the audio thread;
+    `unsafe impl Send`; its `Drop` switches processing/activation off) and **`Vst3Controller`**
+    (main thread only, per the VST3 threading rules: `params()`, `set_param_normalized` to keep
+    the plugin's editor in sync with host-side edits, `set_edit_callback`, `edit_controller()`
+    for creating the editor). MIDI translation in `Vst3Plugin::process`: note on/off and poly
+    pressure become VST3 events; CCs, channel pressure and pitch bend become parameter changes
+    via the plugin's `IMidiMapping` (looked up once at load into a 16×130 table) — VST3 has no
+    CC events, and JUCE plugins rely on this for sustain pedal etc. `Vst3Controller::params()`
+    leaves out hidden/read-only parameters **and every `IMidiMapping` target**: JUCE plugins
+    expose 2080 per-channel MIDI-CC stand-in parameters without flagging them hidden (Surge XT:
+    2855 parameters → 775 real ones).
+  `Vst3Host` (`lib.rs`) owns one scan's results and instantiates by `PluginInfo::id`.
+
+- **`crates/vst3-ui-host`** (`live-keys-vst3-ui`) — hosts a VST3 plugin's own editor
+  (`IPlugView`, platform type `X11EmbedWindowID`) in an `x11rb`-created top-level window. Unlike
+  the LV2 UI host, it **runs on the main (GUI) thread**, not a thread of its own: the VST3
+  threading rules bind the editor, like the edit controller, to the thread the plugin was
+  created on. `Vst3Editor` does no work by itself — the host calls `Vst3Editor::idle()` every
+  poll tick (~16 ms), which pumps the window's X11 events (`WM_DELETE_WINDOW` → close;
+  `ConfigureNotify` → `checkSizeConstraint`/`onSize` when the view `canResize`) and everything
+  the plugin registered with the host's run loop. That run loop is the same Rust COM object as
+  the `IPlugFrame` (`PlugFrame` implements both `IPlugFrame` and `Steinberg::Linux::IRunLoop`,
+  since plugins — JUCE included — find the run loop by `queryInterface` on their frame): it
+  records registered fds and timers and services them non-blockingly in `idle()` (`poll` with
+  zero timeout; due timers fire once, missed ticks skipped). Handler lists are snapshotted
+  before dispatch since callbacks may (un)register re-entrantly. `resizeView` from the plugin
+  resizes the window, then calls `onSize`. Non-resizable editors get min=max WM size hints.
+  Confirmed with Surge XT (JUCE) and OT P1ANO S (HISE/JUCE).
+
 - **`crates/engine`** (`live-keys-engine`) — the real-time wiring (`cpal` + `midir` + an
-  `Lv2Host`) shared by both the CLI and the GUI, so there's exactly one implementation instead of
-  two drifting copies. `Engine::load_and_start` builds the MIDI and param ring buffers, connects
-  MIDI input, and starts the `cpal` output stream, whose callback: drains MIDI → drains param
-  changes → renders in one or more `plugin.process(...)` calls of at most `max_block_size` frames
-  each → reads back per-channel output and interleaves it into cpal's buffer. The callback's
+  `Lv2Host` + a `Vst3Host`) shared by both the CLI and the GUI, so there's exactly one implementation instead of
+  two drifting copies. It's a fixed rack of `SLOT_COUNT` (3) plugin slots sharing one output
+  stream: `Engine::start` builds the MIDI/command/retired ring buffers, connects MIDI input, and
+  starts the `cpal` output stream (re-instantiating any already-loaded slots against it, since
+  the sample rate may change — the GUI uses this when the device selection changes);
+  `load_into_slot`/`unload_slot` then swap plugins in and out of the *running* callback without
+  restarting it. The callback: drains rack commands (one `RackCommand` queue carrying plugin
+  swaps, per-slot param changes, filter changes and gain changes, so e.g. a param change queued
+  for a slot's old plugin can never land on its replacement) → drains MIDI and runs it through
+  each loaded slot's `MidiRouter` into that slot's own pre-allocated MIDI batch → per sub-chunk,
+  zeroes the output and, for every loaded slot, renders a `plugin.process(...)` call of at most
+  `max_block_size` frames and *sums* its per-channel output, times the slot's gain, into cpal's
+  interleaved buffer. Gain changes ramp linearly across one block (from the previous gain to
+  the new target) so fader moves don't click. Per-slot `SlotSettings` (filter + linear gain,
+  set via `set_slot_filter`/`set_slot_gain`) belong to the slot, not the plugin: the engine
+  keeps them even while stopped or empty and seeds each new stream with them. A plugin
+  swapped out of the rack is never dropped on the audio thread — it's pushed onto a "retired"
+  ring buffer back to the control thread, which drops it in `Engine::collect_retired` (called on
+  every load/unload and from the GUI's poll timer); if that queue is ever full the plugin is
+  leaked rather than torn down in the callback. The callback's
   `data` buffer can span more frames than `max_block_size` in one call — observed with a
   Bluetooth output device, whose PipeWire-negotiated period can reach/exceed it — so the callback
   loops over `data` in `max_block_size`-sized sub-chunks rather than assuming one `process` call
@@ -130,21 +227,27 @@ behind format-agnostic cores:
   simplification below). Getting this wrong previously left the tail of any oversized callback
   buffer unwritten — heard as short bursts of correct audio cutting to stale/silent output on
   outputs with a large negotiated period. All buffers involved are pre-allocated before
-  `stream.play()`, never inside the callback. `Engine::rescan_plugins` rebuilds the whole
-  `Lv2Host` with `LV2_PATH` extended by
-  extra folders (see `paths.rs`) — it stops any running plugin first, since an `Lv2Plugin`
-  shouldn't outlive the `World` it came from. `Engine::send_param_change`/`loaded_plugin_meta`
-  are the two hooks a plugin-GUI integration needs (see `live-keys-lv2-ui` below).
-  `Engine::control_ports()` (backed by `LoadedPluginMeta::control_ports`, captured at load time
-  same as the rest of that struct) exposes the loaded plugin's control-input port metadata for a
-  parameter-editor UI; `send_param_change` is the same queue used to apply edits from either that
-  UI or a plugin's own open GUI, so both sources of control-port writes go through one path.
+  `stream.play()`, never inside the callback. `Engine::list_plugins` merges both formats (LV2
+  first); `load_into_slot` dispatches on the id (`vst3:` prefix → `Vst3Host`, else `Lv2Host`).
+  `Engine::rescan_plugins` rebuilds the whole `Lv2Host` with `LV2_PATH` extended by extra
+  folders (see `paths.rs`) and rescans VST3 with the same extra folders — it stops the stream and
+  empties every slot first, since an `Lv2Plugin` shouldn't outlive the `World` it came from.
+  `default_plugin_search_paths()` lists both formats' default folders (for display);
+  `build_lv2_path` uses only the LV2 ones. `Engine::slot(slot)` returns that slot's
+  `LoadedPluginMeta` (id, name, format, `params` — `ParamInfo`s for a parameter-editor UI — and
+  `editor: PluginEditor`, all captured at load time since the running plugin itself lives in the
+  audio callback). `PluginEditor` is what opening the plugin's own GUI needs, per format:
+  `Lv2 { plugin, features, raw_handle }` or `Vst3(Vst3Controller)`. Two ways to change a
+  parameter: `send_param_change(slot, id, value)` only queues it to the audio thread — for edits
+  that *came from* the plugin's own GUI — while `set_param` (host-side edits, e.g. a slider)
+  also tells a VST3 controller, so the plugin's open editor follows. (An LV2 GUI reads port
+  values itself.)
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
   (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI and
   the Settings tab in the GUI.
 
-- **`crates/lv2-ui-host`** (`live-keys-lv2-ui`) — hosts a *plugin's own* GUI (not this app's
-  GUI). Deliberately isolated from audio hosting: it's X11-specific unsafe FFI that a future
+- **`crates/lv2-ui-host`** (`live-keys-lv2-ui`) — hosts an LV2 *plugin's own* GUI (not this
+  app's GUI). Deliberately isolated from audio hosting: it's X11-specific unsafe FFI that a future
   Windows/macOS UI-hosting backend would replace wholesale. `best_supported_ui`/`launch_ui`
   (`discovery.rs`) pick between two mechanisms, preferring whichever needs less from the host:
   - **External UI** (`external_ui.rs`) — the kxstudio "external-ui" extension. The plugin manages
@@ -184,15 +287,36 @@ behind format-agnostic cores:
   via `TabWidget`/`Tab` from `std-widgets.slint`; `globals.slint` defines the host/UI interop
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
   per the project's Slint skill guidance. `config.rs` handles settings persistence (`dirs` +
-  `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`. The Live tab's
-  parameter editor (`ControlPortRow`/`AppState.control-ports`/`AppLogic.set-control-param`) renders
-  one `Slider` per control-input port of the loaded plugin, populated from
-  `Engine::control_ports()` on load; dragging a slider calls `Engine::send_param_change` — the
-  same call a plugin's own GUI uses — so it works identically whether or not the plugin has its
-  own GUI, and is meant as the base for future macro knobs/MIDI-bound parameters.
+  `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
+  `live-keys-vst3-ui`. The plugin picker lists instruments of both formats sorted by name, each
+  labelled with its format (Surge XT, e.g., is installed as both). The Live tab is
+  `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per `AppState.slots` entry
+  (`SlotState`: plugin name, GUI state/status, control ports); every `AppLogic` slot action
+  takes the slot index. The engine stream is started lazily by the first load (on the devices
+  chosen in Settings) and restarted — closing all plugin GUIs first, since their instance
+  handles go stale — when the device selection changes while running. Loading/unloading a slot
+  likewise closes that slot's plugin GUI first. On the Rust side, `Rack` owns the slots'
+  `VecModel`s plus each slot's open GUI as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own
+  thread — or `Vst3(Vst3Editor)` — main thread); the poll timer calls `Rack::poll_uis`, which
+  pumps open VST3 editors (`idle`) and forgets any GUI that has closed. Each slot's parameter
+  model is created once and refilled on load, so refreshing a slot's other fields doesn't
+  rebuild its sliders. The parameter editor (`ParamRow`/`AppLogic.set-param`) renders one
+  `Slider` per parameter of a slot's plugin; dragging one calls `Engine::set_param`, while edits
+  from a plugin's own GUI arrive over the `(slot, param_id, value)` channel and go through
+  `Engine::send_param_change`; both paths also write the value back into the row
+  (`ParamRow.value`), so a rebuilt slider shows the current value. Meant as the base for
+  future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
+  omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
+  in `ui/range_slider.slint`, since std-widgets has none; note names shown using C4 = 60) and a
+  volume fader in dB (`MIN_VOLUME_DB` = -60 means muted,
+  up to +6; converted to linear gain in `config::SlotConfig::gain`). These live in
+  `AppConfig.slots` (`SlotConfig`) as the GUI's source of truth and are pushed to the engine on
+  startup and on every edit; `Rack::refresh_slot` only touches a row's plugin/GUI fields,
+  `Rack::set_routing` its filter/volume fields. Edits that fire continuously (fader drags)
+  mark the config dirty and the poll timer saves it, rather than writing the file per step.
 
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
-  around `live-keys-engine`. Uses `clap` (derive) for CLI args.
+  around `live-keys-engine` (loads its one `--plugin` into slot 0). Uses `clap` (derive) for CLI args.
 
 ### Real-time audio thread rules
 
@@ -202,20 +326,24 @@ The audio callback must never allocate, lock, or perform blocking syscalls. This
   iterators straight through to the underlying plugin API.
 - All buffers (MIDI batch, per-channel audio scratch) are pre-allocated outside the closure
   passed to `cpal`'s `build_output_stream`.
+- Plugins enter the callback already instantiated (boxed on the control thread) and leave it
+  via the retired ring buffer, so neither construction nor teardown runs on the audio thread.
 
-When touching the audio callback path (`Engine::load_and_start`'s closure, or anything
-`HostedPlugin` implementations do inside `process`/`set_control`), preserve this — no
+When touching the audio callback path (`Engine::start`'s closure, or anything
+`HostedPlugin` implementations do inside `process`/`set_param`), preserve this — no
 `Vec::new()`/`.collect()`/`format!()`/`log::info!` (only `log::error!`/`log::warn!` on rare error
 paths are currently tolerated there — see `crates/engine/src/engine.rs` for the reasoning on
 each specific one).
 
 ### Known simplifications (not bugs)
 
+- Restarting the stream (device change while running) re-instantiates every loaded slot at
+  default parameter values — plugin state isn't carried over.
 - MIDI events always get `frame_offset = 0` — `midir`'s callback doesn't hand back a
   sample-accurate offset relative to the audio clock, so events are applied at the start of
   whichever block consumes them. Fine for a keyboard-driven rack; would need revisiting for
   tight sequencer/clock sync.
-- Only the default `F32` sample format is supported for audio output (`Engine::load_and_start`
+- Only the default `F32` sample format is supported for audio output (`Engine::start`
   bails if the device's default config isn't `F32`).
 - "Logical" audio device filtering (`is_logical_output_device` in `crates/engine/src/audio.rs`)
   keeps a device only if its ALSA driver id names a real sound card (`CARD=`) or is one of a
@@ -226,20 +354,35 @@ each specific one).
   several same-named entries per sound card (e.g. `front`, `dmix`, `surround51`, `sysdefault` all
   share the card's display name) — these are genuinely different logical PCM configs, not a
   filter bug; cpal's `Display` just doesn't expose the distinguishing driver id.
-- Only one plugin can be hosted (and one plugin GUI open) at a time; there's no audio
-  graph/rack/chaining yet. When that lands, it's expected to be **in-process**: every
-  loaded plugin's audio flows into one mixing/FX stage in our own code, with only the
-  final stereo mix reaching `cpal` — not one independent OS audio stream per plugin
+- The rack is a fixed `SLOT_COUNT` (3) parallel slots, each with its own MIDI filter and
+  volume, summed into one output — no chaining one slot's audio into another, no
+  master/limiter stage (several loud slots can clip), no MIDI transpose/velocity curves;
+  there's no real audio graph yet. It already follows the
+  intended **in-process** direction: every loaded plugin's audio is mixed in our own code,
+  with only the final mix reaching `cpal` — not one independent OS audio stream per plugin
   (which would only work via OS-level mixing like PipeWire/JACK, isn't cross-platform,
   and would make routing plugin output through our own EQ/compression/mixing code
   impossible once the OS has already mixed it). This was decided explicitly when
   weighing out-of-process plugin isolation (see below) against this direction.
   Plugins with audio input ports (effects, not just MIDI-only instruments) *are* loadable
-  today, ahead of that graph landing — `Lv2Host::instantiate`/`Lv2Plugin::process` just feed
-  those inputs (and any CV inputs) silence every block, since there's nothing upstream yet to
+  today, ahead of that graph landing — both adapters (`Lv2Plugin::process`, `Vst3Plugin::process`)
+  just feed those inputs (and any LV2 CV inputs) silence every block, since there's nothing upstream yet to
   route real audio into them. This makes an effect's control ports usable (e.g. for the
   parameter editor below) even though its audio processing itself currently has nothing to
   act on.
+- VST3 hosting, deliberately minimal so far: no `IMessage`/`IAttributeList` (`createInstance`
+  returns `kNotImplemented`) — plugins whose separate controller talks to its processor through
+  `IConnectionPoint` messages won't get those messages; every plugin tested is JUCE-based and
+  works without them. `restartComponent` is acknowledged but ignored (no re-setup for latency/IO
+  changes, no parameter-list refresh). Only the main audio buses are activated (others get
+  buffers but stay inactive; only output bus 0 is read). The processor's
+  `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
+  fixed 120 BPM 4/4, not playing). No plugin state save/restore yet (same as LV2). VST3
+  parameter sliders show normalized `0..1` values, not the plugin's display strings.
+- A VST3 editor runs on the GUI's main thread (see `crates/vst3-ui-host`), so — unlike an LV2
+  GUI, which wedges only its own thread — a VST3 editor that hangs inside a call freezes the
+  whole app. There's no way around it within the VST3 threading rules short of out-of-process
+  hosting (see the out-of-process note below).
 - LV2 UI hosting: no `ui:resize` protocol support (X11UI windows are sized once, from the
   widget's initial geometry, not kept in sync afterward); Gtk/Qt-wrapped UIs may work via suil's
   adapter modules but aren't the validated/primary target (bare X11UI and External UI are); only
@@ -283,13 +426,12 @@ each specific one).
 
 ## Plugin format roadmap
 
-1. **Phase 1 (current) — LV2** via `livi`/`lilv`. Validates the audio graph, MIDI routing, and
-   real-time threading model end-to-end before any other format is touched.
-2. **Phase 2 — VST3** via `vst3-sys`/the MIT-licensed `vst3` bindings crate (no mature safe
-   Rust VST3 host crate exists). `HelgeSverre/rust-vst3-host` is a useful architectural
-   reference for the COM interface plumbing (`IComponent`, `IAudioProcessor`,
-   `IEditController`) — treat it as a learning reference/fork base, not a dependency. Expect
-   substantial `unsafe` here.
+1. **Phase 1 (done) — LV2** via `livi`/`lilv`. Validated the audio graph, MIDI routing, and
+   real-time threading model end-to-end before any other format was touched.
+2. **Phase 2 (done, core) — VST3** via the MIT-licensed `vst3` bindings crate (no mature safe
+   Rust VST3 host crate exists): DSP, parameters, MIDI-CC mapping and the plugin's own editor
+   (see `crates/vst3-host`/`crates/vst3-ui-host`). Open follow-ups are under "Known
+   simplifications" (IMessage, restartComponent, state save/restore, transport).
 3. **Phase 3 — VST2/LXVST** via `vst2-sys`/bindgen once phases 1–2 are stable. "LXVST" is just
    the Linux-native naming convention for VST2 `.so` builds (same ABI as Windows/Mac VST2,
    scanned from Linux-specific paths like `~/.lxvst/`) — not a separate format. Lowest priority;
@@ -302,6 +444,7 @@ code isolated from the core audio graph and MIDI routing.
 
 Slint (declarative `.slint` markup + Rust logic) — chosen over egui for a more native-feeling UI
 without a hard GTK/Qt dependency. See **`crates/gui`** in Architecture above for the two-tab
-structure and interop pattern, and **`crates/lv2-ui-host`** for how a *plugin's* own GUI (as
-opposed to this app's GUI) gets hosted — that part needed native window embedding via X11
-(`x11rb` + `suil`), independent of Slint, exactly as anticipated before either was built.
+structure and interop pattern, and **`crates/lv2-ui-host`**/**`crates/vst3-ui-host`** for how a
+*plugin's* own GUI (as opposed to this app's GUI) gets hosted — that part needed native window
+embedding via X11 (`x11rb`, plus `suil` for LV2), independent of Slint, exactly as anticipated
+before either was built.

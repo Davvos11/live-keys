@@ -1,58 +1,165 @@
-import { Button, VerticalBox, HorizontalBox, ListView, Slider } from "std-widgets.slint";
-import { AppState, AppLogic } from "globals.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, ListView, Slider, VerticalBox } from "std-widgets.slint";
+import { RangeSlider } from "range_slider.slint";
+import { AppState, AppLogic, SlotState } from "globals.slint";
 
-export component LiveTab inherits VerticalBox {
-    Text {
-        text: AppState.loaded-plugin-name == "" ? "No plugin loaded" : "Loaded: \{AppState.loaded-plugin-name}";
-        font-size: 18px;
+component SlotPanel inherits GroupBox {
+    in property <int> slot-index;
+    in property <SlotState> slot;
+
+    title: "Slot \{root.slot-index + 1}";
+
+    // MIDI note number as a name, with middle C (60) as C4.
+    function note-name(note: int) -> string {
+        return ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][Math.mod(note, 12)] + (Math.floor(note / 12) - 1);
     }
 
-    HorizontalBox {
-        Button {
-            text: AppState.plugin-gui-supported ? "Open Plugin GUI" : "Open Plugin GUI (\{AppState.plugin-gui-status})";
-            enabled: AppState.plugin-gui-supported && !AppState.plugin-gui-open;
-            clicked => { AppLogic.open-plugin-gui(); }
+    function send-filter() {
+        AppLogic.set-slot-filter(root.slot-index, channel.current-index, notes.low, notes.high, velocities.low, velocities.high);
+    }
+
+    VerticalBox {
+        Text {
+            text: root.slot.plugin-name == "" ? "Empty" : root.slot.plugin-name;
+            font-size: 16px;
+            overflow: elide;
         }
-        Button {
-            text: "Close Plugin GUI";
-            enabled: AppState.plugin-gui-open;
-            clicked => { AppLogic.close-plugin-gui(); }
+
+        picker := ComboBox {
+            model: AppState.plugin-names;
         }
-    }
 
-    if AppState.control-ports.length > 0 : Text {
-        text: "Parameters";
-        font-size: 18px;
-    }
-
-    ListView {
-        height: AppState.control-ports.length > 0 ? 200px : 0px;
-        for port in AppState.control-ports : HorizontalBox {
-            Text {
-                text: port.name;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-            }
-            Slider {
-                width: 200px;
-                minimum: port.min-value;
-                maximum: port.max-value;
-                value: port.default-value;
-                changed(value) => { AppLogic.set-control-param(port.port-index, value); }
-            }
-        }
-    }
-
-    ListView {
-        for plugin in AppState.plugins : HorizontalBox {
-            Text {
-                text: plugin.name;
-                horizontal-stretch: 1;
-            }
+        HorizontalBox {
+            padding: 0;
             Button {
                 text: "Load";
-                clicked => { AppLogic.load-plugin(plugin.uri); }
+                enabled: picker.current-index >= 0 && picker.current-index < AppState.plugins.length;
+                clicked => { AppLogic.load-plugin(root.slot-index, AppState.plugins[picker.current-index].id); }
+            }
+            Button {
+                text: "Unload";
+                enabled: root.slot.plugin-name != "";
+                clicked => { AppLogic.unload-plugin(root.slot-index); }
             }
         }
+
+        HorizontalBox {
+            padding: 0;
+            Button {
+                text: "Open GUI";
+                enabled: root.slot.gui-supported && !root.slot.gui-open;
+                clicked => { AppLogic.open-plugin-gui(root.slot-index); }
+            }
+            Button {
+                text: "Close GUI";
+                enabled: root.slot.gui-open;
+                clicked => { AppLogic.close-plugin-gui(root.slot-index); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: "Channel";
+                vertical-alignment: center;
+            }
+            channel := ComboBox {
+                horizontal-stretch: 1;
+                model: ["Omni", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"];
+                current-index: root.slot.midi-channel;
+                selected => { root.send-filter(); }
+            }
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                Text { text: "Notes"; }
+                Text {
+                    text: "\{root.note-name(notes.low)} – \{root.note-name(notes.high)}";
+                    color: gray;
+                    horizontal-alignment: right;
+                }
+            }
+            notes := RangeSlider {
+                minimum: 0;
+                maximum: 127;
+                low: root.slot.note-low;
+                high: root.slot.note-high;
+                changed => { root.send-filter(); }
+            }
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                Text { text: "Velocity"; }
+                Text {
+                    text: "\{velocities.low} – \{velocities.high}";
+                    color: gray;
+                    horizontal-alignment: right;
+                }
+            }
+            velocities := RangeSlider {
+                minimum: 1;
+                maximum: 127;
+                low: root.slot.velocity-low;
+                high: root.slot.velocity-high;
+                changed => { root.send-filter(); }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                Text { text: "Volume"; }
+                Text {
+                    text: volume.value <= AppState.min-volume-db ? "muted" : "\{Math.round(volume.value * 10) / 10} dB";
+                    color: gray;
+                    horizontal-alignment: right;
+                }
+            }
+            volume := Slider {
+                minimum: AppState.min-volume-db;
+                maximum: AppState.max-volume-db;
+                value: root.slot.volume-db;
+                changed(value) => { AppLogic.set-slot-volume(root.slot-index, value); }
+            }
+        }
+
+        if root.slot.status != "" : Text {
+            text: root.slot.status;
+            color: gray;
+            wrap: word-wrap;
+        }
+
+        if root.slot.params.length > 0 : Text {
+            text: "Parameters";
+            font-weight: 600;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for port in root.slot.params : VerticalLayout {
+                padding-bottom: 6px;
+                Text {
+                    text: port.name;
+                    overflow: elide;
+                }
+                Slider {
+                    minimum: port.min-value;
+                    maximum: port.max-value;
+                    value: port.value;
+                    changed(value) => { AppLogic.set-param(root.slot-index, port.param-id, value); }
+                }
+            }
+        }
+    }
+}
+
+export component LiveTab inherits HorizontalBox {
+    for slot[i] in AppState.slots : SlotPanel {
+        slot-index: i;
+        slot: slot;
+        // Equal-width columns regardless of what each slot's content prefers.
+        horizontal-stretch: 1;
+        preferred-width: 0px;
     }
 }
