@@ -53,8 +53,8 @@ export component SettingsTab inherits VerticalBox {
     GroupBox {
         title: "Discovered Plugins";
         ListView {
-            for plugin in AppState.plugins : Text {
-                text: plugin.name;
+            for plugin in AppState.discovered-plugins : Text {
+                text: plugin;
             }
         }
     }

@@ -15,12 +15,12 @@ fn main() {
         println!(
             "{} [{}] {}",
             info.id,
-            if info.is_instrument { "instrument" } else { "effect" },
+            info.kind.label(),
             info.name
         );
     }
 
-    for info in host.list_plugins().into_iter().filter(|info| info.is_instrument) {
+    for info in host.list_plugins().into_iter().filter(|info| info.kind == live_keys_core::PluginKind::Instrument) {
         let (mut plugin, controller) = match host.instantiate(&info.id, SAMPLE_RATE) {
             Ok(pair) => pair,
             Err(err) => {

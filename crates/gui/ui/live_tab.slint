@@ -1,10 +1,130 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, ListView, Slider, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, ListView, Palette, Slider, VerticalBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
-import { AppState, AppLogic, SlotState } from "globals.slint";
+import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
+
+component SectionTitle inherits Text {
+    font-weight: 600;
+    vertical-alignment: center;
+}
+
+// A section heading with a button at its right end.
+component SectionHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> action;
+    in property <bool> action-enabled: true;
+    callback clicked();
+
+    spacing: 6px;
+    SectionTitle {
+        text: root.title;
+        horizontal-stretch: 1;
+    }
+    Button {
+        text: root.action;
+        enabled: root.action-enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One plugin in a slot's chain: click its name to show its parameters.
+component ChainRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> selected;
+    in property <bool> gui-supported;
+    in property <bool> gui-open;
+    // Shows the move buttons (effects only).
+    in property <bool> movable;
+    in property <bool> can-move-up;
+    in property <bool> can-move-down;
+    callback select();
+    callback toggle-gui();
+    callback remove();
+    callback move-up();
+    callback move-down();
+
+    background: root.selected ? Palette.selection-background : transparent;
+    border-radius: 4px;
+
+    // Behind the layout, so the buttons get their own clicks and the rest of the
+    // row selects.
+    TouchArea {
+        clicked => { root.select(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        spacing: 2px;
+        Text {
+            text: root.name;
+            color: root.selected ? Palette.selection-foreground : Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Button {
+            // A wedged plugin GUI may never report closing; "Close" stays usable
+            // to force it.
+            text: root.gui-open ? "Close" : "GUI";
+            enabled: root.gui-supported || root.gui-open;
+            clicked => { root.toggle-gui(); }
+        }
+        if root.movable : Button {
+            text: "↑";
+            enabled: root.can-move-up;
+            clicked => { root.move-up(); }
+        }
+        if root.movable : Button {
+            text: "↓";
+            enabled: root.can-move-down;
+            clicked => { root.move-down(); }
+        }
+        Button {
+            text: "✕";
+            clicked => { root.remove(); }
+        }
+    }
+}
+
+// The effect rows of one chain section, with move/remove buttons.
+component EffectList inherits VerticalLayout {
+    in property <int> slot-index;
+    // 0 = MIDI effects, 1 = audio effects (as `AppLogic`'s `section`).
+    in property <int> section;
+    in property <[EffectRow]> effects;
+    in property <int> selected-key;
+    in property <string> empty-text;
+
+    for effect[index] in root.effects : ChainRow {
+        name: effect.name;
+        selected: root.selected-key == effect.key;
+        gui-supported: effect.gui-supported;
+        gui-open: effect.gui-open;
+        movable: true;
+        can-move-up: index > 0;
+        can-move-down: index < root.effects.length - 1;
+        select => { AppLogic.select-plugin(root.slot-index, effect.key); }
+        toggle-gui => {
+            if (effect.gui-open) {
+                AppLogic.close-plugin-gui(effect.key);
+            } else {
+                AppLogic.open-plugin-gui(effect.key);
+            }
+        }
+        remove => { AppLogic.remove-effect(root.slot-index, root.section, index); }
+        move-up => { AppLogic.move-effect(root.slot-index, root.section, index, index - 1); }
+        move-down => { AppLogic.move-effect(root.slot-index, root.section, index, index + 1); }
+    }
+    if root.effects.length == 0 : Text {
+        text: root.empty-text;
+        color: gray;
+    }
+}
 
 component SlotPanel inherits GroupBox {
     in property <int> slot-index;
     in property <SlotState> slot;
+    // Asks for the plugin picker, opened on `category`.
+    callback choose-plugin(/* category */ int);
 
     title: "Slot \{root.slot-index + 1}";
 
@@ -17,44 +137,10 @@ component SlotPanel inherits GroupBox {
         AppLogic.set-slot-filter(root.slot-index, channel.current-index, notes.low, notes.high, velocities.low, velocities.high);
     }
 
+    // Top to bottom in signal order: which MIDI the slot takes, MIDI effects,
+    // instrument, audio effects, volume.
     VerticalBox {
-        Text {
-            text: root.slot.plugin-name == "" ? "Empty" : root.slot.plugin-name;
-            font-size: 16px;
-            overflow: elide;
-        }
-
-        picker := ComboBox {
-            model: AppState.plugin-names;
-        }
-
-        HorizontalBox {
-            padding: 0;
-            Button {
-                text: "Load";
-                enabled: picker.current-index >= 0 && picker.current-index < AppState.plugins.length;
-                clicked => { AppLogic.load-plugin(root.slot-index, AppState.plugins[picker.current-index].id); }
-            }
-            Button {
-                text: "Unload";
-                enabled: root.slot.plugin-name != "";
-                clicked => { AppLogic.unload-plugin(root.slot-index); }
-            }
-        }
-
-        HorizontalBox {
-            padding: 0;
-            Button {
-                text: "Open GUI";
-                enabled: root.slot.gui-supported && !root.slot.gui-open;
-                clicked => { AppLogic.open-plugin-gui(root.slot-index); }
-            }
-            Button {
-                text: "Close GUI";
-                enabled: root.slot.gui-open;
-                clicked => { AppLogic.close-plugin-gui(root.slot-index); }
-            }
-        }
+        SectionTitle { text: "MIDI in"; }
 
         HorizontalLayout {
             spacing: 6px;
@@ -106,10 +192,63 @@ component SlotPanel inherits GroupBox {
             }
         }
 
+        SectionHeader {
+            title: "MIDI effects";
+            action: "+ Add";
+            action-enabled: root.slot.midi-effects.length < AppState.max-midi-effects;
+            clicked => { root.choose-plugin(Category.midi-effect); }
+        }
+        EffectList {
+            slot-index: root.slot-index;
+            section: 0;
+            effects: root.slot.midi-effects;
+            selected-key: root.slot.selected-key;
+            empty-text: "None";
+        }
+
+        SectionHeader {
+            title: "Instrument";
+            action: root.slot.instrument-key >= 0 ? "Replace" : "+ Choose";
+            clicked => { root.choose-plugin(Category.instrument); }
+        }
+        if root.slot.instrument-key >= 0 : ChainRow {
+            name: root.slot.plugin-name;
+            selected: root.slot.selected-key == root.slot.instrument-key;
+            gui-supported: root.slot.gui-supported;
+            gui-open: root.slot.gui-open;
+            select => { AppLogic.select-plugin(root.slot-index, root.slot.instrument-key); }
+            toggle-gui => {
+                if (root.slot.gui-open) {
+                    AppLogic.close-plugin-gui(root.slot.instrument-key);
+                } else {
+                    AppLogic.open-plugin-gui(root.slot.instrument-key);
+                }
+            }
+            remove => { AppLogic.unload-plugin(root.slot-index); }
+        }
+        if root.slot.instrument-key < 0 : Text {
+            text: "None";
+            color: gray;
+        }
+
+        SectionHeader {
+            title: "Audio effects";
+            action: "+ Add";
+            action-enabled: root.slot.audio-effects.length < AppState.max-effects;
+            clicked => { root.choose-plugin(Category.audio-effect); }
+        }
+        EffectList {
+            slot-index: root.slot-index;
+            section: 1;
+            effects: root.slot.audio-effects;
+            selected-key: root.slot.selected-key;
+            empty-text: "None";
+        }
+
         VerticalLayout {
             spacing: 4px;
             HorizontalLayout {
-                Text { text: "Volume"; }
+                SectionTitle { text: "Volume"; }
                 Text {
                     text: volume.value <= AppState.min-volume-db ? "muted" : "\{Math.round(volume.value * 10) / 10} dB";
                     color: gray;
@@ -130,24 +269,25 @@ component SlotPanel inherits GroupBox {
             wrap: word-wrap;
         }
 
-        if root.slot.params.length > 0 : Text {
-            text: "Parameters";
-            font-weight: 600;
+        if root.slot.selected-key >= 0 : SectionTitle {
+            text: "Parameters — \{root.slot.selected-name}";
+            overflow: elide;
         }
 
         ListView {
             vertical-stretch: 1;
-            for port in root.slot.params : VerticalLayout {
+            min-height: 120px;
+            for param in root.slot.params : VerticalLayout {
                 padding-bottom: 6px;
                 Text {
-                    text: port.name;
+                    text: param.name;
                     overflow: elide;
                 }
                 Slider {
-                    minimum: port.min-value;
-                    maximum: port.max-value;
-                    value: port.value;
-                    changed(value) => { AppLogic.set-param(root.slot-index, port.param-id, value); }
+                    minimum: param.min-value;
+                    maximum: param.max-value;
+                    value: param.value;
+                    changed(value) => { AppLogic.set-param(root.slot.selected-key, param.param-id, value); }
                 }
             }
         }
@@ -155,9 +295,12 @@ component SlotPanel inherits GroupBox {
 }
 
 export component LiveTab inherits HorizontalBox {
+    callback choose-plugin(/* slot */ int, /* category */ int);
+
     for slot[i] in AppState.slots : SlotPanel {
         slot-index: i;
         slot: slot;
+        choose-plugin(category) => { root.choose-plugin(i, category); }
         // Equal-width columns regardless of what each slot's content prefers.
         horizontal-stretch: 1;
         preferred-width: 0px;

@@ -14,16 +14,25 @@ pub struct AppConfig {
     /// saved by an older version; callers pad it.
     #[serde(default)]
     pub slots: Vec<SlotConfig>,
+    /// `PluginInfo::id`s pinned to the top of the plugin picker.
+    #[serde(default)]
+    pub pinned_plugins: Vec<String>,
 }
 
 /// One Live-tab slot's saved setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SlotConfig {
-    /// `PluginInfo::id` of the plugin last loaded into this slot. Recorded only,
-    /// not auto-loaded.
+    /// `PluginInfo::id` of the instrument last loaded into this slot. Recorded
+    /// only, not auto-loaded.
     #[serde(alias = "plugin_uri")]
     pub plugin_id: Option<String>,
+    /// `PluginInfo::id`s of the MIDI effects last in front of this slot's
+    /// instrument, in order. Recorded only, not auto-loaded.
+    pub midi_effect_ids: Vec<String>,
+    /// `PluginInfo::id`s of the audio effects last after this slot's instrument,
+    /// in order. Recorded only, not auto-loaded.
+    pub effect_ids: Vec<String>,
     /// 0-based MIDI channel, or `None` for omni.
     pub midi_channel: Option<u8>,
     pub note_low: u8,
@@ -43,6 +52,8 @@ impl Default for SlotConfig {
         let filter = MidiFilter::default();
         Self {
             plugin_id: None,
+            midi_effect_ids: Vec::new(),
+            effect_ids: Vec::new(),
             midi_channel: filter.channel,
             note_low: filter.note_low,
             note_high: filter.note_high,

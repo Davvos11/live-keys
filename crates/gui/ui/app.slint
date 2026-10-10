@@ -1,14 +1,15 @@
 import { TabWidget } from "std-widgets.slint";
 import { SettingsTab } from "settings_tab.slint";
 import { LiveTab } from "live_tab.slint";
-import { AppState, AppLogic, PluginRow } from "globals.slint";
+import { PickerTarget, PluginPicker } from "plugin_picker.slint";
+import { AppState, AppLogic } from "globals.slint";
 
-export { AppState, AppLogic, PluginRow }
+export { AppState, AppLogic }
 
 export component AppWindow inherits Window {
     title: "Live Keys";
     preferred-width: 900px;
-    preferred-height: 640px;
+    preferred-height: 760px;
 
     TabWidget {
         Tab {
@@ -17,7 +18,21 @@ export component AppWindow inherits Window {
         }
         Tab {
             title: "Live";
-            LiveTab { }
+            LiveTab {
+                choose-plugin(slot, category) => {
+                    AppLogic.filter-picker(category, "");
+                    PickerTarget.slot = slot;
+                    PickerTarget.category = category;
+                    picker.show();
+                }
+            }
         }
+    }
+
+    picker := PluginPicker {
+        width: min(520px, root.width - 32px);
+        height: max(240px, root.height - 64px);
+        x: (root.width - self.width) / 2;
+        y: 32px;
     }
 }

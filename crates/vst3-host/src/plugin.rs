@@ -5,10 +5,14 @@ use std::ffi::c_char;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo};
-use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kPitchBend};
+use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginKind};
+use vst3::Steinberg::Vst::ControllerNumbers_::{
+    kAfterTouch, kCtrlPolyPressure, kCtrlProgramChange, kPitchBend,
+};
 use vst3::Steinberg::Vst::Event_::EventFlags_::kIsLive;
-use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent};
+use vst3::Steinberg::Vst::Event_::EventTypes_::{
+    kLegacyMIDICCOutEvent, kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent,
+};
 use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kIsHidden, kIsReadOnly};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kContTimeValid, kTempoValid, kTimeSigValid,
@@ -178,6 +182,10 @@ pub(crate) fn instantiate(
         if component.getBusCount(EVENT, INPUT) > 0 {
             component.activateBus(EVENT, INPUT, 0, 1);
         }
+        // A MIDI effect's output; see `Vst3Plugin::midi_output`.
+        if component.getBusCount(EVENT, OUTPUT) > 0 {
+            component.activateBus(EVENT, OUTPUT, 0, 1);
+        }
     }
 
     unsafe {
@@ -233,6 +241,36 @@ unsafe fn create_instance<I: Interface>(module: &Module, cid: &TUID) -> Option<C
         return None;
     }
     unsafe { ComPtr::from_raw(obj as *mut I) }
+}
+
+/// What class `cid` is, judged by its buses — VST3 has no sub-category for MIDI
+/// effects (JUCE ones claim "Fx"), so this briefly creates and initializes the
+/// component to look. `None` if it can't be created.
+pub(crate) fn probe_kind(module: &Module, cid: &TUID) -> Option<PluginKind> {
+    let host = ComWrapper::new(HostApplication);
+    let host_ptr = host.to_com_ptr::<FUnknown>().unwrap();
+    let component: ComPtr<IComponent> = unsafe { create_instance(module, cid)? };
+    if unsafe { component.initialize(host_ptr.as_ptr()) } != kResultOk {
+        return None;
+    }
+    let audio_outputs = bus_channel_counts(&component, OUTPUT);
+    let audio_inputs = bus_channel_counts(&component, INPUT);
+    let (event_inputs, event_outputs) =
+        unsafe { (component.getBusCount(EVENT, INPUT), component.getBusCount(EVENT, OUTPUT)) };
+    unsafe { component.terminate() };
+    // MIDI out and no audio in. Whether it also has an audio output doesn't
+    // matter (some frameworks always add one); with an audio input it's an
+    // audio → MIDI plugin, which a MIDI chain has no audio for.
+    let kind = if event_outputs > 0 && audio_inputs.iter().all(|&channels| channels == 0) {
+        PluginKind::MidiEffect
+    } else {
+        PluginKind::AudioEffect
+    };
+    log::debug!(
+        "probed {}: audio in {audio_inputs:?} out {audio_outputs:?}, events in {event_inputs} out {event_outputs} -> {kind:?}",
+        crate::module::cid_to_hex(cid)
+    );
+    Some(kind)
 }
 
 fn bus_channel_counts(component: &ComPtr<IComponent>, direction: i32) -> Vec<usize> {
@@ -301,14 +339,18 @@ pub struct Vst3Plugin {
     processor: ComPtr<IAudioProcessor>,
     /// Per output bus, per channel. Only bus 0's are read back.
     output_buffers: Vec<Vec<Vec<f32>>>,
-    /// Per bus: pointers into `output_buffers` / at `silence`, which
-    /// `output_buses`/`input_buses` point at in turn.
+    /// Input bus 0's channels, filled by the host (see
+    /// `HostedPlugin::audio_input_mut`).
+    input_buffers: Vec<Vec<f32>>,
+    /// Per bus: pointers into `output_buffers`/`input_buffers` (or at `silence`),
+    /// which `output_buses`/`input_buses` point at in turn.
     _output_channel_ptrs: Vec<Vec<*mut f32>>,
     _input_channel_ptrs: Vec<Vec<*mut f32>>,
     output_buses: Vec<AudioBusBuffers>,
     input_buses: Vec<AudioBusBuffers>,
-    /// Fed to every input channel (no audio-in routing yet — see the LV2 adapter).
-    /// Re-zeroed every block in case a plugin writes to its inputs.
+    /// Fed to every channel of any input bus past the main one (e.g. a sidechain),
+    /// which nothing routes to yet. Re-zeroed every block in case a plugin writes
+    /// to its inputs.
     silence: Vec<f32>,
     events: ComWrapper<EventList>,
     output_events: ComWrapper<EventList>,
@@ -319,6 +361,8 @@ pub struct Vst3Plugin {
     param_changes_ptr: *mut IParameterChanges,
     output_param_changes_ptr: *mut IParameterChanges,
     midi_map: Box<MidiMap>,
+    /// `output_events` translated back to MIDI after each block.
+    midi_out: Vec<MidiEvent>,
     context: ProcessContext,
     frames_rendered: usize,
     process_failed: bool,
@@ -347,6 +391,8 @@ impl Vst3Plugin {
             .iter()
             .map(|&channels| vec![vec![0.0; max_block_size]; channels])
             .collect();
+        let mut input_buffers: Vec<Vec<f32>> =
+            vec![vec![0.0; max_block_size]; input_channels.first().copied().unwrap_or(0)];
         let mut silence = vec![0.0; max_block_size];
 
         let output_channel_ptrs: Vec<Vec<*mut f32>> = output_buffers
@@ -356,7 +402,11 @@ impl Vst3Plugin {
         let silence_ptr = silence.as_mut_ptr();
         let input_channel_ptrs: Vec<Vec<*mut f32>> = input_channels
             .iter()
-            .map(|&channels| vec![silence_ptr; channels])
+            .enumerate()
+            .map(|(bus, &channels)| match bus {
+                0 => input_buffers.iter_mut().map(|channel| channel.as_mut_ptr()).collect(),
+                _ => vec![silence_ptr; channels],
+            })
             .collect();
         let bus_buffers = |ptrs: &Vec<Vec<*mut f32>>| -> Vec<AudioBusBuffers> {
             ptrs.iter()
@@ -388,6 +438,7 @@ impl Vst3Plugin {
             name,
             processor,
             output_buffers,
+            input_buffers,
             _output_channel_ptrs: output_channel_ptrs,
             _input_channel_ptrs: input_channel_ptrs,
             output_buses,
@@ -405,6 +456,7 @@ impl Vst3Plugin {
             param_changes,
             output_param_changes,
             midi_map,
+            midi_out: Vec::with_capacity(EVENT_CAPACITY),
             context,
             frames_rendered: 0,
             process_failed: false,
@@ -516,6 +568,14 @@ impl HostedPlugin for Vst3Plugin {
         self.output_buffers.first().map_or(0, Vec::len)
     }
 
+    fn audio_input_count(&self) -> usize {
+        self.input_buffers.len()
+    }
+
+    fn audio_input_mut(&mut self, channel: usize) -> &mut [f32] {
+        &mut self.input_buffers[channel]
+    }
+
     fn process(&mut self, midi_in: &[MidiEvent], frames: usize) {
         for event in midi_in {
             self.push_midi(event);
@@ -545,6 +605,13 @@ impl HostedPlugin for Vst3Plugin {
 
         self.context.continousTimeSamples += frames as i64;
         self.frames_rendered = frames;
+        self.midi_out.clear();
+        for event in self.output_events.events() {
+            // `midi_out` has the event list's capacity, so this never reallocates.
+            if let Some(midi) = event_to_midi(event) {
+                self.midi_out.push(midi);
+            }
+        }
         self.events.clear();
         self.output_events.clear();
         self.param_changes.clear();
@@ -555,9 +622,57 @@ impl HostedPlugin for Vst3Plugin {
         &self.output_buffers[0][channel][..self.frames_rendered]
     }
 
+    fn midi_output(&self) -> &[MidiEvent] {
+        &self.midi_out
+    }
+
     fn set_param(&mut self, id: u32, value: f32) {
         self.param_changes.set(id, f64::from(value));
     }
+}
+
+/// The MIDI message a plugin's output event stands for, if it's one MIDI has.
+/// CCs, pitch bend and the like come out as `kLegacyMIDICCOutEvent` — the inverse
+/// of `IMidiMapping` on the input side.
+// The bindings' constants keep their C names, so matching on them trips this.
+#[allow(non_upper_case_globals)]
+fn event_to_midi(event: &Event) -> Option<MidiEvent> {
+    let offset = event.sampleOffset.max(0) as u32;
+    let velocity = |v: f32| (v * 127.0).round().clamp(0.0, 127.0) as u8;
+    let bytes = unsafe {
+        match u32::from(event.r#type) {
+            kNoteOnEvent => {
+                let e = event.__field0.noteOn;
+                // Velocity 0 would read as a note-off.
+                [0x90 | (e.channel as u8 & 0x0F), e.pitch as u8 & 0x7F, velocity(e.velocity).max(1)]
+            }
+            kNoteOffEvent => {
+                let e = event.__field0.noteOff;
+                [0x80 | (e.channel as u8 & 0x0F), e.pitch as u8 & 0x7F, velocity(e.velocity)]
+            }
+            kPolyPressureEvent => {
+                let e = event.__field0.polyPressure;
+                [0xA0 | (e.channel as u8 & 0x0F), e.pitch as u8 & 0x7F, velocity(e.pressure)]
+            }
+            kLegacyMIDICCOutEvent => {
+                let e = event.__field0.midiCCOut;
+                let channel = e.channel as u8 & 0x0F;
+                let (value, value2) = (e.value as u8 & 0x7F, e.value2 as u8 & 0x7F);
+                match u32::from(e.controlNumber) {
+                    number @ 0..=127 => [0xB0 | channel, number as u8, value],
+                    kAfterTouch => return MidiEvent::from_raw(offset, &[0xD0 | channel, value]),
+                    kPitchBend => [0xE0 | channel, value, value2],
+                    kCtrlProgramChange => {
+                        return MidiEvent::from_raw(offset, &[0xC0 | channel, value]);
+                    }
+                    kCtrlPolyPressure => [0xA0 | channel, value, value2],
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    };
+    MidiEvent::from_raw(offset, &bytes)
 }
 
 /// The main-thread half of a running VST3 plugin: its edit controller. Every call

@@ -125,6 +125,7 @@ pub(crate) fn load(binary: &Path) -> Result<Arc<Module>> {
 pub(crate) struct ClassInfo {
     pub cid: TUID,
     pub name: String,
+    /// From the class's sub-categories ("Instrument|Synth", "Fx|Delay").
     pub is_instrument: bool,
 }
 

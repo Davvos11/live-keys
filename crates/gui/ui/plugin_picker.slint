@@ -1,0 +1,183 @@
+import { Button, LineEdit, ListView, Palette, VerticalBox } from "std-widgets.slint";
+import { AppState, AppLogic, Category, PickerRow } from "globals.slint";
+
+// Which slot the picker adds to, and which category it shows.
+export global PickerTarget {
+    in-out property <int> slot;
+    in-out property <int> category;
+}
+
+component CategoryTab inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    callback clicked();
+
+    height: 32px;
+    border-radius: 6px;
+    background: root.active ? Palette.accent-background : touch.has-hover ? Palette.alternate-background : transparent;
+
+    Text {
+        text: root.text;
+        color: root.active ? Palette.accent-foreground : Palette.foreground;
+        font-weight: root.active ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component PickerItem inherits Rectangle {
+    in property <PickerRow> plugin;
+    callback choose();
+    callback toggle-pin();
+
+    height: 34px;
+    border-radius: 4px;
+    background: choose-area.has-hover ? Palette.alternate-background : transparent;
+
+    // Behind the layout, so the star gets its own clicks and the rest of the row
+    // chooses.
+    choose-area := TouchArea {
+        clicked => { root.choose(); }
+    }
+
+    if root.plugin.after-pinned : Rectangle {
+        y: 0;
+        height: 1px;
+        background: Palette.border;
+    }
+
+    HorizontalLayout {
+        padding-right: 8px;
+        spacing: 6px;
+        Rectangle {
+            width: 32px;
+            Text {
+                text: root.plugin.pinned ? "★" : "☆";
+                font-size: 16px;
+                color: root.plugin.pinned ? #e0a020 : star-area.has-hover ? Palette.foreground : gray;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            star-area := TouchArea {
+                clicked => { root.toggle-pin(); }
+            }
+        }
+        Text {
+            text: root.plugin.name;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.plugin.format;
+            font-size: 11px;
+            color: gray;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The picker's contents: one tab per category, a search field, and the matching
+// plugins with pinned ones on top. Picking an instrument replaces the slot's;
+// picking an effect appends it to that chain.
+export component PickerPanel inherits Rectangle {
+    property <int> slot: PickerTarget.slot;
+    property <int> category: PickerTarget.category;
+    // After a pick, or when the close button is clicked.
+    callback done();
+
+    function choose(id: string) {
+        AppLogic.pick-plugin(root.slot, root.category, id);
+        root.done();
+    }
+
+    function filter() {
+        AppLogic.filter-picker(root.category, search.text);
+    }
+
+    background: Palette.background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Palette.border;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #00000060;
+
+    VerticalBox {
+        HorizontalLayout {
+            Text {
+                text: "Add a plugin to slot \{root.slot + 1}";
+                font-size: 15px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "✕";
+                clicked => { root.done(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 4px;
+            for label[index] in ["Instruments", "MIDI effects", "Audio effects"] : CategoryTab {
+                text: label;
+                active: root.category == index;
+                horizontal-stretch: 1;
+                clicked => {
+                    PickerTarget.category = index;
+                    root.filter();
+                }
+            }
+        }
+
+        Text {
+            text: root.category == Category.instrument ? "MIDI in → audio out. Replaces the slot's instrument."
+                : root.category == Category.midi-effect ? "MIDI in → MIDI out. Runs in front of the instrument."
+                : "Audio in → audio out. Runs after the instrument.";
+            font-size: 11px;
+            color: gray;
+            wrap: word-wrap;
+        }
+
+        search := LineEdit {
+            placeholder-text: "Search";
+            // The popup's contents are created each time it opens.
+            init => { self.focus(); }
+            edited => { root.filter(); }
+            accepted => {
+                if (AppState.picker-rows.length > 0) {
+                    root.choose(AppState.picker-rows[0].id);
+                }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in AppState.picker-rows : PickerItem {
+                plugin: row;
+                choose => { root.choose(row.id); }
+                toggle-pin => { AppLogic.toggle-pin(row.id); }
+            }
+        }
+
+        if AppState.picker-rows.length == 0 : Text {
+            text: search.text == "" ? "No plugins of this kind found." : "No plugins match \"\{search.text}\".";
+            color: gray;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Opened over the window by a slot's "Add"/"Choose" buttons, for
+// `PickerTarget`'s slot and category.
+export component PluginPicker inherits PopupWindow {
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    PickerPanel {
+        done => { root.close(); }
+    }
+}

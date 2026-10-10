@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginFormat, PluginInfo};
+use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginFormat, PluginInfo, PluginKind};
 use livi::event::LV2AtomSequence;
 
 pub use livi;
@@ -11,6 +11,28 @@ pub use lv2_raw;
 const MIDI_EVENT_BUFFER_BYTES: usize = 4096;
 /// Upper bound on the size of a single MIDI message written into the atom sequence.
 const MAX_MIDI_MESSAGE_BYTES: usize = 32;
+/// Most MIDI events read back from a plugin's MIDI output per block.
+const MIDI_OUT_CAPACITY: usize = 512;
+
+/// Classifies by class and ports. Atom-sequence ports usually carry MIDI, but not
+/// always (a synth's UI-state messages), so a class saying "instrument" wins over
+/// ports. Audio → MIDI plugins (onset triggers) count as audio effects: a MIDI
+/// chain has no audio to give them.
+fn plugin_kind(plugin: &livi::Plugin) -> PluginKind {
+    let ports = plugin.port_counts();
+    if ports.audio_outputs > 0
+        && (plugin.is_instrument() || (ports.audio_inputs == 0 && ports.atom_sequence_inputs > 0))
+    {
+        PluginKind::Instrument
+    } else if ports.audio_inputs == 0
+        && ports.audio_outputs == 0
+        && (ports.atom_sequence_outputs > 0 || plugin.classes().any(|class| class == "MIDI Plugin"))
+    {
+        PluginKind::MidiEffect
+    } else {
+        PluginKind::AudioEffect
+    }
+}
 
 /// Owns the LV2 plugin world and the real-time features (URID map, block size) that
 /// every plugin instantiated from it shares.
@@ -43,17 +65,14 @@ impl Lv2Host {
                 id: p.uri(),
                 name: p.name(),
                 format: PluginFormat::Lv2,
-                is_instrument: p.is_instrument(),
+                kind: plugin_kind(&p),
             })
             .collect()
     }
 
-    /// Instantiate the plugin at `uri`. Plugins with audio input ports are
-    /// accepted, but since there's no real audio graph/routing yet (see
-    /// `Lv2Plugin::process`), those inputs (and any CV inputs) are always fed
-    /// silence — this makes e.g. effect plugins loadable and playable via
-    /// MIDI-driven control ports today, ahead of real audio-in routing landing
-    /// later. Plugins that write an atom-sequence or CV output port (e.g. an
+    /// Instantiate the plugin at `uri`. Plugins with audio input ports (effects)
+    /// get one input buffer per port for the host to fill; CV inputs, which
+    /// nothing routes yet, are fed silence. Plugins that write an atom-sequence or CV output port (e.g. an
     /// arpeggiator's MIDI-out, or a synth's combined MIDI/UI-state port, as seen
     /// on Surge XT and the LSP samplers) are also accepted — that output is
     /// wired to a discarded scratch buffer so the plugin runs without error,
@@ -88,10 +107,13 @@ impl Lv2Host {
             atom_sequence_input_count: port_counts.atom_sequence_inputs,
             output_buffers,
             frames_rendered: 0,
-            input_silence: vec![0.0f32; self.max_block_size],
-            audio_input_count: port_counts.audio_inputs,
+            input_buffers: (0..port_counts.audio_inputs)
+                .map(|_| vec![0.0f32; self.max_block_size])
+                .collect(),
+            cv_silence: vec![0.0f32; self.max_block_size],
             cv_input_count: port_counts.cv_inputs,
             atom_sequence_out,
+            midi_out: Vec::with_capacity(MIDI_OUT_CAPACITY),
             cv_out_buffers,
         })
     }
@@ -112,16 +134,21 @@ pub struct Lv2Plugin {
     atom_sequence_input_count: usize,
     output_buffers: Vec<Vec<f32>>,
     frames_rendered: usize,
-    /// Always-zero buffer fed to every audio and CV input port (see
-    /// `process`) — never written to.
-    input_silence: Vec<f32>,
-    audio_input_count: usize,
+    /// One per audio input port, filled by the host (see
+    /// `HostedPlugin::audio_input_mut`).
+    input_buffers: Vec<Vec<f32>>,
+    /// Always-zero buffer fed to every CV input port — never written to; nothing
+    /// routes CV yet.
+    cv_silence: Vec<f32>,
     cv_input_count: usize,
     /// Scratch buffer(s) connected to the plugin's atom-sequence output
     /// port(s), if any — written by the plugin each block (e.g. MIDI-out, or a
     /// synth's UI-state messages) and then discarded; nothing downstream
     /// consumes it yet.
     atom_sequence_out: Vec<LV2AtomSequence>,
+    /// MIDI events found in `atom_sequence_out` after the last block — a MIDI
+    /// effect's output (see `HostedPlugin::midi_output`).
+    midi_out: Vec<MidiEvent>,
     /// Scratch buffer(s) connected to the plugin's CV output port(s), if any —
     /// same discard-after-render treatment as `atom_sequence_out`.
     cv_out_buffers: Vec<Vec<f32>>,
@@ -185,6 +212,14 @@ impl HostedPlugin for Lv2Plugin {
         self.output_buffers.len()
     }
 
+    fn audio_input_count(&self) -> usize {
+        self.input_buffers.len()
+    }
+
+    fn audio_input_mut(&mut self, channel: usize) -> &mut [f32] {
+        &mut self.input_buffers[channel]
+    }
+
     fn process(&mut self, midi_in: &[MidiEvent], frames: usize) {
         self.midi_in.clear();
         for event in midi_in {
@@ -198,15 +233,21 @@ impl HostedPlugin for Lv2Plugin {
         }
         self.frames_rendered = frames;
 
+        // An output sequence goes in as an empty chunk whose size says how much the
+        // plugin may write; the plugin turns it into a sequence.
+        for sequence in &mut self.atom_sequence_out {
+            sequence.clear_as_chunk();
+        }
+
         let midi_in = &self.midi_in;
-        // Every audio/CV input port gets the same silent buffer — there's no
-        // real audio-in routing yet (see `Lv2Host::instantiate`'s docs). Every
-        // atom-sequence input port gets the same MIDI, if the plugin has any —
-        // most effects have none, unlike instruments.
-        let silence = &self.input_silence[..frames];
+        // Audio inputs read what the host wrote into `input_buffers`; every CV
+        // input gets the same silent buffer. Every atom-sequence input port gets
+        // the same MIDI, if the plugin has any — most effects have none, unlike
+        // instruments.
+        let cv_silence = &self.cv_silence[..frames];
         let ports = livi::EmptyPortConnections::new()
-            .with_audio_inputs(std::iter::repeat_n(silence, self.audio_input_count))
-            .with_cv_inputs(std::iter::repeat_n(silence, self.cv_input_count))
+            .with_audio_inputs(self.input_buffers.iter().map(|buf| &buf[..frames]))
+            .with_cv_inputs(std::iter::repeat_n(cv_silence, self.cv_input_count))
             .with_atom_sequence_inputs(std::iter::repeat_n(midi_in, self.atom_sequence_input_count))
             .with_audio_outputs(self.output_buffers.iter_mut().map(|buf| &mut buf[..frames]))
             .with_atom_sequence_outputs(self.atom_sequence_out.iter_mut())
@@ -215,6 +256,26 @@ impl HostedPlugin for Lv2Plugin {
         if let Err(err) = unsafe { self.instance.run(frames, ports) } {
             log::error!("LV2 plugin '{}' failed to run: {err:?}", self.name);
         }
+
+        self.midi_out.clear();
+        for sequence in &self.atom_sequence_out {
+            for event in sequence.iter() {
+                if event.event.body.mytype != self.midi_urid {
+                    continue;
+                }
+                if self.midi_out.len() == self.midi_out.capacity() {
+                    break;
+                }
+                let offset = event.event.time_in_frames.clamp(0, frames as i64) as u32;
+                if let Some(midi) = MidiEvent::from_raw(offset, event.data) {
+                    self.midi_out.push(midi);
+                }
+            }
+        }
+    }
+
+    fn midi_output(&self) -> &[MidiEvent] {
+        &self.midi_out
     }
 
     fn audio_output(&self, channel: usize) -> &[f32] {

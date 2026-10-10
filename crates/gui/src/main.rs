@@ -3,13 +3,15 @@ slint::include_modules!();
 mod config;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use live_keys_engine::{
-    Engine, PluginEditor, SLOT_COUNT, default_plugin_search_paths, list_logical_output_devices,
-    list_midi_ports,
+    Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, PluginEditor, PluginInfo, PluginKey,
+    PluginKind, SLOT_COUNT, Section, SlotChain, default_plugin_search_paths,
+    list_logical_output_devices, list_midi_ports,
 };
 use live_keys_lv2_ui::{LaunchUiRequest, PluginUiHandle, UiKind, best_supported_ui, launch_ui};
 use live_keys_vst3_ui::Vst3Editor;
@@ -26,8 +28,8 @@ const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// has been selected once.
 const SYSTEM_DEFAULT_LABEL: &str = "System Default";
 
-/// A slot's open plugin GUI. LV2 GUIs run on a thread of their own; VST3 editors
-/// live on this (the main) thread and need pumping.
+/// A plugin's open GUI. LV2 GUIs run on a thread of their own; VST3 editors live
+/// on this (the main) thread and need pumping.
 enum OpenEditor {
     Lv2(PluginUiHandle),
     Vst3(Vst3Editor),
@@ -49,54 +51,230 @@ impl OpenEditor {
     }
 }
 
+/// Whether this host can show `meta`'s own GUI. For VST3 that's only known by
+/// trying to create the editor; a failure shows up as the open error.
+fn gui_supported(meta: &LoadedPluginMeta) -> bool {
+    match &meta.editor {
+        PluginEditor::Lv2 { plugin, .. } => {
+            matches!(best_supported_ui(plugin), Some((_, UiKind::ExternalUi | UiKind::X11Ui)))
+        }
+        PluginEditor::Vst3(_) => true,
+    }
+}
+
+/// `AppLogic`'s `section` argument: 0 for MIDI effects, else audio effects.
+fn section_from(section: i32) -> Section {
+    if section == 0 { Section::Midi } else { Section::Audio }
+}
+
+/// The plugin picker's `category` argument (see `Category` in globals.slint).
+fn kind_from(category: i32) -> PluginKind {
+    match category {
+        0 => PluginKind::Instrument,
+        1 => PluginKind::MidiEffect,
+        _ => PluginKind::AudioEffect,
+    }
+}
+
+/// Backs the plugin picker: every discovered plugin, and the model its list shows
+/// for the current category and search.
+struct Picker {
+    /// Sorted by name, so a plugin installed in more than one format lists its
+    /// formats side by side.
+    plugins: RefCell<Vec<PluginInfo>>,
+    rows: Rc<VecModel<PickerRow>>,
+    /// The last `filter` arguments, to refilter with after pinning.
+    filter: RefCell<(PluginKind, String)>,
+}
+
+impl Picker {
+    fn new() -> Self {
+        Self {
+            plugins: RefCell::new(Vec::new()),
+            rows: Rc::new(VecModel::default()),
+            filter: RefCell::new((PluginKind::Instrument, String::new())),
+        }
+    }
+
+    fn set_plugins(&self, mut plugins: Vec<PluginInfo>) {
+        plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
+        *self.plugins.borrow_mut() = plugins;
+    }
+
+    /// Shows `kind`'s plugins whose name and format contain every word of
+    /// `query` (case-insensitively), pinned ones first.
+    fn filter(&self, kind: PluginKind, query: &str, pinned: &[String]) {
+        *self.filter.borrow_mut() = (kind, query.to_string());
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let plugins = self.plugins.borrow();
+        let matches = plugins.iter().filter(|plugin| {
+            let text = format!("{} {}", plugin.name, plugin.format.label()).to_lowercase();
+            plugin.kind == kind && words.iter().all(|word| text.contains(word.as_str()))
+        });
+        let (pinned_rows, other_rows): (Vec<_>, Vec<_>) =
+            matches.partition(|plugin| pinned.contains(&plugin.id));
+        // The first unpinned row gets a divider, if anything is pinned above it.
+        let divider_at = (!pinned_rows.is_empty()).then_some(pinned_rows.len());
+        let rows = pinned_rows
+            .into_iter()
+            .chain(other_rows)
+            .enumerate()
+            .map(|(index, plugin)| PickerRow {
+                id: plugin.id.clone().into(),
+                name: plugin.name.clone().into(),
+                format: plugin.format.label().into(),
+                pinned: divider_at.is_some_and(|divider| index < divider),
+                after_pinned: divider_at == Some(index),
+            })
+            .collect::<Vec<_>>();
+        self.rows.set_vec(rows);
+    }
+
+    fn refilter(&self, pinned: &[String]) {
+        let (kind, query) = self.filter.borrow().clone();
+        self.filter(kind, &query, pinned);
+    }
+}
+
+/// Which slot `key` is loaded in, if any.
+fn slot_of(engine: &Engine, key: PluginKey) -> Option<usize> {
+    (0..SLOT_COUNT).find(|&slot| {
+        engine
+            .slot(slot)
+            .is_some_and(|chain| chain.plugins().any(|meta| meta.key == key))
+    })
+}
+
 /// GUI-side state of the Live tab's slots: the models backing `AppState.slots`,
-/// and each slot's open plugin GUI session, if any.
+/// which plugin each slot's parameter list shows, and every open plugin GUI.
 struct Rack {
     slots: Rc<VecModel<SlotState>>,
-    /// One per slot, kept for the app's lifetime and refilled on load, so
+    /// One per slot, kept for the app's lifetime and refilled in place, so
     /// refreshing a slot's other fields doesn't hand Slint a new model (and
-    /// rebuild that slot's sliders).
-    ports: Vec<Rc<VecModel<ParamRow>>>,
-    open_uis: RefCell<Vec<Option<OpenEditor>>>,
+    /// rebuild that slot's rows).
+    params: Vec<Rc<VecModel<ParamRow>>>,
+    midi_effects: Vec<Rc<VecModel<EffectRow>>>,
+    audio_effects: Vec<Rc<VecModel<EffectRow>>>,
+    /// Which plugin each slot's parameter list should show.
+    selected: RefCell<[Option<PluginKey>; SLOT_COUNT]>,
+    /// Which plugin each slot's parameter list was last filled from, so it's only
+    /// refilled when that changes.
+    shown: RefCell<[Option<PluginKey>; SLOT_COUNT]>,
+    open_uis: RefCell<HashMap<PluginKey, OpenEditor>>,
+    /// Last value sent per (plugin, parameter), so a refilled parameter list shows
+    /// where parameters actually are rather than their defaults.
+    param_values: RefCell<HashMap<(PluginKey, u32), f32>>,
 }
 
 impl Rack {
     fn new() -> Self {
-        let ports: Vec<_> = (0..SLOT_COUNT).map(|_| Rc::new(VecModel::default())).collect();
-        let slots = ports
-            .iter()
-            .map(|ports| SlotState {
-                params: ModelRc::from(ports.clone()),
+        fn models<T: 'static>() -> Vec<Rc<VecModel<T>>> {
+            (0..SLOT_COUNT).map(|_| Rc::new(VecModel::default())).collect()
+        }
+        let (params, midi_effects, audio_effects) = (models(), models(), models());
+        let slots = (0..SLOT_COUNT)
+            .map(|slot| SlotState {
+                params: ModelRc::from(params[slot].clone()),
+                midi_effects: ModelRc::from(midi_effects[slot].clone()),
+                audio_effects: ModelRc::from(audio_effects[slot].clone()),
+                instrument_key: -1,
+                selected_key: -1,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
         Self {
             slots: Rc::new(VecModel::from(slots)),
-            ports,
-            open_uis: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
+            params,
+            midi_effects,
+            audio_effects,
+            selected: RefCell::new([None; SLOT_COUNT]),
+            shown: RefCell::new([None; SLOT_COUNT]),
+            open_uis: RefCell::new(HashMap::new()),
+            param_values: RefCell::new(HashMap::new()),
         }
     }
 
-    /// Recomputes `slot`'s name and GUI state from the engine. `error`, if given,
-    /// is shown in place of the usual status line.
+    fn select(&self, slot: usize, key: PluginKey) {
+        self.selected.borrow_mut()[slot] = Some(key);
+    }
+
+    /// Recomputes `slot`'s chain, GUI state and selection from the engine,
+    /// refilling its parameter list if the selected plugin changed. `error`, if
+    /// given, is shown as the slot's status line.
     fn refresh_slot(&self, engine: &Engine, slot: usize, error: Option<String>) {
-        let meta = engine.slot(slot);
-        let (gui_supported, status) = match meta.map(|meta| &meta.editor) {
-            None => (false, ""),
-            Some(PluginEditor::Lv2 { plugin, .. }) => match best_supported_ui(plugin) {
-                Some((_, UiKind::ExternalUi | UiKind::X11Ui)) => (true, ""),
-                None => (false, "this plugin has no GUI"),
-            },
-            // Whether a VST3 plugin has an editor is only known by trying to
-            // create one; a failure shows up as the open error.
-            Some(PluginEditor::Vst3(_)) => (true, ""),
+        let empty = SlotChain::default();
+        let chain = engine.slot(slot).unwrap_or(&empty);
+
+        // Keep the selection on a plugin that's still there, falling back to the
+        // chain's first plugin.
+        let selected = {
+            let mut selected = self.selected.borrow_mut();
+            if selected[slot].is_none_or(|key| chain.plugins().all(|meta| meta.key != key)) {
+                selected[slot] = chain.plugins().next().map(|meta| meta.key);
+            }
+            selected[slot]
         };
+
+        let open_uis = self.open_uis.borrow();
+        let effect_rows = |section: Section| -> Vec<EffectRow> {
+            chain
+                .effects(section)
+                .iter()
+                .map(|meta| EffectRow {
+                    key: meta.key as i32,
+                    name: meta.name.clone().into(),
+                    gui_supported: gui_supported(meta),
+                    gui_open: open_uis.contains_key(&meta.key),
+                })
+                .collect()
+        };
+        self.midi_effects[slot].set_vec(effect_rows(Section::Midi));
+        self.audio_effects[slot].set_vec(effect_rows(Section::Audio));
+
+        let instrument = chain.instrument.as_ref();
         let mut row = self.slots.row_data(slot).unwrap();
-        row.plugin_name = meta.map(|meta| meta.name.as_str()).unwrap_or_default().into();
-        row.gui_supported = gui_supported;
-        row.gui_open = self.open_uis.borrow()[slot].is_some();
-        row.status = error.unwrap_or_else(|| status.to_string()).into();
+        row.plugin_name = instrument.map(|meta| meta.name.as_str()).unwrap_or_default().into();
+        row.instrument_key = instrument.map_or(-1, |meta| meta.key as i32);
+        row.gui_supported = instrument.is_some_and(gui_supported);
+        row.gui_open = instrument.is_some_and(|meta| open_uis.contains_key(&meta.key));
+        row.status = error.unwrap_or_default().into();
+        row.selected_key = selected.map_or(-1, |key| key as i32);
+        row.selected_name = selected
+            .and_then(|key| engine.plugin(key))
+            .map(|meta| meta.name.as_str())
+            .unwrap_or_default()
+            .into();
+        drop(open_uis);
         self.slots.set_row_data(slot, row);
+
+        if self.shown.borrow()[slot] != selected {
+            self.shown.borrow_mut()[slot] = selected;
+            self.fill_params(engine, slot, selected);
+        }
+    }
+
+    /// Fills `slot`'s parameter list with `key`'s parameters (empty for `None`).
+    fn fill_params(&self, engine: &Engine, slot: usize, key: Option<PluginKey>) {
+        let values = self.param_values.borrow();
+        let rows: Vec<ParamRow> = key
+            .and_then(|key| Some((key, engine.plugin(key)?)))
+            .map(|(key, meta)| {
+                meta.params
+                    .iter()
+                    .map(|param| ParamRow {
+                        param_id: param.id as i32,
+                        name: param.name.clone().into(),
+                        min_value: param.min_value,
+                        max_value: param.max_value,
+                        value: values
+                            .get(&(key, param.id))
+                            .copied()
+                            .unwrap_or(param.default_value),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.params[slot].set_vec(rows);
     }
 
     /// Pushes `slot`'s MIDI filter and volume into its row. The widgets edit these
@@ -114,78 +292,90 @@ impl Rack {
 
     fn refresh_all(&self, engine: &Engine) {
         for slot in 0..SLOT_COUNT {
-            self.reload_ports(engine, slot);
             self.refresh_slot(engine, slot, None);
         }
     }
 
-    /// Refills `slot`'s parameter list from the plugin now loaded there, at
-    /// default values.
-    fn reload_ports(&self, engine: &Engine, slot: usize) {
-        let rows: Vec<ParamRow> = engine
-            .slot(slot)
-            .map(|meta| meta.params.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .map(|param| ParamRow {
-                param_id: param.id as i32,
-                name: param.name.clone().into(),
-                min_value: param.min_value,
-                max_value: param.max_value,
-                value: param.default_value,
-            })
-            .collect();
-        self.ports[slot].set_vec(rows);
-    }
-
-    /// Records a param value that was just sent to the engine, so the slot's
-    /// slider reflects it.
-    fn set_param_value(&self, slot: usize, param_id: u32, value: f32) {
-        let ports = &self.ports[slot];
-        if let Some(row) = ports.iter().position(|port| port.param_id as u32 == param_id) {
-            let mut port = ports.row_data(row).unwrap();
-            port.value = value;
-            ports.set_row_data(row, port);
+    /// Records a param value that was just sent to the engine, so the parameter
+    /// list reflects it (now if it's showing that plugin, or when it next does).
+    fn set_param_value(&self, key: PluginKey, param_id: u32, value: f32) {
+        self.param_values.borrow_mut().insert((key, param_id), value);
+        for slot in 0..SLOT_COUNT {
+            if self.shown.borrow()[slot] != Some(key) {
+                continue;
+            }
+            let params = &self.params[slot];
+            if let Some(row) = params.iter().position(|param| param.param_id as u32 == param_id) {
+                let mut param = params.row_data(row).unwrap();
+                param.value = value;
+                params.set_row_data(row, param);
+            }
         }
     }
 
-    /// Closes `slot`'s plugin GUI. For an LV2 GUI this is only a best-effort
-    /// signal in case its hosting thread is still responsive; either way, our own
-    /// bookkeeping is cleared unconditionally so the user can try a fresh session
-    /// even if the previous one's plugin code has wedged and will never confirm
-    /// closing itself (observed with Helm's own UI). The old thread, if genuinely
-    /// stuck, is abandoned — it leaks until the app exits, which beats leaving the
-    /// button permanently disabled. A VST3 editor closes synchronously.
-    fn close_ui(&self, slot: usize) {
-        let editor = self.open_uis.borrow_mut()[slot].take();
+    /// Closes `key`'s plugin GUI, if open. For an LV2 GUI this is only a
+    /// best-effort signal in case its hosting thread is still responsive; either
+    /// way, our own bookkeeping is cleared unconditionally so the user can try a
+    /// fresh session even if the previous one's plugin code has wedged and will
+    /// never confirm closing itself (observed with Helm's own UI). The old thread,
+    /// if genuinely stuck, is abandoned — it leaks until the app exits, which beats
+    /// leaving the button permanently disabled. A VST3 editor closes synchronously.
+    fn close_ui(&self, key: PluginKey) {
+        let editor = self.open_uis.borrow_mut().remove(&key);
         if let Some(mut editor) = editor {
             editor.close();
         }
     }
 
+    /// Lets go of everything kept about `key`, which is about to be unloaded: its
+    /// GUI (which holds the instance's raw handle) and its cached param values.
+    fn forget(&self, key: PluginKey) {
+        self.close_ui(key);
+        self.param_values.borrow_mut().retain(|&(cached, _), _| cached != key);
+    }
+
+    /// Lets go of every plugin, for when the engine is about to reload or drop
+    /// them all (keys don't survive that).
+    fn forget_all(&self) {
+        let editors: Vec<OpenEditor> = self.open_uis.borrow_mut().drain().map(|(_, e)| e).collect();
+        for mut editor in editors {
+            editor.close();
+        }
+        self.param_values.borrow_mut().clear();
+    }
+
     /// Pumps open VST3 editors, and forgets any GUI that has closed, refreshing
     /// its slot.
     fn poll_uis(&self, engine: &Engine) {
-        for slot in 0..SLOT_COUNT {
-            let closed = {
-                let mut open_uis = self.open_uis.borrow_mut();
-                if let Some(OpenEditor::Vst3(editor)) = &mut open_uis[slot] {
-                    editor.idle();
-                }
-                open_uis[slot].as_ref().is_some_and(OpenEditor::is_closed)
-            };
-            if closed {
-                self.open_uis.borrow_mut()[slot] = None;
+        let mut closed = Vec::new();
+        for (&key, editor) in self.open_uis.borrow_mut().iter_mut() {
+            if let OpenEditor::Vst3(editor) = editor {
+                editor.idle();
+            }
+            if editor.is_closed() {
+                closed.push(key);
+            }
+        }
+        for key in closed {
+            self.open_uis.borrow_mut().remove(&key);
+            if let Some(slot) = slot_of(engine, key) {
                 self.refresh_slot(engine, slot, None);
             }
         }
     }
+}
 
-    fn close_all_uis(&self) {
-        for slot in 0..SLOT_COUNT {
-            self.close_ui(slot);
-        }
+/// Mirrors `slot`'s chain into the config, so the last setup is on record.
+fn record_chain(config: &RefCell<config::AppConfig>, engine: &Engine, slot: usize) {
+    let mut config = config.borrow_mut();
+    if let Some(chain) = engine.slot(slot) {
+        let slot_config = &mut config.slots[slot];
+        slot_config.plugin_id = chain.instrument.as_ref().map(|meta| meta.id.clone());
+        let ids = |section| chain.effects(section).iter().map(|meta| meta.id.clone()).collect();
+        slot_config.midi_effect_ids = ids(Section::Midi);
+        slot_config.effect_ids = ids(Section::Audio);
     }
+    log_on_err(config::save(&config));
 }
 
 fn main() -> anyhow::Result<()> {
@@ -209,12 +399,14 @@ fn main() -> anyhow::Result<()> {
             engine.borrow_mut().rescan_plugins(&extra_dirs);
         }
     }
-    // Param changes from a plugin's own open GUI arrive as `(slot, param_id,
-    // value)` — on its hosting thread for LV2, on this thread for VST3; they're forwarded here and applied to the engine
-    // from this (the control) thread by the poll timer below, since only one thread
-    // may drive the audio engine's command queue.
-    let (param_tx, param_rx) = mpsc::channel::<(usize, u32, f32)>();
+    // Param changes from a plugin's own open GUI arrive as `(key, param_id, value)`
+    // — on its hosting thread for LV2, on this thread for VST3; they're forwarded
+    // here and applied to the engine from this (the control) thread by the poll
+    // timer below, since only one thread may drive the audio engine's command
+    // queue.
+    let (param_tx, param_rx) = mpsc::channel::<(PluginKey, u32, f32)>();
     let rack = Rc::new(Rack::new());
+    let picker = Rc::new(Picker::new());
 
     let app = AppWindow::new()?;
     let state = app.global::<AppState>();
@@ -234,8 +426,11 @@ fn main() -> anyhow::Result<()> {
 
     state.set_default_plugin_folders(string_model(default_plugin_search_paths()));
     state.set_slots(ModelRc::from(rack.slots.clone()));
+    state.set_max_midi_effects(MAX_MIDI_EFFECTS as i32);
+    state.set_max_effects(MAX_EFFECTS as i32);
+    state.set_picker_rows(ModelRc::from(picker.rows.clone()));
     refresh_plugin_folders(&app, &config.borrow());
-    refresh_plugin_list(&app, &engine.borrow());
+    refresh_plugin_list(&app, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
     for (slot, slot_config) in config.borrow().slots.iter().enumerate() {
         rack.set_routing(slot, slot_config);
@@ -308,18 +503,44 @@ fn main() -> anyhow::Result<()> {
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
+        let picker = picker.clone();
         logic.on_rescan_plugins(move || {
             let Some(app) = app_weak.upgrade() else {
                 return;
             };
-            // Rescanning unloads every slot, invalidating any open plugin GUI's
+            // Rescanning unloads every plugin, invalidating any open plugin GUI's
             // instance handle.
-            rack.close_all_uis();
+            rack.forget_all();
             engine
                 .borrow_mut()
                 .rescan_plugins(&config.borrow().extra_plugin_dirs);
-            refresh_plugin_list(&app, &engine.borrow());
+            refresh_plugin_list(&app, &engine.borrow(), &picker);
             rack.refresh_all(&engine.borrow());
+        });
+    }
+
+    {
+        let config = config.clone();
+        let picker = picker.clone();
+        logic.on_filter_picker(move |category, query| {
+            picker.filter(kind_from(category), &query, &config.borrow().pinned_plugins);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let picker = picker.clone();
+        logic.on_toggle_pin(move |plugin_id| {
+            let mut config = config.borrow_mut();
+            let pinned = &mut config.pinned_plugins;
+            match pinned.iter().position(|id| id == plugin_id.as_str()) {
+                Some(index) => {
+                    pinned.remove(index);
+                }
+                None => pinned.push(plugin_id.to_string()),
+            }
+            picker.refilter(pinned);
+            log_on_err(config::save(&config));
         });
     }
 
@@ -327,26 +548,37 @@ fn main() -> anyhow::Result<()> {
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_load_plugin(move |slot, plugin_id| {
+        logic.on_pick_plugin(move |slot, category, plugin_id| {
             let slot = slot as usize;
-            // The slot's current plugin instance is about to be replaced, and an open
-            // GUI holds its raw instance handle.
-            rack.close_ui(slot);
-            let result =
-                load_into_slot(&mut engine.borrow_mut(), &config.borrow(), slot, &plugin_id);
+            let kind = kind_from(category);
+            if kind == PluginKind::Instrument {
+                // The slot's current instrument is about to be replaced, and an open
+                // GUI holds its raw instance handle.
+                let old_key = engine
+                    .borrow()
+                    .slot(slot)
+                    .and_then(|chain| chain.instrument.as_ref())
+                    .map(|meta| meta.key);
+                if let Some(old_key) = old_key {
+                    rack.forget(old_key);
+                }
+            }
+            let result = with_running_engine(&engine, &config.borrow(), |engine| match kind {
+                PluginKind::Instrument => engine.load_instrument(slot, &plugin_id),
+                PluginKind::MidiEffect => engine.add_effect(slot, Section::Midi, &plugin_id),
+                PluginKind::AudioEffect => engine.add_effect(slot, Section::Audio, &plugin_id),
+            });
             let error = match result {
-                Ok(()) => {
-                    let mut config = config.borrow_mut();
-                    config.slots[slot].plugin_id = Some(plugin_id.to_string());
-                    log_on_err(config::save(&config));
+                Ok(key) => {
+                    rack.select(slot, key);
+                    record_chain(&config, &engine.borrow(), slot);
                     None
                 }
                 Err(err) => {
-                    log::error!("failed to load plugin '{plugin_id}' into slot {slot}: {err:#}");
-                    Some(format!("load failed: {err}"))
+                    log::error!("failed to load {} '{plugin_id}' into slot {slot}: {err:#}", kind.label());
+                    Some(format!("loading failed: {err}"))
                 }
             };
-            rack.reload_ports(&engine.borrow(), slot);
             rack.refresh_slot(&engine.borrow(), slot, error);
         });
     }
@@ -357,14 +589,50 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         logic.on_unload_plugin(move |slot| {
             let slot = slot as usize;
-            rack.close_ui(slot);
-            engine.borrow_mut().unload_slot(slot);
-            {
-                let mut config = config.borrow_mut();
-                config.slots[slot].plugin_id = None;
-                log_on_err(config::save(&config));
+            let key = engine
+                .borrow()
+                .slot(slot)
+                .and_then(|chain| chain.instrument.as_ref())
+                .map(|meta| meta.key);
+            if let Some(key) = key {
+                rack.forget(key);
             }
-            rack.reload_ports(&engine.borrow(), slot);
+            engine.borrow_mut().unload_instrument(slot);
+            record_chain(&config, &engine.borrow(), slot);
+            rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_remove_effect(move |slot, section, index| {
+            let (slot, section, index) = (slot as usize, section_from(section), index as usize);
+            let key = engine
+                .borrow()
+                .slot(slot)
+                .and_then(|chain| chain.effects(section).get(index))
+                .map(|meta| meta.key);
+            if let Some(key) = key {
+                rack.forget(key);
+            }
+            engine.borrow_mut().remove_effect(slot, section, index);
+            record_chain(&config, &engine.borrow(), slot);
+            rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_move_effect(move |slot, section, from, to| {
+            let slot = slot as usize;
+            engine
+                .borrow_mut()
+                .move_effect(slot, section_from(section), from as usize, to as usize);
+            record_chain(&config, &engine.borrow(), slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
@@ -372,13 +640,23 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_open_plugin_gui(move |slot| {
+        logic.on_select_plugin(move |slot, key| {
             let slot = slot as usize;
-            if rack.open_uis.borrow()[slot].is_some() {
+            rack.select(slot, key as PluginKey);
+            rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_open_plugin_gui(move |key| {
+            let key = key as PluginKey;
+            if rack.open_uis.borrow().contains_key(&key) {
                 return;
             }
             let engine = engine.borrow();
-            let Some(meta) = engine.slot(slot) else {
+            let (Some(meta), Some(slot)) = (engine.plugin(key), slot_of(&engine, key)) else {
                 return;
             };
             let param_tx = param_tx.clone();
@@ -386,7 +664,7 @@ fn main() -> anyhow::Result<()> {
             // already shutting down — nothing useful to do about it, and this can
             // fire rapidly (e.g. a dragged knob), so it isn't logged.
             let forward_edit = move |param_id: u32, value: f32| {
-                let _ = param_tx.send((slot, param_id, value));
+                let _ = param_tx.send((key, param_id, value));
             };
             let opened = match &meta.editor {
                 PluginEditor::Lv2 {
@@ -407,12 +685,12 @@ fn main() -> anyhow::Result<()> {
             };
             let error = match opened {
                 Ok(editor) => {
-                    rack.open_uis.borrow_mut()[slot] = Some(editor);
+                    rack.open_uis.borrow_mut().insert(key, editor);
                     None
                 }
                 Err(err) => {
-                    log::error!("failed to open plugin GUI for slot {slot}: {err:#}");
-                    Some(format!("failed to open GUI: {err}"))
+                    log::error!("failed to open GUI of '{}': {err:#}", meta.name);
+                    Some(format!("failed to open {}'s GUI: {err}", meta.name))
                 }
             };
             rack.refresh_slot(&engine, slot, error);
@@ -422,20 +700,23 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_close_plugin_gui(move |slot| {
-            let slot = slot as usize;
-            rack.close_ui(slot);
-            rack.refresh_slot(&engine.borrow(), slot, None);
+        logic.on_close_plugin_gui(move |key| {
+            let key = key as PluginKey;
+            rack.close_ui(key);
+            let engine = engine.borrow();
+            if let Some(slot) = slot_of(&engine, key) {
+                rack.refresh_slot(&engine, slot, None);
+            }
         });
     }
 
     {
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_set_param(move |slot, param_id, value| {
-            let (slot, param_id) = (slot as usize, param_id as u32);
-            engine.borrow_mut().set_param(slot, param_id, value);
-            rack.set_param_value(slot, param_id, value);
+        logic.on_set_param(move |key, param_id, value| {
+            let (key, param_id) = (key as PluginKey, param_id as u32);
+            engine.borrow_mut().set_param(key, param_id, value);
+            rack.set_param_value(key, param_id, value);
         });
     }
 
@@ -486,9 +767,9 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             rack.poll_uis(&engine.borrow());
-            while let Ok((slot, param_id, value)) = param_rx.try_recv() {
-                engine.borrow_mut().send_param_change(slot, param_id, value);
-                rack.set_param_value(slot, param_id, value);
+            while let Ok((key, param_id, value)) = param_rx.try_recv() {
+                engine.borrow_mut().send_param_change(key, param_id, value);
+                rack.set_param_value(key, param_id, value);
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {
@@ -501,29 +782,30 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Loads `uri` into `slot`, first starting the audio/MIDI stream on the configured
-/// devices if this is the first plugin loaded.
-fn load_into_slot(
-    engine: &mut Engine,
+/// Runs `action` on the engine, first starting the audio/MIDI stream on the
+/// configured devices if this is the first plugin loaded.
+fn with_running_engine<T>(
+    engine: &RefCell<Engine>,
     config: &config::AppConfig,
-    slot: usize,
-    uri: &str,
-) -> anyhow::Result<()> {
+    action: impl FnOnce(&mut Engine) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut engine = engine.borrow_mut();
     if !engine.is_running() {
         engine.start(config.audio_device.as_deref(), config.midi_port.as_deref())?;
     }
-    engine.load_into_slot(slot, uri)
+    action(&mut engine)
 }
 
 /// Applies a changed audio/MIDI device selection to an already running engine.
-/// Restarting re-instantiates every loaded plugin, so open plugin GUIs (holding the
-/// old instances' handles) are closed first. A no-op if nothing has started the
-/// engine yet — the selection is picked up by the first load instead.
+/// Restarting re-instantiates every loaded plugin (with new keys), so open plugin
+/// GUIs (holding the old instances' handles) are closed first. A no-op if nothing
+/// has started the engine yet — the selection is picked up by the first load
+/// instead.
 fn restart_engine(engine: &RefCell<Engine>, config: &config::AppConfig, rack: &Rack) {
     if !engine.borrow().is_running() {
         return;
     }
-    rack.close_all_uis();
+    rack.forget_all();
     let result = engine
         .borrow_mut()
         .start(config.audio_device.as_deref(), config.midi_port.as_deref());
@@ -557,26 +839,17 @@ fn refresh_plugin_folders(app: &AppWindow, config: &config::AppConfig) {
     app.global::<AppState>().set_extra_plugin_folders(string_model(folders));
 }
 
-fn refresh_plugin_list(app: &AppWindow, engine: &Engine) {
-    let mut plugins: Vec<_> = engine
-        .list_plugins()
-        .into_iter()
-        .filter(|plugin| plugin.is_instrument)
+/// Hands the plugin picker and the Settings tab's list the plugins found by the
+/// last scan.
+fn refresh_plugin_list(app: &AppWindow, engine: &Engine, picker: &Picker) {
+    picker.set_plugins(engine.list_plugins());
+    let names = picker
+        .plugins
+        .borrow()
+        .iter()
+        .map(|plugin| format!("{} — {} ({})", plugin.name, plugin.kind.label(), plugin.format.label()))
         .collect();
-    // By name, so a plugin installed in more than one format lists its formats
-    // side by side.
-    plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
-    let rows: Vec<PluginRow> = plugins
-        .into_iter()
-        .map(|plugin| PluginRow {
-            id: plugin.id.into(),
-            name: format!("{} ({})", plugin.name, plugin.format.label()).into(),
-        })
-        .collect();
-    let names = rows.iter().map(|row| row.name.to_string()).collect();
-    let state = app.global::<AppState>();
-    state.set_plugins(ModelRc::new(VecModel::from(rows)));
-    state.set_plugin_names(string_model(names));
+    app.global::<AppState>().set_discovered_plugins(string_model(names));
 }
 
 fn log_on_err(result: anyhow::Result<()>) {

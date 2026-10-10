@@ -120,6 +120,12 @@ impl EventList {
         unsafe { (*self.events.get()).clear() };
     }
 
+    /// The events currently in the list. Only call between `process` calls (or
+    /// from inside one), like everything else here.
+    pub fn events(&self) -> &[Event] {
+        unsafe { &*self.events.get() }
+    }
+
     /// Appends `event` unless the list is full, in which case it's dropped rather
     /// than reallocating on the audio thread.
     pub fn push(&self, event: Event) -> bool {

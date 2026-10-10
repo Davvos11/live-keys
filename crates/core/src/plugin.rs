@@ -17,6 +17,27 @@ impl PluginFormat {
     }
 }
 
+/// What a plugin does, which decides where in a slot's chain it can go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginKind {
+    /// MIDI in, audio out.
+    Instrument,
+    /// MIDI in, MIDI out, no audio out (arpeggiators, transposers, filters).
+    MidiEffect,
+    /// Audio in, audio out — and anything else that isn't one of the above.
+    AudioEffect,
+}
+
+impl PluginKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginKind::Instrument => "instrument",
+            PluginKind::MidiEffect => "MIDI effect",
+            PluginKind::AudioEffect => "audio effect",
+        }
+    }
+}
+
 /// Metadata for a discovered plugin, used to populate a plugin picker before
 /// instantiating one.
 #[derive(Debug, Clone)]
@@ -26,7 +47,7 @@ pub struct PluginInfo {
     pub id: String,
     pub name: String,
     pub format: PluginFormat,
-    pub is_instrument: bool,
+    pub kind: PluginKind,
 }
 
 /// Metadata for one automatable parameter, used to populate a parameter editor UI
@@ -57,13 +78,32 @@ pub trait HostedPlugin: Send {
     /// Number of audio output channels this plugin produces.
     fn audio_output_count(&self) -> usize;
 
-    /// Render `frames` samples, consuming `midi_in` events for this block.
+    /// Number of audio input channels this plugin takes (0 for e.g. most
+    /// instruments).
+    fn audio_input_count(&self) -> usize;
+
+    /// The plugin's own buffer for input channel `channel`, for the host to fill
+    /// before the next `process` call — the input-side counterpart of
+    /// `audio_output`. At least as long as the largest `frames` the plugin will be
+    /// asked to process; only the first `frames` samples are read. Contents
+    /// persist between calls, so a host with nothing to feed must zero it.
+    fn audio_input_mut(&mut self, channel: usize) -> &mut [f32];
+
+    /// Render `frames` samples from the current input buffers, consuming
+    /// `midi_in` events for this block.
     fn process(&mut self, midi_in: &[MidiEvent], frames: usize);
 
     /// Read back the audio rendered by the most recent `process` call for output
     /// channel `channel`. The returned slice has length equal to the `frames`
     /// passed to that call.
     fn audio_output(&self, channel: usize) -> &[f32];
+
+    /// MIDI the most recent `process` call produced, for a MIDI effect: the input
+    /// of whatever comes next in the chain. Plugins without MIDI output return
+    /// nothing.
+    fn midi_output(&self) -> &[MidiEvent] {
+        &[]
+    }
 
     /// Set a parameter to a new value, taking effect from the next `process` call.
     /// `id` and `value` are as described on [`ParamInfo`]; an unknown `id` is a

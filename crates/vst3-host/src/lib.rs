@@ -11,7 +11,7 @@ mod plugin;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_core::{PluginFormat, PluginInfo};
+use live_keys_core::{PluginFormat, PluginInfo, PluginKind};
 use vst3::Steinberg::TUID;
 
 pub use com::EditCallback;
@@ -69,7 +69,14 @@ impl Vst3Host {
                         id,
                         name: class.name,
                         format: PluginFormat::Vst3,
-                        is_instrument: class.is_instrument,
+                        kind: if class.is_instrument {
+                            PluginKind::Instrument
+                        } else {
+                            // Effects can't be told apart by category; MIDI ones
+                            // need a look at their buses.
+                            plugin::probe_kind(&module, &class.cid)
+                                .unwrap_or(PluginKind::AudioEffect)
+                        },
                     },
                     binary: binary.clone(),
                     cid: class.cid,

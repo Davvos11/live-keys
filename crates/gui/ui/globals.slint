@@ -1,7 +1,13 @@
-export struct PluginRow {
+// One plugin in the plugin picker's list.
+export struct PickerRow {
     // `PluginInfo::id`: an LV2 URI or `vst3:` + class ID.
     id: string,
     name: string,
+    // "LV2" or "VST3".
+    format: string,
+    pinned: bool,
+    // The first unpinned row after some pinned ones, drawn with a divider above.
+    after-pinned: bool,
 }
 
 export struct ParamRow {
@@ -14,22 +20,42 @@ export struct ParamRow {
     value: float,
 }
 
-// One rack slot on the Live tab.
-export struct SlotState {
-    // Empty when nothing is loaded into this slot.
-    plugin-name: string,
-    // Whether the loaded plugin has any GUI this host can show at all.
+// One effect (MIDI or audio) in a slot's chain.
+export struct EffectRow {
+    // The engine's `PluginKey` of this instance.
+    key: int,
+    name: string,
     gui-supported: bool,
-    // Whether we currently believe a plugin GUI session is open. A plugin's own UI
-    // can wedge internally (observed with some External UI plugins) and never
-    // signal back that it closed — "Close GUI" lets the user force this back to
-    // false so they can at least try a fresh session, independent of whatever the
-    // previous one's hosting thread is stuck doing.
+    gui-open: bool,
+}
+
+// One rack slot on the Live tab: MIDI effects, an instrument, then audio
+// effects.
+export struct SlotState {
+    // Empty when no instrument is loaded into this slot.
+    plugin-name: string,
+    // The instrument's `PluginKey`, or -1 if none.
+    instrument-key: int,
+    // Whether the instrument has any GUI this host can show at all.
+    gui-supported: bool,
+    // Whether we currently believe the instrument's GUI session is open. A
+    // plugin's own UI can wedge internally (observed with some External UI
+    // plugins) and never signal back that it closed — "Close GUI" lets the user
+    // force this back to false so they can at least try a fresh session,
+    // independent of whatever the previous one's hosting thread is stuck doing.
     gui-open: bool,
     // Why the GUI can't be opened, or the last load/open error; empty if none.
     status: string,
-    // Parameters of the loaded plugin — a parameter editor usable whether or not
-    // the plugin has its own GUI.
+    // In processing order, in front of the instrument.
+    midi-effects: [EffectRow],
+    // In processing order, after the instrument.
+    audio-effects: [EffectRow],
+    // Which plugin of the slot (instrument or an effect) the parameter list
+    // shows, by key; -1 if none.
+    selected-key: int,
+    selected-name: string,
+    // Parameters of the selected plugin — a parameter editor usable whether or
+    // not the plugin has its own GUI.
     params: [ParamRow],
     // MIDI this slot responds to. Channel is 0 for omni, else 1-16; note and
     // velocity ranges are inclusive.
@@ -51,29 +77,50 @@ export global AppState {
     in property <int> selected-midi-index: -1;
     in property <[string]> default-plugin-folders;
     in property <[string]> extra-plugin-folders;
-    in property <[PluginRow]> plugins;
-    // `plugins[i]`'s display name (with its format) for every i, since a ComboBox
-    // model must be `[string]`.
-    in property <[string]> plugin-names;
+    // Every plugin found, as "name — kind (format)", for the Settings tab.
+    in property <[string]> discovered-plugins;
+    // The plugin picker's list for its current category and search, pinned
+    // plugins first; refilled by `AppLogic.filter-picker`.
+    in property <[PickerRow]> picker-rows;
+    in property <int> max-midi-effects: 8;
+    in property <int> max-effects: 8;
     in property <[SlotState]> slots;
     // Volume fader range; the minimum means muted.
     in property <float> min-volume-db: -60;
     in property <float> max-volume-db: 6;
 }
 
+// Plugin categories, as the picker's tabs and `category` arguments number them.
+export global Category {
+    out property <int> instrument: 0;
+    out property <int> midi-effect: 1;
+    out property <int> audio-effect: 2;
+}
+
 // Actions the UI triggers that the host (Rust) handles. `slot` arguments index
-// `AppState.slots`.
+// `AppState.slots`; `key` arguments are a loaded plugin's `PluginKey`;
+// `category` is as in `Category`; `section` is 0 for a slot's MIDI effects and
+// 1 for its audio effects.
 export global AppLogic {
     callback select-audio-device(string);
     callback select-midi-port(string);
     callback add-plugin-folder();
     callback remove-plugin-folder(string);
     callback rescan-plugins();
-    callback load-plugin(/* slot */ int, /* plugin id */ string);
+    // Refills `AppState.picker-rows` with `category`'s plugins matching `query`.
+    callback filter-picker(/* category */ int, /* query */ string);
+    callback toggle-pin(/* plugin id */ string);
+    // Loads the plugin as the slot's instrument (replacing any) or appends it
+    // to the slot's MIDI or audio effects, depending on `category`.
+    callback pick-plugin(/* slot */ int, /* category */ int, /* plugin id */ string);
     callback unload-plugin(/* slot */ int);
-    callback open-plugin-gui(/* slot */ int);
-    callback close-plugin-gui(/* slot */ int);
-    callback set-param(/* slot */ int, /* param-id */ int, float);
+    callback remove-effect(/* slot */ int, /* section */ int, /* index */ int);
+    callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
+    // Shows `key`'s parameters in the slot's parameter list.
+    callback select-plugin(/* slot */ int, /* key */ int);
+    callback open-plugin-gui(/* key */ int);
+    callback close-plugin-gui(/* key */ int);
+    callback set-param(/* key */ int, /* param-id */ int, float);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
