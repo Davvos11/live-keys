@@ -13,11 +13,23 @@ export struct PickerRow {
 export struct ParamRow {
     param-id: int,
     name: string,
+    // As `ParamKind`: 0 continuous, 1 toggle, 2 stepped, 3 choice, 4 note.
+    kind: int,
     min-value: float,
     max-value: float,
-    // Last value sent to the plugin (from a slider or the plugin's own GUI), so a
-    // rebuilt slider shows where the parameter actually is, not its default.
+    // Steps between min and max for stepped/note parameters; 0 otherwise.
+    steps: int,
+    // Continuous parameter shown on a logarithmic slider (min-value > 0).
+    logarithmic: bool,
+    // Last value sent to the plugin (from a control or the plugin's own GUI), so
+    // a rebuilt control shows where the parameter actually is, not its default.
     value: float,
+    // `value` as the plugin or its metadata would show it ("-6 dB", "C#3").
+    text: string,
+    // A choice parameter's option labels, their values, and the current one.
+    choices: [string],
+    choice-values: [float],
+    choice-index: int,
 }
 
 // One effect (MIDI or audio) in a slot's chain.
@@ -27,6 +39,8 @@ export struct EffectRow {
     name: string,
     gui-supported: bool,
     gui-open: bool,
+    // Whether its parameter window is open.
+    params-open: bool,
 }
 
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
@@ -44,19 +58,14 @@ export struct SlotState {
     // force this back to false so they can at least try a fresh session,
     // independent of whatever the previous one's hosting thread is stuck doing.
     gui-open: bool,
+    // Whether the instrument's parameter window is open.
+    params-open: bool,
     // Why the GUI can't be opened, or the last load/open error; empty if none.
     status: string,
     // In processing order, in front of the instrument.
     midi-effects: [EffectRow],
     // In processing order, after the instrument.
     audio-effects: [EffectRow],
-    // Which plugin of the slot (instrument or an effect) the parameter list
-    // shows, by key; -1 if none.
-    selected-key: int,
-    selected-name: string,
-    // Parameters of the selected plugin — a parameter editor usable whether or
-    // not the plugin has its own GUI.
-    params: [ParamRow],
     // MIDI this slot responds to. Channel is 0 for omni, else 1-16; note and
     // velocity ranges are inclusive.
     midi-channel: int,
@@ -116,10 +125,12 @@ export global AppLogic {
     callback unload-plugin(/* slot */ int);
     callback remove-effect(/* slot */ int, /* section */ int, /* index */ int);
     callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
-    // Shows `key`'s parameters in the slot's parameter list.
-    callback select-plugin(/* slot */ int, /* key */ int);
+    // Opens `key`'s parameter window, or closes it if open.
+    callback toggle-params(/* key */ int);
     callback open-plugin-gui(/* key */ int);
     callback close-plugin-gui(/* key */ int);
+    // Invoked by the Rust side for a `ParamsWindow`'s edits (a separate window
+    // can't reach this window's globals itself).
     callback set-param(/* key */ int, /* param-id */ int, float);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);

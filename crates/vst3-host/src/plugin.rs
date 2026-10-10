@@ -5,7 +5,7 @@ use std::ffi::c_char;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginKind};
+use live_keys_core::{HostedPlugin, MidiEvent, ParamChoice, ParamInfo, ParamKind, PluginKind};
 use vst3::Steinberg::Vst::ControllerNumbers_::{
     kAfterTouch, kCtrlPolyPressure, kCtrlProgramChange, kPitchBend,
 };
@@ -13,7 +13,9 @@ use vst3::Steinberg::Vst::Event_::EventFlags_::kIsLive;
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
     kLegacyMIDICCOutEvent, kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent,
 };
-use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kIsHidden, kIsReadOnly};
+use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{
+    kIsBypass, kIsHidden, kIsList, kIsReadOnly,
+};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kContTimeValid, kTempoValid, kTimeSigValid,
 };
@@ -305,6 +307,18 @@ fn midi_map(controller: &ComPtr<IEditController>) -> Box<MidiMap> {
     map
 }
 
+/// Most options a list parameter is shown as a choice for; a longer list (rare)
+/// stays a stepped slider rather than a huge dropdown.
+const MAX_LIST_STEPS: u32 = 256;
+
+/// The plugin's own text for parameter `id` at normalized `value` ("-6.0", "Saw"),
+/// without the unit.
+fn value_text(controller: &ComPtr<IEditController>, id: ParamID, value: f32) -> Option<String> {
+    let mut text: vst3::Steinberg::Vst::String128 = [0; 128];
+    let result = unsafe { controller.getParamStringByValue(id, f64::from(value), &mut text) };
+    (result == kResultOk).then(|| tchar_to_string(&text)).filter(|text| !text.is_empty())
+}
+
 /// The parameters worth showing in a parameter editor: not hidden, not read-only,
 /// and not a MIDI-controller stand-in from `midi_map` — JUCE plugins expose one per
 /// channel and controller (2080 of them), without flagging them hidden.
@@ -321,13 +335,35 @@ fn read_params(controller: &ComPtr<IEditController>, midi_map: &MidiMap) -> Vec<
             if info.flags & (kIsHidden | kIsReadOnly) != 0 || midi_mapped.contains(&info.id) {
                 return None;
             }
-            Some(ParamInfo {
-                id: info.id,
-                name: tchar_to_string(&info.title),
-                default_value: info.defaultNormalizedValue as f32,
-                min_value: 0.0,
-                max_value: 1.0,
-            })
+            let mut param = ParamInfo::continuous(
+                info.id,
+                tchar_to_string(&info.title),
+                info.defaultNormalizedValue as f32,
+                0.0,
+                1.0,
+            );
+            param.unit = tchar_to_string(&info.units);
+            let steps = info.stepCount.max(0) as u32;
+            if info.flags & kIsBypass != 0 || steps == 1 {
+                param.kind = ParamKind::Toggle;
+            } else if info.flags & kIsList != 0 && (2..=MAX_LIST_STEPS).contains(&steps) {
+                // The plugin names its own options; ask for each step's text.
+                param.kind = ParamKind::Choice;
+                param.choices = (0..=steps)
+                    .map(|step| {
+                        let value = step as f32 / steps as f32;
+                        ParamChoice {
+                            value,
+                            label: value_text(controller, info.id, value)
+                                .unwrap_or_else(|| step.to_string()),
+                        }
+                    })
+                    .collect();
+            } else if steps > 1 {
+                param.kind = ParamKind::Stepped;
+                param.steps = steps;
+            }
+            Some(param)
         })
         .collect()
 }
@@ -689,6 +725,12 @@ impl Vst3Controller {
     /// values.
     pub fn params(&self) -> &[ParamInfo] {
         &self.params
+    }
+
+    /// The plugin's own text for parameter `id` at normalized `value`, without the
+    /// unit, if it gives one.
+    pub fn value_text(&self, id: u32, value: f32) -> Option<String> {
+        value_text(&self.controller, id, value)
     }
 
     /// Tells the controller (and so the plugin's own editor, if open) about a

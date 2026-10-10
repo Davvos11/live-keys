@@ -1,4 +1,4 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, ListView, Palette, Slider, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, Palette, Slider, VerticalBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
 
@@ -26,47 +26,46 @@ component SectionHeader inherits HorizontalLayout {
     }
 }
 
-// One plugin in a slot's chain: click its name to show its parameters.
+// One plugin in a slot's chain, with buttons for its own GUI and its
+// parameter window.
 component ChainRow inherits Rectangle {
     in property <string> name;
-    in property <bool> selected;
     in property <bool> gui-supported;
     in property <bool> gui-open;
+    in property <bool> params-open;
     // Shows the move buttons (effects only).
     in property <bool> movable;
     in property <bool> can-move-up;
     in property <bool> can-move-down;
-    callback select();
     callback toggle-gui();
+    callback toggle-params();
     callback remove();
     callback move-up();
     callback move-down();
-
-    background: root.selected ? Palette.selection-background : transparent;
-    border-radius: 4px;
-
-    // Behind the layout, so the buttons get their own clicks and the rest of the
-    // row selects.
-    TouchArea {
-        clicked => { root.select(); }
-    }
 
     HorizontalLayout {
         padding-left: 6px;
         spacing: 2px;
         Text {
             text: root.name;
-            color: root.selected ? Palette.selection-foreground : Palette.foreground;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
         }
         Button {
-            // A wedged plugin GUI may never report closing; "Close" stays usable
-            // to force it.
-            text: root.gui-open ? "Close" : "GUI";
+            text: "GUI";
+            // Highlighted while open. Not `checkable`: a click would set
+            // `checked` itself, cutting it loose from `gui-open`.
+            primary: root.gui-open;
+            // A wedged plugin GUI may never report closing; the button stays
+            // usable to force it closed.
             enabled: root.gui-supported || root.gui-open;
             clicked => { root.toggle-gui(); }
+        }
+        Button {
+            text: "Params";
+            primary: root.params-open;
+            clicked => { root.toggle-params(); }
         }
         if root.movable : Button {
             text: "↑";
@@ -91,18 +90,17 @@ component EffectList inherits VerticalLayout {
     // 0 = MIDI effects, 1 = audio effects (as `AppLogic`'s `section`).
     in property <int> section;
     in property <[EffectRow]> effects;
-    in property <int> selected-key;
     in property <string> empty-text;
 
     for effect[index] in root.effects : ChainRow {
         name: effect.name;
-        selected: root.selected-key == effect.key;
         gui-supported: effect.gui-supported;
         gui-open: effect.gui-open;
+        params-open: effect.params-open;
         movable: true;
         can-move-up: index > 0;
         can-move-down: index < root.effects.length - 1;
-        select => { AppLogic.select-plugin(root.slot-index, effect.key); }
+        toggle-params => { AppLogic.toggle-params(effect.key); }
         toggle-gui => {
             if (effect.gui-open) {
                 AppLogic.close-plugin-gui(effect.key);
@@ -202,7 +200,6 @@ component SlotPanel inherits GroupBox {
             slot-index: root.slot-index;
             section: 0;
             effects: root.slot.midi-effects;
-            selected-key: root.slot.selected-key;
             empty-text: "None";
         }
 
@@ -213,10 +210,10 @@ component SlotPanel inherits GroupBox {
         }
         if root.slot.instrument-key >= 0 : ChainRow {
             name: root.slot.plugin-name;
-            selected: root.slot.selected-key == root.slot.instrument-key;
             gui-supported: root.slot.gui-supported;
             gui-open: root.slot.gui-open;
-            select => { AppLogic.select-plugin(root.slot-index, root.slot.instrument-key); }
+            params-open: root.slot.params-open;
+            toggle-params => { AppLogic.toggle-params(root.slot.instrument-key); }
             toggle-gui => {
                 if (root.slot.gui-open) {
                     AppLogic.close-plugin-gui(root.slot.instrument-key);
@@ -241,7 +238,6 @@ component SlotPanel inherits GroupBox {
             slot-index: root.slot-index;
             section: 1;
             effects: root.slot.audio-effects;
-            selected-key: root.slot.selected-key;
             empty-text: "None";
         }
 
@@ -269,28 +265,8 @@ component SlotPanel inherits GroupBox {
             wrap: word-wrap;
         }
 
-        if root.slot.selected-key >= 0 : SectionTitle {
-            text: "Parameters — \{root.slot.selected-name}";
-            overflow: elide;
-        }
-
-        ListView {
-            vertical-stretch: 1;
-            min-height: 120px;
-            for param in root.slot.params : VerticalLayout {
-                padding-bottom: 6px;
-                Text {
-                    text: param.name;
-                    overflow: elide;
-                }
-                Slider {
-                    minimum: param.min-value;
-                    maximum: param.max-value;
-                    value: param.value;
-                    changed(value) => { AppLogic.set-param(root.slot.selected-key, param.param-id, value); }
-                }
-            }
-        }
+        // Keeps the content at the top of a tall panel.
+        Rectangle { vertical-stretch: 1; }
     }
 }
 

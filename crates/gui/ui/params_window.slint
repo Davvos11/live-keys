@@ -1,0 +1,111 @@
+import { ComboBox, ListView, Palette, Slider, Switch, VerticalBox } from "std-widgets.slint";
+import { ParamRow } from "globals.slint";
+
+// One parameter, with the control its kind calls for: a switch, a dropdown, a
+// stepped slider (numbers, notes), or a slider — linear or logarithmic. Values
+// the plugin takes are sent as they are; snapping to steps happens on the host
+// side.
+component ParamControl inherits VerticalLayout {
+    in property <ParamRow> param;
+    callback set(/* value */ float);
+
+    padding-bottom: 6px;
+    // Clear of the list's scrollbar.
+    padding-right: 12px;
+    spacing: 2px;
+
+    HorizontalLayout {
+        spacing: 6px;
+        Text {
+            text: root.param.name;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        // Toggles and choices show their value in the control itself.
+        if root.param.kind != 1 && root.param.kind != 3 : Text {
+            text: root.param.text;
+            color: gray;
+            vertical-alignment: center;
+        }
+        if root.param.kind == 3 : ComboBox {
+            horizontal-stretch: 1;
+            // Inside a ListView row it otherwise grows far past its natural height.
+            max-height: self.min-height;
+            model: root.param.choices;
+            current-index: root.param.choice-index;
+            // Picking sets `current-index` itself, replacing the binding above;
+            // this keeps following changes from elsewhere (the plugin's GUI).
+            property <int> source: root.param.choice-index;
+            changed source => { self.current-index = self.source; }
+            selected => { root.set(root.param.choice-values[self.current-index]); }
+        }
+        if root.param.kind == 1 : Switch {
+            checked: self.source;
+            property <bool> source: root.param.value > (root.param.min-value + root.param.max-value) / 2;
+            changed source => { self.checked = self.source; }
+            toggled => { root.set(self.checked ? root.param.max-value : root.param.min-value); }
+        }
+    }
+
+    if root.param.kind == 0 && root.param.logarithmic : Slider {
+        // Position 0..1 along a log scale from min to max.
+        minimum: 0;
+        maximum: 1;
+        value: self.source;
+        property <float> source: Math.log(root.param.value / root.param.min-value, root.param.max-value / root.param.min-value);
+        changed source => { self.value = self.source; }
+        changed(position) => {
+            root.set(root.param.min-value * Math.pow(root.param.max-value / root.param.min-value, position));
+        }
+    }
+
+    if (root.param.kind == 0 && !root.param.logarithmic) || root.param.kind == 2 || root.param.kind == 4 : Slider {
+        minimum: root.param.min-value;
+        maximum: root.param.max-value;
+        step: root.param.steps > 0 ? (root.param.max-value - root.param.min-value) / root.param.steps : (root.param.max-value - root.param.min-value) / 100;
+        value: self.source;
+        // Dragging sets `value` itself, replacing its binding; this keeps
+        // following changes from elsewhere (the plugin's GUI).
+        property <float> source: root.param.value;
+        changed source => { self.value = self.source; }
+        changed(value) => { root.set(value); }
+    }
+}
+
+// A window of its own per plugin, listing its parameters — an editor usable
+// whether or not the plugin has its own GUI. Opened from a chain row's
+// "Params" button. Its own callback rather than `AppLogic`'s, since every
+// window has its own instance of each global.
+export component ParamsWindow inherits Window {
+    in property <string> plugin-name;
+    in property <[ParamRow]> params;
+    callback set-param(/* param-id */ int, float);
+
+    title: "\{root.plugin-name} — Parameters";
+    preferred-width: 420px;
+    preferred-height: 640px;
+    min-width: 260px;
+    min-height: 200px;
+    background: Palette.background;
+
+    VerticalBox {
+        Text {
+            text: root.plugin-name;
+            font-size: 15px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        if root.params.length == 0 : Text {
+            text: "This plugin has no parameters to show.";
+            color: gray;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for param in root.params : ParamControl {
+                param: param;
+                set(value) => { root.set-param(param.param-id, value); }
+            }
+        }
+    }
+}

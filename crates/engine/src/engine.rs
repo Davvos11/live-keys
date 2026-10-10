@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use live_keys_core::{
-    Consumer, MidiEvent, MidiFilter, ParamChange, ParamInfo, PluginFormat, PluginInfo, PluginKind,
-    Producer, midi_ring_buffer, ring_buffer,
+    Consumer, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat, PluginInfo,
+    PluginKind, Producer, midi_ring_buffer, ring_buffer,
 };
 use live_keys_lv2_host::{Lv2Host, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
@@ -327,6 +327,30 @@ impl Engine {
         self.send_param_change(key, param_id, value);
     }
 
+    /// Parameter `param_id` of the plugin with `key` at `value`, as text for display
+    /// ("-6.0 dB", "Saw", "C#3"). A VST3 plugin formats its own values; otherwise
+    /// it's formatted from the parameter's metadata. Empty if there's no such
+    /// parameter.
+    pub fn param_text(&self, key: PluginKey, param_id: u32, value: f32) -> String {
+        let Some(meta) = self.plugin(key) else {
+            return String::new();
+        };
+        let Some(info) = meta.params.iter().find(|param| param.id == param_id) else {
+            return String::new();
+        };
+        if let PluginEditor::Vst3(controller) = &meta.editor
+            && info.kind != ParamKind::Choice
+            && let Some(text) = controller.value_text(param_id, value)
+        {
+            return if info.unit.is_empty() || text.ends_with(info.unit.as_str()) {
+                text
+            } else {
+                format!("{text} {}", info.unit)
+            };
+        }
+        info.format_value(value)
+    }
+
     /// Instantiates the plugin with [`PluginInfo::id`] `plugin_id` at the running
     /// stream's sample rate.
     fn instantiate(&mut self, plugin_id: &str) -> Result<(BoxedPlugin, LoadedPluginMeta)> {
@@ -362,7 +386,7 @@ impl Engine {
                 id: plugin_id.to_string(),
                 name: live_keys_core::HostedPlugin::name(&plugin).to_string(),
                 format: PluginFormat::Lv2,
-                params: plugin.params(),
+                params: plugin.params().to_vec(),
                 editor: PluginEditor::Lv2 {
                     plugin: plugin.plugin().clone(),
                     features: plugin.features().clone(),

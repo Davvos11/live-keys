@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use live_keys_core::{HostedPlugin, MidiEvent, ParamInfo, PluginFormat, PluginInfo, PluginKind};
+use live_keys_core::{
+    HostedPlugin, MidiEvent, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind,
+};
 use livi::event::LV2AtomSequence;
 
 pub use livi;
@@ -32,6 +34,94 @@ fn plugin_kind(plugin: &livi::Plugin) -> PluginKind {
     } else {
         PluginKind::AudioEffect
     }
+}
+
+const LV2_CORE: &str = "http://lv2plug.in/ns/lv2core#";
+const PORT_PROPS: &str = "http://lv2plug.in/ns/ext/port-props#";
+const UNITS: &str = "http://lv2plug.in/ns/extensions/units#";
+
+/// A `ParamInfo` for every control-input port, read from the plugin's metadata:
+/// kind from `lv2:toggled`/`lv2:integer`/`lv2:enumeration` and the
+/// `units:midiNote` unit, labels from scale points, the unit's symbol, and
+/// `pprops:logarithmic`. Ports marked `pprops:notOnGUI` are left out, and
+/// `lv2:sampleRate` ranges are scaled to `sample_rate`.
+fn read_params(world: &livi::World, plugin: &livi::Plugin, sample_rate: f64) -> Vec<ParamInfo> {
+    let lilv_world = world.raw();
+    let uri = |base: &str, name: &str| lilv_world.new_uri(&format!("{base}{name}"));
+    let (toggled, integer, enumeration, sample_rate_prop) = (
+        uri(LV2_CORE, "toggled"),
+        uri(LV2_CORE, "integer"),
+        uri(LV2_CORE, "enumeration"),
+        uri(LV2_CORE, "sampleRate"),
+    );
+    let (logarithmic, not_on_gui) = (uri(PORT_PROPS, "logarithmic"), uri(PORT_PROPS, "notOnGUI"));
+    let (unit_pred, symbol_pred) = (uri(UNITS, "unit"), uri(UNITS, "symbol"));
+    let midi_note = format!("{UNITS}midiNote");
+
+    plugin
+        .ports_with_type(livi::PortType::ControlInput)
+        .filter_map(|port| {
+            let raw = plugin.raw().port_by_index(port.index.0)?;
+            if raw.has_property(&not_on_gui) {
+                return None;
+            }
+            // `lv2:sampleRate` bounds and default are fractions of the sample rate.
+            let scale = if raw.has_property(&sample_rate_prop) { sample_rate as f32 } else { 1.0 };
+            let default_value = port.default_value * scale;
+            // A control port with no declared range can't be given a usable
+            // slider bound, so fall back to a range around its default.
+            let min_value = port.min_value.map_or_else(|| default_value.min(0.0), |v| v * scale);
+            let max_value = port.max_value.map_or(
+                if default_value > min_value { default_value * 2.0 } else { min_value + 1.0 },
+                |v| v * scale,
+            );
+            let mut info =
+                ParamInfo::continuous(port.index.0 as u32, port.name, default_value, min_value, max_value);
+
+            let unit = raw.get(&unit_pred);
+            let is_note = unit.as_ref().and_then(|unit| unit.as_uri()) == Some(midi_note.as_str());
+            if !is_note && let Some(unit) = &unit {
+                // The units spec gives every standard unit a symbol; a plugin's own
+                // unit (a blank node) usually has one too.
+                info.unit = lilv_world
+                    .get(Some(unit), Some(&symbol_pred), None)
+                    .and_then(|symbol| symbol.as_str().map(str::to_string))
+                    .unwrap_or_default();
+            }
+
+            let mut choices: Vec<ParamChoice> = raw
+                .scale_points()
+                .iter()
+                .filter_map(|point| {
+                    Some(ParamChoice {
+                        value: point.value().as_float()?,
+                        label: point.label().as_str()?.to_string(),
+                    })
+                })
+                .collect();
+            choices.sort_by(|a, b| a.value.total_cmp(&b.value));
+            info.choices = choices;
+
+            let whole_steps = (max_value - min_value).round().max(0.0) as u32;
+            if raw.has_property(&toggled) {
+                info.kind = ParamKind::Toggle;
+            } else if raw.has_property(&enumeration) && !info.choices.is_empty() {
+                info.kind = ParamKind::Choice;
+            } else if is_note && min_value >= 0.0 {
+                // A negative range with the note unit is a transposition (x42's
+                // keysplit), where note names would be wrong; it falls through to
+                // a stepped number below.
+                info.kind = ParamKind::Note;
+                info.steps = whole_steps;
+            } else if raw.has_property(&integer) || is_note {
+                info.kind = ParamKind::Stepped;
+                info.steps = whole_steps;
+            } else {
+                info.logarithmic = raw.has_property(&logarithmic) && min_value > 0.0;
+            }
+            Some(info)
+        })
+        .collect()
 }
 
 /// Owns the LV2 plugin world and the real-time features (URID map, block size) that
@@ -97,7 +187,9 @@ impl Lv2Host {
             .map(|_| vec![0.0f32; self.max_block_size])
             .collect();
 
+        let params = read_params(&self.world, &plugin, sample_rate);
         Ok(Lv2Plugin {
+            params,
             name,
             plugin,
             features: self.features.clone(),
@@ -121,6 +213,7 @@ impl Lv2Host {
 
 /// A running instance of an LV2 instrument plugin.
 pub struct Lv2Plugin {
+    params: Vec<ParamInfo>,
     name: String,
     plugin: livi::Plugin,
     features: Arc<livi::Features>,
@@ -175,31 +268,11 @@ impl Lv2Plugin {
         self.instance.raw().instance().handle()
     }
 
-    /// Metadata for every control-input port, for a parameter-editor UI, with the
-    /// port index as the param ID. Order matches the plugin's own port order, not
-    /// necessarily display priority. An LV2 port that declares no bound gets a
-    /// range around its default.
-    pub fn params(&self) -> Vec<ParamInfo> {
-        self.plugin
-            .ports_with_type(livi::PortType::ControlInput)
-            .map(|port| {
-                // A control port with no declared range can't be given a usable
-                // slider bound, so fall back to a range around its default.
-                let min_value = port.min_value.unwrap_or_else(|| port.default_value.min(0.0));
-                let max_value = port.max_value.unwrap_or(if port.default_value > min_value {
-                    port.default_value * 2.0
-                } else {
-                    min_value + 1.0
-                });
-                ParamInfo {
-                    id: port.index.0 as u32,
-                    name: port.name,
-                    default_value: port.default_value,
-                    min_value,
-                    max_value,
-                }
-            })
-            .collect()
+    /// Metadata for every control-input port meant for a UI, for a parameter
+    /// editor, with the port index as the param ID. Order matches the plugin's own
+    /// port order, not necessarily display priority.
+    pub fn params(&self) -> &[ParamInfo] {
+        &self.params
     }
 }
 

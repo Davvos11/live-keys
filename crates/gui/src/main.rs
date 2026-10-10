@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use live_keys_engine::{
-    Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, PluginEditor, PluginInfo, PluginKey,
-    PluginKind, SLOT_COUNT, Section, SlotChain, default_plugin_search_paths,
+    Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
+    PluginInfo, PluginKey, PluginKind, SLOT_COUNT, Section, SlotChain, default_plugin_search_paths,
     list_logical_output_devices, list_midi_ports,
 };
 use live_keys_lv2_ui::{LaunchUiRequest, PluginUiHandle, UiKind, best_supported_ui, launch_ui};
@@ -136,6 +136,48 @@ impl Picker {
     }
 }
 
+/// The parameter editor's row for `param` of plugin `key` at `value`.
+fn param_row(engine: &Engine, key: PluginKey, param: &ParamInfo, value: f32) -> ParamRow {
+    let kind = match param.kind {
+        ParamKind::Continuous => 0,
+        ParamKind::Toggle => 1,
+        ParamKind::Stepped => 2,
+        ParamKind::Choice => 3,
+        ParamKind::Note => 4,
+    };
+    let is_choice = param.kind == ParamKind::Choice;
+    let labels: Vec<slint::SharedString> = if is_choice {
+        param.choices.iter().map(|choice| choice.label.as_str().into()).collect()
+    } else {
+        Vec::new()
+    };
+    let values: Vec<f32> = if is_choice {
+        param.choices.iter().map(|choice| choice.value).collect()
+    } else {
+        Vec::new()
+    };
+    ParamRow {
+        param_id: param.id as i32,
+        name: param.name.as_str().into(),
+        kind,
+        min_value: param.min_value,
+        max_value: param.max_value,
+        steps: param.steps as i32,
+        logarithmic: param.logarithmic,
+        value,
+        text: engine.param_text(key, param.id, value).into(),
+        choices: ModelRc::new(VecModel::from(labels)),
+        choice_values: ModelRc::new(VecModel::from(values)),
+        choice_index: param.choice_index(value).map_or(-1, |index| index as i32),
+    }
+}
+
+/// A plugin's open parameter window, and the model its list shows.
+struct ParamWindow {
+    window: ParamsWindow,
+    rows: Rc<VecModel<ParamRow>>,
+}
+
 /// Which slot `key` is loaded in, if any.
 fn slot_of(engine: &Engine, key: PluginKey) -> Option<usize> {
     (0..SLOT_COUNT).find(|&slot| {
@@ -146,23 +188,18 @@ fn slot_of(engine: &Engine, key: PluginKey) -> Option<usize> {
 }
 
 /// GUI-side state of the Live tab's slots: the models backing `AppState.slots`,
-/// which plugin each slot's parameter list shows, and every open plugin GUI.
+/// every open plugin GUI and every open parameter window.
 struct Rack {
     slots: Rc<VecModel<SlotState>>,
     /// One per slot, kept for the app's lifetime and refilled in place, so
     /// refreshing a slot's other fields doesn't hand Slint a new model (and
     /// rebuild that slot's rows).
-    params: Vec<Rc<VecModel<ParamRow>>>,
     midi_effects: Vec<Rc<VecModel<EffectRow>>>,
     audio_effects: Vec<Rc<VecModel<EffectRow>>>,
-    /// Which plugin each slot's parameter list should show.
-    selected: RefCell<[Option<PluginKey>; SLOT_COUNT]>,
-    /// Which plugin each slot's parameter list was last filled from, so it's only
-    /// refilled when that changes.
-    shown: RefCell<[Option<PluginKey>; SLOT_COUNT]>,
     open_uis: RefCell<HashMap<PluginKey, OpenEditor>>,
-    /// Last value sent per (plugin, parameter), so a refilled parameter list shows
-    /// where parameters actually are rather than their defaults.
+    param_windows: RefCell<HashMap<PluginKey, ParamWindow>>,
+    /// Last value sent per (plugin, parameter), so a newly opened parameter window
+    /// shows where parameters actually are rather than their defaults.
     param_values: RefCell<HashMap<(PluginKey, u32), f32>>,
 }
 
@@ -171,51 +208,33 @@ impl Rack {
         fn models<T: 'static>() -> Vec<Rc<VecModel<T>>> {
             (0..SLOT_COUNT).map(|_| Rc::new(VecModel::default())).collect()
         }
-        let (params, midi_effects, audio_effects) = (models(), models(), models());
+        let (midi_effects, audio_effects) = (models(), models());
         let slots = (0..SLOT_COUNT)
             .map(|slot| SlotState {
-                params: ModelRc::from(params[slot].clone()),
                 midi_effects: ModelRc::from(midi_effects[slot].clone()),
                 audio_effects: ModelRc::from(audio_effects[slot].clone()),
                 instrument_key: -1,
-                selected_key: -1,
                 ..Default::default()
             })
             .collect::<Vec<_>>();
         Self {
             slots: Rc::new(VecModel::from(slots)),
-            params,
             midi_effects,
             audio_effects,
-            selected: RefCell::new([None; SLOT_COUNT]),
-            shown: RefCell::new([None; SLOT_COUNT]),
             open_uis: RefCell::new(HashMap::new()),
+            param_windows: RefCell::new(HashMap::new()),
             param_values: RefCell::new(HashMap::new()),
         }
     }
 
-    fn select(&self, slot: usize, key: PluginKey) {
-        self.selected.borrow_mut()[slot] = Some(key);
-    }
-
-    /// Recomputes `slot`'s chain, GUI state and selection from the engine,
-    /// refilling its parameter list if the selected plugin changed. `error`, if
-    /// given, is shown as the slot's status line.
+    /// Recomputes `slot`'s chain and its plugins' GUI and parameter window state
+    /// from the engine. `error`, if given, is shown as the slot's status line.
     fn refresh_slot(&self, engine: &Engine, slot: usize, error: Option<String>) {
         let empty = SlotChain::default();
         let chain = engine.slot(slot).unwrap_or(&empty);
 
-        // Keep the selection on a plugin that's still there, falling back to the
-        // chain's first plugin.
-        let selected = {
-            let mut selected = self.selected.borrow_mut();
-            if selected[slot].is_none_or(|key| chain.plugins().all(|meta| meta.key != key)) {
-                selected[slot] = chain.plugins().next().map(|meta| meta.key);
-            }
-            selected[slot]
-        };
-
         let open_uis = self.open_uis.borrow();
+        let param_windows = self.param_windows.borrow();
         let effect_rows = |section: Section| -> Vec<EffectRow> {
             chain
                 .effects(section)
@@ -225,6 +244,7 @@ impl Rack {
                     name: meta.name.clone().into(),
                     gui_supported: gui_supported(meta),
                     gui_open: open_uis.contains_key(&meta.key),
+                    params_open: param_windows.contains_key(&meta.key),
                 })
                 .collect()
         };
@@ -237,44 +257,56 @@ impl Rack {
         row.instrument_key = instrument.map_or(-1, |meta| meta.key as i32);
         row.gui_supported = instrument.is_some_and(gui_supported);
         row.gui_open = instrument.is_some_and(|meta| open_uis.contains_key(&meta.key));
+        row.params_open = instrument.is_some_and(|meta| param_windows.contains_key(&meta.key));
         row.status = error.unwrap_or_default().into();
-        row.selected_key = selected.map_or(-1, |key| key as i32);
-        row.selected_name = selected
-            .and_then(|key| engine.plugin(key))
-            .map(|meta| meta.name.as_str())
-            .unwrap_or_default()
-            .into();
-        drop(open_uis);
+        drop((open_uis, param_windows));
         self.slots.set_row_data(slot, row);
-
-        if self.shown.borrow()[slot] != selected {
-            self.shown.borrow_mut()[slot] = selected;
-            self.fill_params(engine, slot, selected);
-        }
     }
 
-    /// Fills `slot`'s parameter list with `key`'s parameters (empty for `None`).
-    fn fill_params(&self, engine: &Engine, slot: usize, key: Option<PluginKey>) {
+    /// Opens a window listing `key`'s parameters at their current values. Its
+    /// edits go to `AppLogic.set-param`, like any other host-side edit.
+    fn open_params(&self, app: &AppWindow, engine: &Engine, key: PluginKey) -> anyhow::Result<()> {
+        if self.param_windows.borrow().contains_key(&key) {
+            return Ok(());
+        }
+        let Some(meta) = engine.plugin(key) else {
+            return Ok(());
+        };
         let values = self.param_values.borrow();
-        let rows: Vec<ParamRow> = key
-            .and_then(|key| Some((key, engine.plugin(key)?)))
-            .map(|(key, meta)| {
-                meta.params
-                    .iter()
-                    .map(|param| ParamRow {
-                        param_id: param.id as i32,
-                        name: param.name.clone().into(),
-                        min_value: param.min_value,
-                        max_value: param.max_value,
-                        value: values
-                            .get(&(key, param.id))
-                            .copied()
-                            .unwrap_or(param.default_value),
-                    })
-                    .collect()
+        let rows: Vec<ParamRow> = meta
+            .params
+            .iter()
+            .map(|param| {
+                let value = values.get(&(key, param.id)).copied().unwrap_or(param.default_value);
+                param_row(engine, key, param, value)
             })
-            .unwrap_or_default();
-        self.params[slot].set_vec(rows);
+            .collect();
+        drop(values);
+        let rows = Rc::new(VecModel::from(rows));
+
+        let window = ParamsWindow::new()?;
+        window.set_plugin_name(meta.name.as_str().into());
+        window.set_params(ModelRc::from(rows.clone()));
+        let app_weak = app.as_weak();
+        window.on_set_param(move |param_id, value| {
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppLogic>().invoke_set_param(key as i32, param_id, value);
+            }
+        });
+        // Closing it by its title bar only hides it; `poll_uis` notices and
+        // drops it.
+        window.show()?;
+        self.param_windows.borrow_mut().insert(key, ParamWindow { window, rows });
+        Ok(())
+    }
+
+    fn close_params(&self, key: PluginKey) {
+        let closed = self.param_windows.borrow_mut().remove(&key);
+        if let Some(closed) = closed
+            && let Err(err) = closed.window.hide()
+        {
+            log::warn!("failed to hide a parameter window: {err}");
+        }
     }
 
     /// Pushes `slot`'s MIDI filter and volume into its row. The widgets edit these
@@ -296,20 +328,27 @@ impl Rack {
         }
     }
 
-    /// Records a param value that was just sent to the engine, so the parameter
-    /// list reflects it (now if it's showing that plugin, or when it next does).
-    fn set_param_value(&self, key: PluginKey, param_id: u32, value: f32) {
+    /// The value last sent for `key`'s parameter `param_id`, if any.
+    fn param_value(&self, key: PluginKey, param_id: u32) -> Option<f32> {
+        self.param_values.borrow().get(&(key, param_id)).copied()
+    }
+
+    /// Records a param value that was just sent to the engine, so the plugin's
+    /// parameter window reflects it (now if open, or when it next opens).
+    fn set_param_value(&self, engine: &Engine, key: PluginKey, param_id: u32, value: f32) {
         self.param_values.borrow_mut().insert((key, param_id), value);
-        for slot in 0..SLOT_COUNT {
-            if self.shown.borrow()[slot] != Some(key) {
-                continue;
-            }
-            let params = &self.params[slot];
-            if let Some(row) = params.iter().position(|param| param.param_id as u32 == param_id) {
-                let mut param = params.row_data(row).unwrap();
-                param.value = value;
-                params.set_row_data(row, param);
-            }
+        let param_windows = self.param_windows.borrow();
+        let Some(rows) = param_windows.get(&key).map(|open| &open.rows) else {
+            return;
+        };
+        let Some(info) = engine
+            .plugin(key)
+            .and_then(|meta| meta.params.iter().find(|param| param.id == param_id))
+        else {
+            return;
+        };
+        if let Some(row) = rows.iter().position(|param| param.param_id as u32 == param_id) {
+            rows.set_row_data(row, param_row(engine, key, info, value));
         }
     }
 
@@ -328,9 +367,11 @@ impl Rack {
     }
 
     /// Lets go of everything kept about `key`, which is about to be unloaded: its
-    /// GUI (which holds the instance's raw handle) and its cached param values.
+    /// GUI (which holds the instance's raw handle), its parameter window and its
+    /// cached param values.
     fn forget(&self, key: PluginKey) {
         self.close_ui(key);
+        self.close_params(key);
         self.param_values.borrow_mut().retain(|&(cached, _), _| cached != key);
     }
 
@@ -341,11 +382,15 @@ impl Rack {
         for mut editor in editors {
             editor.close();
         }
+        let keys: Vec<PluginKey> = self.param_windows.borrow().keys().copied().collect();
+        for key in keys {
+            self.close_params(key);
+        }
         self.param_values.borrow_mut().clear();
     }
 
-    /// Pumps open VST3 editors, and forgets any GUI that has closed, refreshing
-    /// its slot.
+    /// Pumps open VST3 editors, and forgets any GUI or parameter window that has
+    /// closed, refreshing its slot.
     fn poll_uis(&self, engine: &Engine) {
         let mut closed = Vec::new();
         for (&key, editor) in self.open_uis.borrow_mut().iter_mut() {
@@ -356,8 +401,17 @@ impl Rack {
                 closed.push(key);
             }
         }
+        for key in &closed {
+            self.open_uis.borrow_mut().remove(key);
+        }
+        self.param_windows.borrow_mut().retain(|&key, open| {
+            let visible = open.window.window().is_visible();
+            if !visible {
+                closed.push(key);
+            }
+            visible
+        });
         for key in closed {
-            self.open_uis.borrow_mut().remove(&key);
             if let Some(slot) = slot_of(engine, key) {
                 self.refresh_slot(engine, slot, None);
             }
@@ -569,8 +623,7 @@ fn main() -> anyhow::Result<()> {
                 PluginKind::AudioEffect => engine.add_effect(slot, Section::Audio, &plugin_id),
             });
             let error = match result {
-                Ok(key) => {
-                    rack.select(slot, key);
+                Ok(_) => {
                     record_chain(&config, &engine.borrow(), slot);
                     None
                 }
@@ -638,12 +691,26 @@ fn main() -> anyhow::Result<()> {
     }
 
     {
+        let app_weak = app.as_weak();
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_select_plugin(move |slot, key| {
-            let slot = slot as usize;
-            rack.select(slot, key as PluginKey);
-            rack.refresh_slot(&engine.borrow(), slot, None);
+        logic.on_toggle_params(move |key| {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            let key = key as PluginKey;
+            let engine = engine.borrow();
+            let Some(slot) = slot_of(&engine, key) else {
+                return;
+            };
+            let mut error = None;
+            if rack.param_windows.borrow().contains_key(&key) {
+                rack.close_params(key);
+            } else if let Err(err) = rack.open_params(&app, &engine, key) {
+                log::error!("failed to open a parameter window: {err:#}");
+                error = Some(format!("failed to open the parameters: {err}"));
+            }
+            rack.refresh_slot(&engine, slot, error);
         });
     }
 
@@ -715,8 +782,18 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         logic.on_set_param(move |key, param_id, value| {
             let (key, param_id) = (key as PluginKey, param_id as u32);
+            // Stepped kinds snap here, so a slider dragged between steps only sends
+            // when it crosses into the next one.
+            let value = engine
+                .borrow()
+                .plugin(key)
+                .and_then(|meta| meta.params.iter().find(|param| param.id == param_id))
+                .map_or(value, |param| param.snap(value));
+            if rack.param_value(key, param_id) == Some(value) {
+                return;
+            }
             engine.borrow_mut().set_param(key, param_id, value);
-            rack.set_param_value(key, param_id, value);
+            rack.set_param_value(&engine.borrow(), key, param_id, value);
         });
     }
 
@@ -769,7 +846,7 @@ fn main() -> anyhow::Result<()> {
             rack.poll_uis(&engine.borrow());
             while let Ok((key, param_id, value)) = param_rx.try_recv() {
                 engine.borrow_mut().send_param_change(key, param_id, value);
-                rack.set_param_value(key, param_id, value);
+                rack.set_param_value(&engine.borrow(), key, param_id, value);
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {

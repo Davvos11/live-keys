@@ -53,7 +53,7 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (3 side-by-side rack
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
-# reorderable, any plugin's GUI openable, the selected plugin's parameters editable — and a MIDI
+# reorderable, any plugin's GUI and its parameter window openable — and a MIDI
 # channel/note-range/velocity-range filter and a volume fader)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
@@ -117,10 +117,15 @@ behind format-agnostic cores:
     `PluginKind` (`Instrument` = MIDI → audio, `MidiEffect` = MIDI → MIDI, `AudioEffect` =
     audio → audio and anything else), `PluginInfo` (`id`, name, format, kind — `id` is unique
     across formats: an LV2 URI, or `vst3:` + the VST3 class ID in hex), and `ParamInfo` (`id`,
-    name, default/min/max).
+    name, default/min/max, `kind: ParamKind`, `steps`, `logarithmic`, `unit`, `choices`).
     A `ParamInfo`'s id and values are in the format's own terms — an LV2 control-input port
     index and its real range, or a VST3 `ParamID` and its normalized `0.0..=1.0` — so the
-    generic parameter editor needs no per-format logic.
+    generic parameter editor needs no per-format logic. `ParamKind` (`Continuous`, `Toggle`,
+    `Stepped`, `Choice`, `Note`) picks the control; `steps` counts the steps between min and max
+    for stepped/note kinds; `choices` (`ParamChoice { value, label }`) are a choice's options,
+    or labels for particular values of other kinds. `snap` moves a value onto one the parameter
+    can take, `format_value` renders one as text (label, On/Off, note name via `note_name` —
+    C4 = 60 — or a ~3-significant-digit number plus unit). Unit-tested.
   - `ring_buffer<T>()` (`src/ring.rs`) — generic thin wrapper over `rtrb::RingBuffer` (SPSC,
     lock-free); `midi_ring_buffer()`/`param_ring_buffer()` are the `MidiEvent`/`ParamChange`
     instantiations actually used.
@@ -154,9 +159,15 @@ behind format-agnostic cores:
   allocation happens on the audio thread. Audio inputs read per-port `input_buffers` the host
   fills (`audio_input_mut`); CV inputs, which nothing routes, get a shared silent buffer.
   `Lv2Plugin::params()` returns a `ParamInfo` (port
-  index as id) for every control-input port, for a parameter-editor UI; `min`/`max` always come
-  back finite (an LV2 port with no declared range
-  falls back to a span around its default) since a UI can't usefully expose an infinite slider.
+  index as id) for every control-input port, for a parameter-editor UI, read once at
+  instantiation (`read_params`, via the raw `lilv` world/plugin since `livi::Port` lacks this
+  metadata): `lv2:toggled` → toggle, `lv2:enumeration` + scale points → choice, the
+  `units:midiNote` unit with a non-negative range → note (a negative range is a transposition:
+  stepped), `lv2:integer` → stepped, `pprops:logarithmic` (min > 0) → log slider; the unit's
+  `units:symbol` as `unit`; scale points as `choices`; `pprops:notOnGUI` ports left out;
+  `lv2:sampleRate` bounds/default scaled to the sample rate. `min`/`max` always come back finite
+  (an LV2 port with no declared range falls back to a span around its default) since a UI can't
+  usefully expose an infinite slider.
   `Lv2Plugin` also exposes `plugin()`/`features()`/`raw_handle()` — not used by audio processing
   itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
   instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
@@ -203,7 +214,12 @@ behind format-agnostic cores:
     CC events, and JUCE plugins rely on this for sustain pedal etc. `Vst3Controller::params()`
     leaves out hidden/read-only parameters **and every `IMidiMapping` target**: JUCE plugins
     expose 2080 per-channel MIDI-CC stand-in parameters without flagging them hidden (Surge XT:
-    2855 parameters → 775 real ones). The other direction, for MIDI effects: after each
+    2855 parameters → 775 real ones). Kinds come from `ParameterInfo`: `kIsBypass` or
+    `stepCount == 1` → toggle, `kIsList` with 2–256 steps → choice (labels from the controller's
+    `getParamStringByValue` for each step), other `stepCount > 1` → stepped; `units` → `unit`.
+    JUCE plugins leave `stepCount` at 0 for most choice/int parameters (Surge XT: 774 of 775
+    continuous), so those stay sliders — their value text still reads right, see
+    `Vst3Controller::value_text`. The other direction, for MIDI effects: after each
     `process`, the output event list becomes `midi_output()` (`event_to_midi`: note on/off,
     poly pressure, and `kLegacyMIDICCOutEvent` → CC/channel pressure/pitch bend/program
     change).
@@ -300,7 +316,9 @@ behind format-agnostic cores:
   `Vst3(Vst3Controller)`. Two ways to change a parameter: `send_param_change(key, id, value)`
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
-  open editor follows. (An LV2 GUI reads port values itself.)
+  open editor follows. (An LV2 GUI reads port values itself.) `param_text(key, id, value)` is
+  a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
+  unless already there; main thread only), else `ParamInfo::format_value`.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
   (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI and
   the Settings tab in the GUI.
@@ -361,29 +379,43 @@ behind format-agnostic cores:
   appends to the matching effect section. The Settings tab lists every plugin with its kind
   and format. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
   `AppState.slots` entry (`SlotState`: instrument name/key/GUI state,
-  `midi-effects`/`audio-effects: [EffectRow]`, the selected plugin's key/name and `params`,
+  `midi-effects`/`audio-effects: [EffectRow]`, which GUIs/parameter windows are open,
   status, routing), laid out top to bottom in signal order: MIDI filter, MIDI effects,
-  instrument, audio effects, volume, parameters. The instrument and each effect render as a
-  `ChainRow`: click the name to select that plugin for the parameter list, a GUI toggle, ↑/↓
+  instrument, audio effects, volume. The instrument and each effect render as a `ChainRow`:
+  the name, a GUI toggle and a Params toggle (highlighted while open), ↑/↓
   (effects only), ✕ to remove. `AppLogic` actions take the slot index for structural changes
   (`pick-plugin`, `remove-effect(slot, section, index)`, `move-effect(slot, section, from,
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
-  (`open-plugin-gui`, `set-param`, `select-plugin`). The engine stream is started lazily by the
+  (`open-plugin-gui`, `toggle-params`, `set-param`). The engine stream is started lazily by the
   first load (on the devices chosen in Settings) and restarted — closing all plugin GUIs first,
   since their instance handles go stale (and keys change) — when the device selection changes
-  while running. Replacing/removing a plugin likewise closes its GUI first (`Rack::forget`). On
-  the Rust side, `Rack` owns the slots' `VecModel`s, each slot's selected plugin, every open
-  GUI keyed by `PluginKey` as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own thread — or
-  `Vst3(Vst3Editor)` — main thread), and the last value sent per (plugin, parameter); the poll
-  timer calls `Rack::poll_uis`, which pumps open VST3 editors (`idle`) and forgets any GUI that
-  has closed. `Rack::refresh_slot` keeps the selection on a plugin that still exists (falling
-  back to the chain's first) and only refills the parameter list when the selected plugin
-  changes. Each slot's parameter and effect models are created once and refilled in place, so
-  refreshing a slot's other fields doesn't rebuild its rows. The parameter editor
-  (`ParamRow`/`AppLogic.set-param`) renders one `Slider` per parameter of the selected plugin;
-  dragging one calls `Engine::set_param`, while edits from a plugin's own GUI arrive over the
+  while running. Replacing/removing a plugin likewise closes its GUI and parameter window
+  first (`Rack::forget`). On the Rust side, `Rack` owns the slots' `VecModel`s, every open GUI
+  keyed by `PluginKey` as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own thread — or
+  `Vst3(Vst3Editor)` — main thread), every open parameter window (`ParamWindow`: the window and
+  its rows model), and the last value sent per (plugin, parameter); the poll timer calls
+  `Rack::poll_uis`, which pumps open VST3 editors (`idle`) and forgets any GUI or parameter
+  window that has closed (a window closed by its title bar is only hidden, so it's noticed by
+  `is_visible`). Each slot's effect models are created once and refilled in place, so
+  refreshing a slot's other fields doesn't rebuild its rows. The parameter editor is a separate
+  top-level window per plugin (`ParamsWindow` in `ui/params_window.slint`, exported from
+  `app.slint` so Rust can create it; `Rack::open_params`). Every Slint window has its own
+  instance of each global, so it can't call `AppLogic` itself: its `set-param` callback is
+  forwarded by Rust to the main window's `AppLogic.set-param`. It renders one `ParamControl`
+  (`ParamRow`) per parameter, by kind: a `Switch` (toggle), a `ComboBox` beside the name (choice), a slider with
+  `step` (stepped/note), a 0..1 slider mapped exponentially (logarithmic), or a plain slider —
+  each with the value text (`param_text`) beside the name. **Slint gotcha:** a widget that sets its
+  own property on interaction (`Slider.value`, `Switch.checked`, `ComboBox.current-index`,
+  `Button.checked` when `checkable`) replaces that property's binding for good, so later model
+  updates stop reaching it. Controls that must follow changes from elsewhere (the plugin's own
+  GUI, a window closing) re-assign it from a `changed source =>` handler on a bound helper
+  property, or use a property the widget never writes (`Button.primary` for the GUI/Params
+  toggles). Snapping is host-side: `set-param`
+  snaps via `ParamInfo::snap` and skips values equal to the last one sent, so a stepped slider
+  only sends when it crosses a step. Sending a value calls `Engine::set_param`, while edits from a plugin's own GUI arrive over the
   `(key, param_id, value)` channel and go through `Engine::send_param_change`; both paths record
-  the value (`Rack::set_param_value`), so a refilled list shows current values, not defaults.
+  the value (`Rack::set_param_value`), updating an open parameter window's row, so a window
+  shows current values, not defaults.
   Every structural change re-records the slot's chain into the config (`record_chain`). Meant as the base for
   future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
@@ -464,8 +496,7 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   changes, no parameter-list refresh). Only the main audio buses are activated (others get
   buffers but stay inactive; only output bus 0 is read). The processor's
   `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
-  fixed 120 BPM 4/4, not playing). No plugin state save/restore yet (same as LV2). VST3
-  parameter sliders show normalized `0..1` values, not the plugin's display strings.
+  fixed 120 BPM 4/4, not playing). No plugin state save/restore yet (same as LV2).
 - A VST3 editor runs on the GUI's main thread (see `crates/vst3-ui-host`), so — unlike an LV2
   GUI, which wedges only its own thread — a VST3 editor that hangs inside a call freezes the
   whole app. There's no way around it within the VST3 threading rules short of out-of-process
