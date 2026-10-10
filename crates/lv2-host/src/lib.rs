@@ -1,12 +1,18 @@
+mod preset;
+
+use std::cell::OnceCell;
 use std::sync::Arc;
 
 use live_keys_core::{
     HostedPlugin, MidiEvent, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind,
+    PresetInfo,
 };
 use livi::event::LV2AtomSequence;
 
 pub use livi;
 pub use lv2_raw;
+pub use preset::InstanceRef;
+use preset::{PresetWorld, StateFeatures};
 
 /// Capacity, in bytes, of the atom sequence buffer used to hand MIDI events to a
 /// plugin each block. Generous enough for a dense chord/arpeggio burst.
@@ -130,6 +136,8 @@ pub struct Lv2Host {
     world: livi::World,
     features: Arc<livi::Features>,
     max_block_size: usize,
+    /// Loaded on first use: it parses every bundle a second time.
+    presets: OnceCell<PresetWorld>,
 }
 
 impl Lv2Host {
@@ -145,7 +153,62 @@ impl Lv2Host {
             world,
             features,
             max_block_size,
+            presets: OnceCell::new(),
         }
+    }
+
+    fn preset_world(&self) -> &PresetWorld {
+        self.presets.get_or_init(PresetWorld::new)
+    }
+
+    /// Every preset of the plugin at `plugin_uri` — shipped with it, or saved by
+    /// the user from any host — sorted by name.
+    pub fn presets(&self, plugin_uri: &str) -> Vec<PresetInfo> {
+        self.preset_world().presets(plugin_uri)
+    }
+
+    /// Restores preset `preset_uri` onto `instance` (of the plugin at
+    /// `plugin_uri`) and returns its control port values `(port index, value)`,
+    /// which the caller has to apply — this only restores the plugin's own state.
+    ///
+    /// # Safety
+    /// If `instance.has_state()`, the plugin mustn't be running on another
+    /// thread meanwhile.
+    pub unsafe fn restore_preset(
+        &self,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        preset_uri: &str,
+    ) -> anyhow::Result<Vec<(u32, f32)>> {
+        let features = StateFeatures::new(&self.features);
+        unsafe { self.preset_world().restore(&features, instance, plugin_uri, preset_uri) }
+    }
+
+    /// Saves `instance`'s current settings as a user preset called `name`
+    /// (replacing one of the same name); `value` gives each control port's value
+    /// by port index.
+    ///
+    /// # Safety
+    /// As for [`Lv2Host::restore_preset`].
+    pub unsafe fn save_preset(
+        &self,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        plugin_name: &str,
+        name: &str,
+        value: &dyn Fn(u32) -> f32,
+    ) -> anyhow::Result<PresetInfo> {
+        let features = StateFeatures::new(&self.features);
+        unsafe {
+            self.preset_world()
+                .save(&features, instance, plugin_uri, plugin_name, name, value)
+        }
+    }
+
+    /// Deletes a user preset (see [`PresetInfo::user`]).
+    pub fn delete_preset(&self, preset_uri: &str) -> anyhow::Result<()> {
+        let features = StateFeatures::new(&self.features);
+        self.preset_world().delete(&features, preset_uri)
     }
 
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
@@ -264,6 +327,15 @@ impl Lv2Plugin {
 
     /// The raw handle to the running DSP instance, for the LV2 `instance-access`
     /// feature — some plugin UIs (e.g. Helm's) require direct access to it.
+    /// What saving and restoring presets needs of this instance.
+    pub fn instance_ref(&self) -> InstanceRef {
+        let instance = self.instance.raw().instance();
+        InstanceRef {
+            descriptor: instance.descriptor().map_or(std::ptr::null(), |d| d as *const _),
+            handle: instance.handle(),
+        }
+    }
+
     pub fn raw_handle(&self) -> lv2_raw::core::LV2Handle {
         self.instance.raw().instance().handle()
     }

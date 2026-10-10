@@ -7,5 +7,7 @@ edition.workspace = true
 live-keys-core = { path = "../core" }
 livi = "0.7"
 lv2_raw = "0.2"
+lilv-sys = "0.2"
+dirs = "6"
 anyhow = "1"
 log = "0.4"

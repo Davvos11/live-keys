@@ -227,7 +227,7 @@ pub(crate) fn instantiate(
         params,
         controller,
         handler,
-        _instance: instance,
+        instance,
     };
     Ok((plugin, controller))
 }
@@ -717,7 +717,7 @@ pub struct Vst3Controller {
     controller: ComPtr<IEditController>,
     handler: ComWrapper<ComponentHandler>,
     params: Vec<ParamInfo>,
-    _instance: Arc<Instance>,
+    instance: Arc<Instance>,
 }
 
 impl Vst3Controller {
@@ -745,6 +745,48 @@ impl Vst3Controller {
     /// callback should forward the change to the audio processor.
     pub fn set_edit_callback(&self, callback: Option<EditCallback>) {
         *self.handler.on_edit.lock().unwrap() = callback;
+    }
+
+    /// The controller's current value of parameter `id`, normalized.
+    pub fn param_normalized(&self, id: u32) -> f32 {
+        unsafe { self.controller.getParamNormalized(id) as f32 }
+    }
+
+    /// The component's and the controller's state, as a preset stores them.
+    /// `IComponent::getState` may be called from the main thread while the
+    /// plugin processes.
+    pub fn state(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let component = ComWrapper::new(MemoryStream::new());
+        let component_ptr = component.to_com_ptr::<IBStream>().unwrap();
+        anyhow::ensure!(
+            unsafe { self.instance.component.getState(component_ptr.as_ptr()) } == kResultOk,
+            "the plugin didn't hand over its state"
+        );
+        let controller = ComWrapper::new(MemoryStream::new());
+        let controller_ptr = controller.to_com_ptr::<IBStream>().unwrap();
+        // Many controllers keep nothing of their own; an empty chunk is fine.
+        unsafe { self.controller.getState(controller_ptr.as_ptr()) };
+        Ok((component.bytes(), controller.bytes()))
+    }
+
+    /// Restores state saved by [`Vst3Controller::state`] (or another host): the
+    /// component's, then the controller's view of it, then the controller's own.
+    /// Like `getState`, allowed from the main thread while processing.
+    pub fn set_state(&self, component: &[u8], controller: Option<&[u8]>) -> Result<()> {
+        let stream = ComWrapper::new(MemoryStream::from_bytes(component.to_vec()));
+        let stream_ptr = stream.to_com_ptr::<IBStream>().unwrap();
+        anyhow::ensure!(
+            unsafe { self.instance.component.setState(stream_ptr.as_ptr()) } == kResultOk,
+            "the plugin rejected the preset"
+        );
+        stream.rewind();
+        unsafe { self.controller.setComponentState(stream_ptr.as_ptr()) };
+        if let Some(controller) = controller.filter(|state| !state.is_empty()) {
+            let stream = ComWrapper::new(MemoryStream::from_bytes(controller.to_vec()));
+            let stream_ptr = stream.to_com_ptr::<IBStream>().unwrap();
+            unsafe { self.controller.setState(stream_ptr.as_ptr()) };
+        }
+        Ok(())
     }
 
     /// For hosting the plugin's own editor (`createView`).

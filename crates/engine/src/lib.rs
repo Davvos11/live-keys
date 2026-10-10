@@ -10,7 +10,7 @@ pub use engine::{
 };
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
 pub use live_keys_core::MidiFilter;
-pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind};
+pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo};
 pub use live_keys_lv2_host::{livi, lv2_raw};
 pub use live_keys_vst3_host::{EditCallback, Vst3Controller};
 pub use midi::{find_midi_port, list_midi_ports};

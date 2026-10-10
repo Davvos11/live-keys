@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
-    PluginInfo, PluginKey, PluginKind, SLOT_COUNT, Section, SlotChain, default_plugin_search_paths,
-    list_logical_output_devices, list_midi_ports,
+    PluginInfo, PluginKey, PluginKind, PresetInfo, SLOT_COUNT, Section, SlotChain,
+    default_plugin_search_paths, list_logical_output_devices, list_midi_ports,
 };
 use live_keys_lv2_ui::{LaunchUiRequest, PluginUiHandle, UiKind, best_supported_ui, launch_ui};
 use live_keys_vst3_ui::Vst3Editor;
@@ -172,10 +172,34 @@ fn param_row(engine: &Engine, key: PluginKey, param: &ParamInfo, value: f32) -> 
     }
 }
 
-/// A plugin's open parameter window, and the model its list shows.
+/// A plugin's open parameter window, the model its list shows, and the presets
+/// its preset menu lists (in the same order).
 struct ParamWindow {
     window: ParamsWindow,
     rows: Rc<VecModel<ParamRow>>,
+    presets: Vec<PresetInfo>,
+}
+
+/// Runs `action` with the main window's `AppLogic`, if the window still exists.
+fn with_logic(app: &slint::Weak<AppWindow>, action: impl FnOnce(&AppLogic<'_>)) {
+    if let Some(app) = app.upgrade() {
+        action(&app.global::<AppLogic>());
+    }
+}
+
+/// Parameter editor rows for every parameter of plugin `key`, at their current
+/// values.
+fn param_rows(engine: &Engine, key: PluginKey) -> Vec<ParamRow> {
+    let Some(meta) = engine.plugin(key) else {
+        return Vec::new();
+    };
+    meta.params
+        .iter()
+        .map(|param| {
+            let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
+            param_row(engine, key, param, value)
+        })
+        .collect()
 }
 
 /// Which slot `key` is loaded in, if any.
@@ -198,9 +222,9 @@ struct Rack {
     audio_effects: Vec<Rc<VecModel<EffectRow>>>,
     open_uis: RefCell<HashMap<PluginKey, OpenEditor>>,
     param_windows: RefCell<HashMap<PluginKey, ParamWindow>>,
-    /// Last value sent per (plugin, parameter), so a newly opened parameter window
-    /// shows where parameters actually are rather than their defaults.
-    param_values: RefCell<HashMap<(PluginKey, u32), f32>>,
+    /// The preset last loaded or saved per plugin, by [`PresetInfo::id`], for its
+    /// parameter window's preset menu to show.
+    current_presets: RefCell<HashMap<PluginKey, String>>,
 }
 
 impl Rack {
@@ -223,7 +247,7 @@ impl Rack {
             audio_effects,
             open_uis: RefCell::new(HashMap::new()),
             param_windows: RefCell::new(HashMap::new()),
-            param_values: RefCell::new(HashMap::new()),
+            current_presets: RefCell::new(HashMap::new()),
         }
     }
 
@@ -272,32 +296,84 @@ impl Rack {
         let Some(meta) = engine.plugin(key) else {
             return Ok(());
         };
-        let values = self.param_values.borrow();
-        let rows: Vec<ParamRow> = meta
-            .params
-            .iter()
-            .map(|param| {
-                let value = values.get(&(key, param.id)).copied().unwrap_or(param.default_value);
-                param_row(engine, key, param, value)
-            })
-            .collect();
-        drop(values);
-        let rows = Rc::new(VecModel::from(rows));
+        let rows = Rc::new(VecModel::from(param_rows(engine, key)));
 
         let window = ParamsWindow::new()?;
         window.set_plugin_name(meta.name.as_str().into());
         window.set_params(ModelRc::from(rows.clone()));
+        // Every action goes through the main window's `AppLogic`, like the rest
+        // of the UI; this window can't reach it itself.
         let app_weak = app.as_weak();
         window.on_set_param(move |param_id, value| {
-            if let Some(app) = app_weak.upgrade() {
-                app.global::<AppLogic>().invoke_set_param(key as i32, param_id, value);
-            }
+            with_logic(&app_weak, |logic| logic.invoke_set_param(key as i32, param_id, value));
+        });
+        let app_weak = app.as_weak();
+        window.on_load_preset(move |index| {
+            with_logic(&app_weak, |logic| logic.invoke_load_preset(key as i32, index));
+        });
+        let app_weak = app.as_weak();
+        window.on_save_preset(move |name| {
+            with_logic(&app_weak, |logic| logic.invoke_save_preset(key as i32, name.clone()));
+        });
+        let app_weak = app.as_weak();
+        window.on_delete_preset(move |index| {
+            with_logic(&app_weak, |logic| logic.invoke_delete_preset(key as i32, index));
         });
         // Closing it by its title bar only hides it; `poll_uis` notices and
         // drops it.
         window.show()?;
-        self.param_windows.borrow_mut().insert(key, ParamWindow { window, rows });
+        self.param_windows.borrow_mut().insert(
+            key,
+            ParamWindow {
+                window,
+                rows,
+                presets: Vec::new(),
+            },
+        );
+        self.refresh_presets(engine, key, None);
         Ok(())
+    }
+
+    /// Re-reads `key`'s presets into its parameter window's preset menu, showing
+    /// `status` (empty clears it). The current preset stays selected.
+    fn refresh_presets(&self, engine: &Engine, key: PluginKey, status: Option<String>) {
+        let mut windows = self.param_windows.borrow_mut();
+        let Some(open) = windows.get_mut(&key) else {
+            return;
+        };
+        open.presets = engine.presets(key);
+        let current = self.current_presets.borrow().get(&key).cloned();
+        let index = current
+            .and_then(|id| open.presets.iter().position(|preset| preset.id == id))
+            .map_or(-1, |index| index as i32);
+        let names: Vec<String> = open.presets.iter().map(|preset| preset.name.clone()).collect();
+        let user: Vec<bool> = open.presets.iter().map(|preset| preset.user).collect();
+        open.window.set_presets(string_model(names));
+        open.window.set_preset_user(ModelRc::new(VecModel::from(user)));
+        open.window.set_preset_index(index);
+        open.window.set_status(status.unwrap_or_default().into());
+    }
+
+    /// The preset at `index` in `key`'s parameter window's menu.
+    fn preset_at(&self, key: PluginKey, index: i32) -> Option<PresetInfo> {
+        let windows = self.param_windows.borrow();
+        windows.get(&key)?.presets.get(usize::try_from(index).ok()?).cloned()
+    }
+
+    fn set_current_preset(&self, key: PluginKey, preset_id: Option<String>) {
+        let mut current = self.current_presets.borrow_mut();
+        match preset_id {
+            Some(id) => current.insert(key, id),
+            None => current.remove(&key),
+        };
+    }
+
+    /// Rebuilds every row of `key`'s parameter window, e.g. after a preset changed
+    /// them all.
+    fn refresh_param_rows(&self, engine: &Engine, key: PluginKey) {
+        if let Some(open) = self.param_windows.borrow().get(&key) {
+            open.rows.set_vec(param_rows(engine, key));
+        }
     }
 
     fn close_params(&self, key: PluginKey) {
@@ -328,15 +404,9 @@ impl Rack {
         }
     }
 
-    /// The value last sent for `key`'s parameter `param_id`, if any.
-    fn param_value(&self, key: PluginKey, param_id: u32) -> Option<f32> {
-        self.param_values.borrow().get(&(key, param_id)).copied()
-    }
-
-    /// Records a param value that was just sent to the engine, so the plugin's
-    /// parameter window reflects it (now if open, or when it next opens).
-    fn set_param_value(&self, engine: &Engine, key: PluginKey, param_id: u32, value: f32) {
-        self.param_values.borrow_mut().insert((key, param_id), value);
+    /// Shows a param value that was just sent to the engine in the plugin's
+    /// parameter window, if open.
+    fn show_param_value(&self, engine: &Engine, key: PluginKey, param_id: u32, value: f32) {
         let param_windows = self.param_windows.borrow();
         let Some(rows) = param_windows.get(&key).map(|open| &open.rows) else {
             return;
@@ -368,11 +438,11 @@ impl Rack {
 
     /// Lets go of everything kept about `key`, which is about to be unloaded: its
     /// GUI (which holds the instance's raw handle), its parameter window and its
-    /// cached param values.
+    /// current preset.
     fn forget(&self, key: PluginKey) {
         self.close_ui(key);
         self.close_params(key);
-        self.param_values.borrow_mut().retain(|&(cached, _), _| cached != key);
+        self.set_current_preset(key, None);
     }
 
     /// Lets go of every plugin, for when the engine is about to reload or drop
@@ -386,7 +456,7 @@ impl Rack {
         for key in keys {
             self.close_params(key);
         }
-        self.param_values.borrow_mut().clear();
+        self.current_presets.borrow_mut().clear();
     }
 
     /// Pumps open VST3 editors, and forgets any GUI or parameter window that has
@@ -738,6 +808,7 @@ fn main() -> anyhow::Result<()> {
                     plugin,
                     features,
                     raw_handle,
+                    ..
                 } => launch_ui(LaunchUiRequest {
                     plugin,
                     features: features.clone(),
@@ -789,11 +860,82 @@ fn main() -> anyhow::Result<()> {
                 .plugin(key)
                 .and_then(|meta| meta.params.iter().find(|param| param.id == param_id))
                 .map_or(value, |param| param.snap(value));
-            if rack.param_value(key, param_id) == Some(value) {
+            if engine.borrow().param_value(key, param_id) == Some(value) {
                 return;
             }
             engine.borrow_mut().set_param(key, param_id, value);
-            rack.set_param_value(&engine.borrow(), key, param_id, value);
+            rack.show_param_value(&engine.borrow(), key, param_id, value);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_load_preset(move |key, index| {
+            let key = key as PluginKey;
+            let Some(preset) = rack.preset_at(key, index) else {
+                return;
+            };
+            let result = engine.borrow_mut().load_preset(key, &preset.id);
+            let engine = engine.borrow();
+            let status = match result {
+                Ok(()) => {
+                    rack.set_current_preset(key, Some(preset.id));
+                    rack.refresh_param_rows(&engine, key);
+                    None
+                }
+                Err(err) => {
+                    log::error!("failed to load preset '{}': {err:#}", preset.name);
+                    Some(format!("Loading \"{}\" failed: {err}", preset.name))
+                }
+            };
+            rack.refresh_presets(&engine, key, status);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_save_preset(move |key, name| {
+            let key = key as PluginKey;
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
+            let result = engine.borrow_mut().save_preset(key, name);
+            let status = match result {
+                Ok(preset) => {
+                    rack.set_current_preset(key, Some(preset.id));
+                    format!("Saved \"{name}\".")
+                }
+                Err(err) => {
+                    log::error!("failed to save preset '{name}': {err:#}");
+                    format!("Saving failed: {err}")
+                }
+            };
+            rack.refresh_presets(&engine.borrow(), key, Some(status));
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_delete_preset(move |key, index| {
+            let key = key as PluginKey;
+            let Some(preset) = rack.preset_at(key, index) else {
+                return;
+            };
+            let status = match engine.borrow_mut().delete_preset(key, &preset.id) {
+                Ok(()) => {
+                    rack.set_current_preset(key, None);
+                    format!("Deleted \"{}\".", preset.name)
+                }
+                Err(err) => {
+                    log::error!("failed to delete preset '{}': {err:#}", preset.name);
+                    format!("Deleting failed: {err}")
+                }
+            };
+            rack.refresh_presets(&engine.borrow(), key, Some(status));
         });
     }
 
@@ -846,7 +988,7 @@ fn main() -> anyhow::Result<()> {
             rack.poll_uis(&engine.borrow());
             while let Ok((key, param_id, value)) = param_rx.try_recv() {
                 engine.borrow_mut().send_param_change(key, param_id, value);
-                rack.set_param_value(&engine.borrow(), key, param_id, value);
+                rack.show_param_value(&engine.borrow(), key, param_id, value);
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {

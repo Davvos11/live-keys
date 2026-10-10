@@ -71,6 +71,12 @@ pub(crate) enum RackCommand {
     Param { slot: usize, position: ChainPosition, change: ParamChange },
     Filter { slot: usize, filter: MidiFilter },
     Gain { slot: usize, gain: f32 },
+    /// Takes the plugin at `position` out of the chain, leaving its place empty
+    /// (the chain skips it), and hands it to the control thread for work that
+    /// mustn't overlap its processing (LV2 state save/restore).
+    Lend { slot: usize, position: ChainPosition },
+    /// Puts a lent plugin back in its place.
+    Return { slot: usize, position: ChainPosition, plugin: BoxedPlugin },
 }
 
 /// One slot as the audio callback sees it.
@@ -101,12 +107,16 @@ impl SlotRuntime {
         }
     }
 
-    fn plugin_mut(&mut self, position: ChainPosition) -> Option<&mut BoxedPlugin> {
+    fn place_mut(&mut self, position: ChainPosition) -> Option<&mut Option<BoxedPlugin>> {
         match position {
-            ChainPosition::MidiEffect(index) => self.midi_chain.get_mut(index)?.as_mut(),
-            ChainPosition::Instrument => self.chain[0].as_mut(),
-            ChainPosition::Effect(index) => self.chain.get_mut(1 + index)?.as_mut(),
+            ChainPosition::MidiEffect(index) => self.midi_chain.get_mut(index),
+            ChainPosition::Instrument => Some(&mut self.chain[0]),
+            ChainPosition::Effect(index) => self.chain.get_mut(1 + index),
         }
+    }
+
+    fn plugin_mut(&mut self, position: ChainPosition) -> Option<&mut BoxedPlugin> {
+        self.place_mut(position)?.as_mut()
     }
 }
 
@@ -194,6 +204,8 @@ pub(crate) struct Rack {
     /// Plugins taken out of a chain, handed back to the control thread to drop —
     /// a plugin's teardown can deallocate or block.
     retired_tx: Producer<BoxedPlugin>,
+    /// Plugins lent to the control thread (see [`RackCommand::Lend`]).
+    lent_tx: Producer<BoxedPlugin>,
     channels: usize,
     max_block_size: usize,
 }
@@ -202,6 +214,7 @@ impl Rack {
     pub fn new(
         settings: &[SlotSettings; SLOT_COUNT],
         retired_tx: Producer<BoxedPlugin>,
+        lent_tx: Producer<BoxedPlugin>,
         channels: usize,
         max_block_size: usize,
         midi_capacity: usize,
@@ -220,6 +233,7 @@ impl Rack {
             }),
             midi_batch: Vec::with_capacity(midi_capacity),
             retired_tx,
+            lent_tx,
             channels,
             max_block_size,
         }
@@ -324,6 +338,33 @@ impl Rack {
             RackCommand::Gain { slot, gain } => {
                 if let Some(runtime) = self.slots.get_mut(slot) {
                     runtime.target_gain = gain;
+                }
+            }
+            RackCommand::Lend { slot, position } => {
+                let Some(place) = self.slots.get_mut(slot).and_then(|runtime| runtime.place_mut(position))
+                else {
+                    return;
+                };
+                if let Some(plugin) = place.take()
+                    && let Err(PushError::Full(plugin)) = self.lent_tx.push(plugin)
+                {
+                    // Nobody's waiting for this many; keep playing it.
+                    *place = Some(plugin);
+                }
+            }
+            RackCommand::Return {
+                slot,
+                position,
+                plugin,
+            } => {
+                let Some(runtime) = self.slots.get_mut(slot) else {
+                    return self.retire(Some(plugin));
+                };
+                // Notes that ended while it was away never reached it.
+                runtime.reset_notes |= position == ChainPosition::Instrument;
+                match runtime.place_mut(position) {
+                    Some(place) if place.is_none() => *place = Some(plugin),
+                    _ => self.retire(Some(plugin)),
                 }
             }
         }
@@ -442,7 +483,8 @@ mod tests {
 
     fn rack() -> Rack {
         let (retired_tx, _retired_rx) = ring_buffer(64);
-        Rack::new(&Default::default(), retired_tx, 2, BLOCK, 16)
+        let (lent_tx, _lent_rx) = ring_buffer(4);
+        Rack::new(&Default::default(), retired_tx, lent_tx, 2, BLOCK, 16)
     }
 
     /// Renders one block and returns slot 0's first output sample (every slot but

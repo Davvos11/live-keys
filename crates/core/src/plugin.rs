@@ -50,6 +50,20 @@ pub struct PluginInfo {
     pub kind: PluginKind,
 }
 
+/// A saved set of a plugin's settings, as the plugin's format stores them: an LV2
+/// preset (`pset:Preset`) or a VST3 `.vstpreset` file — so presets made by
+/// other hosts (Ardour, Carla, a DAW) show up here and the other way around.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresetInfo {
+    /// Identifies the preset within its plugin: an LV2 preset URI, or a
+    /// `.vstpreset` file's path.
+    pub id: String,
+    pub name: String,
+    /// Saved by the user (and so deletable), as opposed to shipped with the
+    /// plugin.
+    pub user: bool,
+}
+
 /// What kind of control suits a parameter. Both formats say this in their
 /// metadata: LV2 through port properties (`lv2:toggled`, `lv2:integer`,
 /// `lv2:enumeration`, the `units:midiNote` unit), VST3 through

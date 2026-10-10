@@ -7,11 +7,12 @@
 mod com;
 mod module;
 mod plugin;
+mod preset;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use live_keys_core::{PluginFormat, PluginInfo, PluginKind};
+use live_keys_core::{PluginFormat, PluginInfo, PluginKind, PresetInfo};
 use vst3::Steinberg::TUID;
 
 pub use com::EditCallback;
@@ -26,6 +27,7 @@ struct ScannedClass {
     info: PluginInfo,
     binary: PathBuf,
     cid: TUID,
+    vendor: String,
 }
 
 /// The VST3 plugins found by the last scan, and how to instantiate them.
@@ -80,6 +82,7 @@ impl Vst3Host {
                     },
                     binary: binary.clone(),
                     cid: class.cid,
+                    vendor: class.vendor,
                 });
             }
         }
@@ -94,14 +97,56 @@ impl Vst3Host {
         self.classes.iter().map(|class| class.info.clone()).collect()
     }
 
+    fn class(&self, id: &str) -> Result<&ScannedClass> {
+        self.classes
+            .iter()
+            .find(|class| class.info.id == id)
+            .with_context(|| format!("VST3 plugin not found: {id}"))
+    }
+
+    /// The `.vstpreset` files in the standard preset folders for the plugin with
+    /// [`PluginInfo::id`] `id`, sorted by name.
+    pub fn presets(&self, id: &str) -> Vec<PresetInfo> {
+        match id.strip_prefix(ID_PREFIX) {
+            Some(class_id) => preset::find(class_id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Applies the preset file at `path` to the running plugin `controller` (of
+    /// plugin `id`). Main thread only.
+    pub fn load_preset(&self, controller: &Vst3Controller, id: &str, path: &str) -> Result<()> {
+        let class_id = id.strip_prefix(ID_PREFIX).context("not a VST3 plugin id")?;
+        let preset = preset::read(Path::new(path), class_id)?;
+        controller.set_state(&preset.component, preset.controller.as_deref())
+    }
+
+    /// Saves the running plugin `controller`'s (of plugin `id`) current state as
+    /// user preset `name`, in `~/.vst3/presets/<vendor>/<plugin>/`, replacing a
+    /// preset of the same name. Main thread only.
+    pub fn save_preset(&self, controller: &Vst3Controller, id: &str, name: &str) -> Result<PresetInfo> {
+        let class = self.class(id)?;
+        let class_id = id.strip_prefix(ID_PREFIX).context("not a VST3 plugin id")?;
+        let dir = preset::user_dir(&class.vendor, &class.info.name).context("no home folder")?;
+        let path = dir.join(format!("{}.vstpreset", preset::file_name(name)));
+        let (component, controller_state) = controller.state()?;
+        preset::write(&path, class_id, &component, &controller_state)?;
+        Ok(PresetInfo {
+            id: path.display().to_string(),
+            name: name.to_string(),
+            user: true,
+        })
+    }
+
+    /// Deletes a user preset file (see [`PresetInfo::user`]).
+    pub fn delete_preset(&self, path: &str) -> Result<()> {
+        preset::delete(Path::new(path))
+    }
+
     /// Instantiates the plugin with [`PluginInfo::id`] `id`. Must be called from the
     /// main thread (the controller half is bound to the thread that creates it).
     pub fn instantiate(&self, id: &str, sample_rate: f64) -> Result<(Vst3Plugin, Vst3Controller)> {
-        let class = self
-            .classes
-            .iter()
-            .find(|class| class.info.id == id)
-            .with_context(|| format!("VST3 plugin not found: {id}"))?;
+        let class = self.class(id)?;
         let module = module::load(&class.binary)?;
         plugin::instantiate(
             module,

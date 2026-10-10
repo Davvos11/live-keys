@@ -1,14 +1,16 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use live_keys_core::{
-    Consumer, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat, PluginInfo,
-    PluginKind, Producer, midi_ring_buffer, ring_buffer,
+    Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
+    PluginInfo, PluginKind, PresetInfo, Producer, PushError, midi_ring_buffer, ring_buffer,
 };
-use live_keys_lv2_host::{Lv2Host, livi, lv2_raw};
+use live_keys_lv2_host::{InstanceRef, Lv2Host, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
 use crate::midi::find_midi_port;
@@ -30,6 +32,11 @@ const COMMAND_RING_CAPACITY: usize = 256;
 /// Drained on every structural change, so it only needs room for a few in flight;
 /// sized so even clearing every chain at once fits.
 const RETIRED_RING_CAPACITY: usize = SLOT_COUNT * (MAX_MIDI_EFFECTS + 1 + MAX_EFFECTS) * 2;
+/// Plugins lent to the control thread at once — one at a time in practice.
+const LENT_RING_CAPACITY: usize = 4;
+/// How long to wait for the audio thread to hand over a lent plugin: a few
+/// callbacks normally; longer means it has stalled.
+const LEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Identifies one loaded plugin instance for as long as it stays loaded, however
 /// its position in a chain changes. Never reused within a process.
@@ -54,12 +61,15 @@ impl Default for SlotSettings {
     }
 }
 
-/// What it takes to open a loaded plugin's own GUI, per format.
+/// What it takes to open a loaded plugin's own GUI or work with its presets, per
+/// format.
 pub enum PluginEditor {
     Lv2 {
         plugin: livi::Plugin,
         features: Arc<livi::Features>,
         raw_handle: lv2_raw::core::LV2Handle,
+        /// For saving and restoring its state (presets).
+        instance: InstanceRef,
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
@@ -78,6 +88,9 @@ pub struct LoadedPluginMeta {
     /// for GUI-less plugins, future MIDI binding).
     pub params: Vec<ParamInfo>,
     pub editor: PluginEditor,
+    /// The last value sent per parameter, for reading parameters back (the
+    /// running plugin is out of reach) — see [`Engine::param_value`].
+    values: HashMap<u32, f32>,
 }
 
 /// A slot's chain as the control thread sees it — a mirror of the audio thread's,
@@ -133,6 +146,10 @@ struct RunningStream {
     sample_rate: f64,
     command_tx: Producer<RackCommand>,
     retired_rx: Consumer<BoxedPlugin>,
+    lent_rx: Consumer<BoxedPlugin>,
+    /// Where a lent plugin goes back to that arrived too late (see
+    /// [`Engine::with_lent`]); it's returned as soon as it shows up.
+    overdue_lend: Option<(usize, ChainPosition)>,
 }
 
 /// Owns the plugin hosts, the running audio/MIDI stream (if any), and the chain of
@@ -140,11 +157,13 @@ struct RunningStream {
 /// allocation in the audio callback — see `rack.rs`) lives here so every host
 /// (CLI, GUI) shares one implementation instead of drifting apart.
 pub struct Engine {
+    // Declared (so dropped) before the hosts: the stream's callback and retired
+    // queue can still hold plugins, and an LV2 plugin must not outlive its world.
+    running: Option<RunningStream>,
     audio_host: cpal::Host,
     lv2: Lv2Host,
     vst3: Vst3Host,
     max_block_size: usize,
-    running: Option<RunningStream>,
     slots: [SlotChain; SLOT_COUNT],
     settings: [SlotSettings; SLOT_COUNT],
     next_key: PluginKey,
@@ -198,6 +217,30 @@ impl Engine {
             .iter()
             .flat_map(SlotChain::plugins)
             .find(|meta| meta.key == key)
+    }
+
+    fn plugin_mut(&mut self, key: PluginKey) -> Option<&mut LoadedPluginMeta> {
+        self.slots.iter_mut().find_map(|chain| {
+            chain
+                .midi_effects
+                .iter_mut()
+                .chain(&mut chain.instrument)
+                .chain(&mut chain.audio_effects)
+                .find(|meta| meta.key == key)
+        })
+    }
+
+    /// Where parameter `param_id` of the plugin with `key` is: the last value
+    /// sent to it (from any source, presets included), else its default. `None`
+    /// if there's no such plugin or parameter.
+    pub fn param_value(&self, key: PluginKey, param_id: u32) -> Option<f32> {
+        let meta = self.plugin(key)?;
+        meta.values.get(&param_id).copied().or_else(|| {
+            meta.params
+                .iter()
+                .find(|param| param.id == param_id)
+                .map(|param| param.default_value)
+        })
     }
 
     fn locate(&self, key: PluginKey) -> Option<(usize, ChainPosition)> {
@@ -296,13 +339,71 @@ impl Engine {
             while let Ok(plugin) = running.retired_rx.pop() {
                 drop(plugin);
             }
+            if let Some((slot, position)) = running.overdue_lend
+                && let Ok(plugin) = running.lent_rx.pop()
+            {
+                running.overdue_lend = None;
+                Self::return_lent(running, slot, position, plugin);
+            }
         }
+    }
+
+    /// Runs `work` on the plugin at `position` in `slot` while it's off the audio
+    /// thread: the audio callback hands it over and leaves its place empty (the
+    /// slot goes silent for an instrument, an effect is skipped) until it's put
+    /// back. For LV2 state save/restore, which mustn't overlap processing. Waits
+    /// up to [`LEND_TIMEOUT`] for the handover; a plugin that turns up later is
+    /// put back by [`Engine::collect_retired`].
+    fn with_lent<T>(
+        &mut self,
+        slot: usize,
+        position: ChainPosition,
+        work: impl FnOnce(&Lv2Host, &mut dyn HostedPlugin) -> T,
+    ) -> Result<T> {
+        self.push_structural(RackCommand::Lend { slot, position })?;
+        let running = self.running.as_mut().context("audio stream isn't running")?;
+        let deadline = Instant::now() + LEND_TIMEOUT;
+        let mut plugin = loop {
+            if let Ok(plugin) = running.lent_rx.pop() {
+                break plugin;
+            }
+            if Instant::now() > deadline {
+                running.overdue_lend = Some((slot, position));
+                anyhow::bail!("the audio thread didn't hand the plugin over");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let result = work(&self.lv2, plugin.as_mut());
+        let running = self.running.as_mut().context("audio stream isn't running")?;
+        Self::return_lent(running, slot, position, plugin);
+        Ok(result)
+    }
+
+    fn return_lent(running: &mut RunningStream, slot: usize, position: ChainPosition, plugin: BoxedPlugin) {
+        let mut command = RackCommand::Return {
+            slot,
+            position,
+            plugin,
+        };
+        // The queue only stays full if the audio thread has stalled; rather than
+        // block forever, the plugin is then given up (dropped here).
+        for _ in 0..1000 {
+            match running.command_tx.push(command) {
+                Ok(()) => return,
+                Err(PushError::Full(back)) => command = back,
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        log::error!("couldn't return a lent plugin to slot {slot}: command queue full");
     }
 
     /// Forwards a parameter change that came from a plugin's own GUI to the plugin
     /// with `key`, applied on the next audio block. A no-op if that plugin is gone
     /// or nothing is running.
     pub fn send_param_change(&mut self, key: PluginKey, param_id: u32, value: f32) {
+        if let Some(meta) = self.plugin_mut(key) {
+            meta.values.insert(param_id, value);
+        }
         if let Some((slot, position)) = self.locate(key) {
             self.push_command(RackCommand::Param {
                 slot,
@@ -351,6 +452,102 @@ impl Engine {
         info.format_value(value)
     }
 
+    /// The presets of the plugin with `key`: shipped with it, or saved (here or by
+    /// another host) in the format's standard user folder.
+    pub fn presets(&self, key: PluginKey) -> Vec<PresetInfo> {
+        match self.plugin(key) {
+            Some(meta) if meta.format == PluginFormat::Lv2 => self.lv2.presets(&meta.id),
+            Some(meta) => self.vst3.presets(&meta.id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Applies preset `preset_id` (a [`PresetInfo::id`]) to the plugin with
+    /// `key`. Its parameters' new values can be read back with
+    /// [`Engine::param_value`] afterwards. An LV2 plugin with state of its own is
+    /// briefly taken off the audio thread for this (see [`Engine::with_lent`]).
+    pub fn load_preset(&mut self, key: PluginKey, preset_id: &str) -> Result<()> {
+        let (slot, position) = self.locate(key).context("plugin isn't loaded")?;
+        let meta = self.plugin(key).context("plugin isn't loaded")?;
+        let plugin_id = meta.id.clone();
+        match &meta.editor {
+            PluginEditor::Lv2 { instance, .. } => {
+                let instance = *instance;
+                if instance.has_state() {
+                    let values = self.with_lent(slot, position, |lv2, plugin| {
+                        // SAFETY: the plugin is lent, so it isn't running.
+                        let values = unsafe { lv2.restore_preset(instance, &plugin_id, preset_id) }?;
+                        for &(index, value) in &values {
+                            plugin.set_param(index, value);
+                        }
+                        anyhow::Ok(values)
+                    })??;
+                    let meta = self.plugin_mut(key).context("plugin isn't loaded")?;
+                    meta.values.extend(values);
+                } else {
+                    // SAFETY: without state, restoring only reports port values.
+                    let values = unsafe { self.lv2.restore_preset(instance, &plugin_id, preset_id) }?;
+                    for (index, value) in values {
+                        self.send_param_change(key, index, value);
+                    }
+                }
+            }
+            PluginEditor::Vst3(controller) => {
+                self.vst3.load_preset(controller, &plugin_id, preset_id)?;
+                // The processor has the preset's values now; only our record of
+                // them needs updating, from the controller.
+                let values: Vec<(u32, f32)> = meta
+                    .params
+                    .iter()
+                    .map(|param| (param.id, controller.param_normalized(param.id)))
+                    .collect();
+                let meta = self.plugin_mut(key).context("plugin isn't loaded")?;
+                meta.values.extend(values);
+            }
+        }
+        Ok(())
+    }
+
+    /// Saves the current settings of the plugin with `key` as user preset `name`,
+    /// replacing one of the same name.
+    pub fn save_preset(&mut self, key: PluginKey, name: &str) -> Result<PresetInfo> {
+        let (slot, position) = self.locate(key).context("plugin isn't loaded")?;
+        let meta = self.plugin(key).context("plugin isn't loaded")?;
+        let (plugin_id, plugin_name) = (meta.id.clone(), meta.name.clone());
+        match &meta.editor {
+            PluginEditor::Lv2 { plugin, instance, .. } => {
+                let instance = *instance;
+                // Every control port's value: as last sent, else its default.
+                let values: HashMap<u32, f32> = plugin
+                    .ports_with_type(livi::PortType::ControlInput)
+                    .map(|port| {
+                        let index = port.index.0 as u32;
+                        (index, meta.values.get(&index).copied().unwrap_or(port.default_value))
+                    })
+                    .collect();
+                let value = |index: u32| values.get(&index).copied().unwrap_or_default();
+                if instance.has_state() {
+                    self.with_lent(slot, position, |lv2, _| {
+                        // SAFETY: the plugin is lent, so it isn't running.
+                        unsafe { lv2.save_preset(instance, &plugin_id, &plugin_name, name, &value) }
+                    })?
+                } else {
+                    // SAFETY: without state, saving only reads port values.
+                    unsafe { self.lv2.save_preset(instance, &plugin_id, &plugin_name, name, &value) }
+                }
+            }
+            PluginEditor::Vst3(controller) => self.vst3.save_preset(controller, &plugin_id, name),
+        }
+    }
+
+    /// Deletes user preset `preset_id` of the plugin with `key`.
+    pub fn delete_preset(&mut self, key: PluginKey, preset_id: &str) -> Result<()> {
+        match self.plugin(key).context("plugin isn't loaded")?.format {
+            PluginFormat::Lv2 => self.lv2.delete_preset(preset_id),
+            PluginFormat::Vst3 => self.vst3.delete_preset(preset_id),
+        }
+    }
+
     /// Instantiates the plugin with [`PluginInfo::id`] `plugin_id` at the running
     /// stream's sample rate.
     fn instantiate(&mut self, plugin_id: &str) -> Result<(BoxedPlugin, LoadedPluginMeta)> {
@@ -374,6 +571,7 @@ impl Engine {
                 format: PluginFormat::Vst3,
                 params: controller.params().to_vec(),
                 editor: PluginEditor::Vst3(controller),
+                values: HashMap::new(),
             };
             Ok((Box::new(plugin), meta))
         } else {
@@ -391,7 +589,9 @@ impl Engine {
                     plugin: plugin.plugin().clone(),
                     features: plugin.features().clone(),
                     raw_handle: plugin.raw_handle(),
+                    instance: plugin.instance_ref(),
                 },
+                values: HashMap::new(),
             };
             Ok((Box::new(plugin), meta))
         }
@@ -514,6 +714,7 @@ impl Engine {
         let (mut midi_tx, mut midi_rx) = midi_ring_buffer(MIDI_RING_CAPACITY);
         let (command_tx, mut command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
+        let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
 
         let midi_input = midir::MidiInput::new("live-keys")?;
         let midi_ports = midi_input.ports();
@@ -543,6 +744,7 @@ impl Engine {
         let mut rack = Rack::new(
             &self.settings,
             retired_tx,
+            lent_tx,
             channels,
             self.max_block_size,
             MIDI_RING_CAPACITY,
@@ -570,6 +772,8 @@ impl Engine {
             sample_rate,
             command_tx,
             retired_rx,
+            lent_rx,
+            overdue_lend: None,
         });
 
         let previous_slots = std::mem::take(&mut self.slots);

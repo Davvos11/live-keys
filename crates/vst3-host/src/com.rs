@@ -316,8 +316,21 @@ impl MemoryStream {
         }
     }
 
+    /// A stream to read `data` from.
+    pub fn from_bytes(data: Vec<u8>) -> Self {
+        Self {
+            data: RefCell::new(data),
+            pos: Cell::new(0),
+        }
+    }
+
     pub fn rewind(&self) {
         self.pos.set(0);
+    }
+
+    /// Everything written so far.
+    pub fn bytes(&self) -> Vec<u8> {
+        self.data.borrow().clone()
     }
 }
 

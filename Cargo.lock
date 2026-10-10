@@ -3200,6 +3200,8 @@ name = "live-keys-lv2-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
+ "lilv-sys",
  "live-keys-core",
  "livi",
  "log",

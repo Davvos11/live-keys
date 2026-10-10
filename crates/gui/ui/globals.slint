@@ -132,6 +132,11 @@ export global AppLogic {
     // Invoked by the Rust side for a `ParamsWindow`'s edits (a separate window
     // can't reach this window's globals itself).
     callback set-param(/* key */ int, /* param-id */ int, float);
+    // Preset actions of a `ParamsWindow`, forwarded like `set-param`. `index`
+    // is into that window's preset list.
+    callback load-preset(/* key */ int, /* index */ int);
+    callback save-preset(/* key */ int, /* name */ string);
+    callback delete-preset(/* key */ int, /* index */ int);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);

@@ -10,7 +10,7 @@ use libloading::os::unix::{Library, RTLD_LAZY, RTLD_LOCAL};
 use vst3::ComPtr;
 use vst3::Steinberg::{
     IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactoryTrait, PClassInfo,
-    PClassInfo2, TUID, kResultOk,
+    PClassInfo2, PFactoryInfo, TUID, kResultOk,
 };
 
 use crate::com::char8_to_string;
@@ -127,37 +127,54 @@ pub(crate) struct ClassInfo {
     pub name: String,
     /// From the class's sub-categories ("Instrument|Synth", "Fx|Delay").
     pub is_instrument: bool,
+    /// The class's vendor, else the module's; empty if neither says.
+    pub vendor: String,
 }
 
 /// The audio-processor classes (i.e. loadable plugins) `module` offers.
 pub(crate) fn audio_classes(module: &Module) -> Vec<ClassInfo> {
     let factory = &module.factory;
     let factory2 = factory.cast::<IPluginFactory2>();
+    let factory_vendor = {
+        let mut info: PFactoryInfo = unsafe { std::mem::zeroed() };
+        if unsafe { factory.getFactoryInfo(&mut info) } == kResultOk {
+            char8_to_string(&info.vendor)
+        } else {
+            String::new()
+        }
+    };
     let count = unsafe { factory.countClasses() };
     (0..count)
         .filter_map(|index| {
             // Prefer `PClassInfo2` for its sub-categories ("Instrument|Synth",
             // "Fx|Delay"); without it there's no way to tell an instrument apart.
-            let (cid, category, name, sub_categories) = match &factory2 {
+            let (cid, category, name, sub_categories, vendor) = match &factory2 {
                 Some(factory2) => {
                     let mut info: PClassInfo2 = unsafe { std::mem::zeroed() };
                     if unsafe { factory2.getClassInfo2(index, &mut info) } != kResultOk {
                         return None;
                     }
-                    (info.cid, info.category, info.name, char8_to_string(&info.subCategories))
+                    (
+                        info.cid,
+                        info.category,
+                        info.name,
+                        char8_to_string(&info.subCategories),
+                        char8_to_string(&info.vendor),
+                    )
                 }
                 None => {
                     let mut info: PClassInfo = unsafe { std::mem::zeroed() };
                     if unsafe { factory.getClassInfo(index, &mut info) } != kResultOk {
                         return None;
                     }
-                    (info.cid, info.category, info.name, String::new())
+                    (info.cid, info.category, info.name, String::new(), String::new())
                 }
             };
             (char8_to_string(&category) == AUDIO_MODULE_CATEGORY).then(|| ClassInfo {
                 cid,
                 name: char8_to_string(&name),
                 is_instrument: sub_categories.split('|').any(|sub| sub == "Instrument"),
+                vendor: if vendor.is_empty() { factory_vendor.clone() } else { vendor },
             })
         })
         .collect()

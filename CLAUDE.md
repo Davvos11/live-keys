@@ -53,7 +53,7 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (3 side-by-side rack
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
-# reorderable, any plugin's GUI and its parameter window openable — and a MIDI
+# reorderable, any plugin's GUI and its parameter window (with presets) openable — and a MIDI
 # channel/note-range/velocity-range filter and a volume fader)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
@@ -73,8 +73,13 @@ SMOKE_WAIT_SECS=10 cargo run -p live-keys-vst3-host --example smoke --release
 cargo run -p live-keys-vst3-ui --example open_editor --release -- "surge xt" 10
   # opens a VST3 plugin's editor (name substring, exact match preferred) for N seconds
 
-cargo test -p live-keys-core -p live-keys-engine   # the crates with unit tests (MIDI routing,
-                                                   # MIDI/audio effect-chain routing)
+# Manual preset smoke tests (not part of the app; they create and delete a "Smoke Test" preset)
+cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # list/apply/save/delete
+cargo run -p live-keys-engine --example presets --release -- [plugin id]...
+  # the same through a live engine (needs an audio device and MIDI port), LV2 lending included
+
+cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host   # the crates with unit
+  # tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset round trip)
 ```
 
 There is no lint/format CI configured in this repo yet. Run `cargo clippy --workspace --all-targets`
@@ -126,6 +131,10 @@ behind format-agnostic cores:
     or labels for particular values of other kinds. `snap` moves a value onto one the parameter
     can take, `format_value` renders one as text (label, On/Off, note name via `note_name` —
     C4 = 60 — or a ~3-significant-digit number plus unit). Unit-tested.
+  - `PresetInfo` (`src/plugin.rs`) — one preset of a plugin in its format's own storage
+    (`id`: an LV2 preset URI or a `.vstpreset` path; `name`; `user`: saved by the user, so
+    deletable). Presets are deliberately the formats' standard ones, not an app-specific
+    format, so they're shared with Ardour/Carla/DAWs both ways.
   - `ring_buffer<T>()` (`src/ring.rs`) — generic thin wrapper over `rtrb::RingBuffer` (SPSC,
     lock-free); `midi_ring_buffer()`/`param_ring_buffer()` are the `MidiEvent`/`ParamChange`
     instantiations actually used.
@@ -168,6 +177,20 @@ behind format-agnostic cores:
   `lv2:sampleRate` bounds/default scaled to the sample rate. `min`/`max` always come back finite
   (an LV2 port with no declared range falls back to a span around its default) since a UI can't
   usefully expose an infinite slider.
+  **Presets** (`preset.rs`): lilv's state API (`lilv_state_new_from_world`/`_restore`/
+  `_new_from_instance`/`_save`/`_delete`) takes raw world/plugin/instance pointers that `livi`
+  and the `lilv` crate keep private, so presets use a `PresetWorld` of their own — a raw
+  `lilv-sys` world loaded from the same `LV2_PATH`, created lazily on first use (it parses every
+  bundle again) — and a stand-in `LilvInstance` built from an `InstanceRef` (descriptor +
+  handle, `Lv2Plugin::instance_ref`), since lilv only reads those two fields. URIDs come from
+  the shared `livi::Features` map, so state keys match the instances'. `Lv2Host::presets` lists
+  `pset:Preset`s related to the plugin (user = under `~/.lv2`); `restore_preset` returns the
+  preset's port values for the caller to apply (lilv only restores the plugin's own state);
+  `save_preset` writes `~/.lv2/<Plugin>_<Preset>.lv2/` (Ardour's layout) and reloads that
+  bundle; `delete_preset` only touches user presets. **Threading:** LV2 state save/restore must
+  not overlap `run`, so both are `unsafe fn`s whose caller guarantees that for a plugin with
+  state (`InstanceRef::has_state`, asked of the plugin's `extension_data`, since metadata
+  doesn't always declare it); for a plugin without state they only read/report port values.
   `Lv2Plugin` also exposes `plugin()`/`features()`/`raw_handle()` — not used by audio processing
   itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
   instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
@@ -223,7 +246,16 @@ behind format-agnostic cores:
     `process`, the output event list becomes `midi_output()` (`event_to_midi`: note on/off,
     poly pressure, and `kLegacyMIDICCOutEvent` → CC/channel pressure/pitch bend/program
     change).
-  `Vst3Host` (`lib.rs`) owns one scan's results and instantiates by `PluginInfo::id`.
+  - `preset.rs` — `.vstpreset` files (48-byte header with the class ID in ASCII hex, chunk
+    data, then a `List` of `Comp`/`Cont` chunks; little-endian): `find` scans
+    `~/.vst3/presets`, `/usr/share/vst3/presets`, `/usr/local/share/vst3/presets` and matches by
+    the header's class ID (folder names vary by host); new presets go to
+    `~/.vst3/presets/<vendor>/<plugin>/<name>.vstpreset` (vendor from `PClassInfo2`/
+    `PFactoryInfo`). `Vst3Controller::state`/`set_state` get/set the component's and the
+    controller's state (`setState`, then `setComponentState`, then the controller's own) —
+    allowed from the main thread while processing, so no lending needed. Round-trip unit-tested.
+  `Vst3Host` (`lib.rs`) owns one scan's results, instantiates by `PluginInfo::id`, and wraps
+  presets (`presets`/`load_preset`/`save_preset`/`delete_preset`).
 
 - **`crates/vst3-ui-host`** (`live-keys-vst3-ui`) — hosts a VST3 plugin's own editor
   (`IPlugView`, platform type `X11EmbedWindowID`) in an `x11rb`-created top-level window. Unlike
@@ -292,8 +324,17 @@ behind format-agnostic cores:
   A plugin taken out of a chain is never dropped on the audio thread — it's pushed onto a
   "retired" ring buffer back to the control thread, which drops it in
   `Engine::collect_retired` (called on every structural change and from the GUI's poll timer);
-  if that queue is ever full the plugin is leaked rather than torn down in the callback. The
-  callback's
+  if that queue is ever full the plugin is leaked rather than torn down in the callback.
+  **Lending** (`RackCommand::Lend`/`Return`, `Engine::with_lent`): for work that mustn't overlap
+  a plugin's processing (LV2 state save/restore), the callback takes the plugin out of its place
+  — left empty, which the chain already skips: an instrument's slot goes silent, an effect is
+  bypassed — and hands it over on a "lent" ring; the control thread waits for it (up to
+  `LEND_TIMEOUT`), does the work, and queues it back (an instrument then gets all-notes-off,
+  since it missed note-offs). No structural command can interleave: the control thread is
+  blocked meanwhile. A plugin handed over after the timeout is put back by `collect_retired`.
+  `Engine`'s `running` field is declared before the hosts on purpose: fields drop in order, and
+  an LV2 plugin still in the stream or retired queue must not outlive its world (this crashed on
+  exit before). The callback's
   `data` buffer can span more frames than `max_block_size` in one call — observed with a
   Bluetooth output device, whose PipeWire-negotiated period can reach/exceed it — so the callback
   loops over `data` in `max_block_size`-sized sub-chunks rather than assuming one `process` call
@@ -312,11 +353,19 @@ behind format-agnostic cores:
   and `Engine::plugin(key)` one `LoadedPluginMeta` (key, id, name, format, `params` —
   `ParamInfo`s for a parameter-editor UI — and `editor: PluginEditor`, all captured at load time
   since the running plugin itself lives in the audio callback). `PluginEditor` is what opening
-  the plugin's own GUI needs, per format: `Lv2 { plugin, features, raw_handle }` or
-  `Vst3(Vst3Controller)`. Two ways to change a parameter: `send_param_change(key, id, value)`
+  the plugin's own GUI or handling its presets needs, per format: `Lv2 { plugin, features,
+  raw_handle, instance }` or `Vst3(Vst3Controller)`. The meta also records the last value sent
+  per parameter (`Engine::param_value`, falling back to the default) — every value change goes
+  through `send_param_change`, and preset loads record theirs — since the running plugin can't
+  be asked. Presets: `presets(key)`, `load_preset(key, id)` (LV2 with state: restored while
+  lent, port values set on the lent plugin; LV2 without: port values queued as param changes,
+  no gap; VST3: `set_state` on the controller, then every parameter read back with
+  `getParamNormalized`), `save_preset(key, name)` (LV2 with state lent; port values from the
+  record), `delete_preset(key, id)`. Two ways to change a parameter: `send_param_change(key, id, value)`
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
-  open editor follows. (An LV2 GUI reads port values itself.) `param_text(key, id, value)` is
+  open editor follows. (An open LV2 GUI isn't told about host-side port changes at all — see
+  "Known simplifications".) `param_text(key, id, value)` is
   a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
   unless already there; main thread only), else `ParamInfo::format_value`.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
@@ -393,15 +442,21 @@ behind format-agnostic cores:
   first (`Rack::forget`). On the Rust side, `Rack` owns the slots' `VecModel`s, every open GUI
   keyed by `PluginKey` as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own thread — or
   `Vst3(Vst3Editor)` — main thread), every open parameter window (`ParamWindow`: the window and
-  its rows model), and the last value sent per (plugin, parameter); the poll timer calls
+  its rows model and its preset list), and the preset last loaded/saved per plugin
+  (`current_presets`, so a reopened window shows it); the poll timer calls
   `Rack::poll_uis`, which pumps open VST3 editors (`idle`) and forgets any GUI or parameter
   window that has closed (a window closed by its title bar is only hidden, so it's noticed by
   `is_visible`). Each slot's effect models are created once and refilled in place, so
   refreshing a slot's other fields doesn't rebuild its rows. The parameter editor is a separate
   top-level window per plugin (`ParamsWindow` in `ui/params_window.slint`, exported from
   `app.slint` so Rust can create it; `Rack::open_params`). Every Slint window has its own
-  instance of each global, so it can't call `AppLogic` itself: its `set-param` callback is
-  forwarded by Rust to the main window's `AppLogic.set-param`. It renders one `ParamControl`
+  instance of each global, so it can't call `AppLogic` itself: its callbacks are forwarded by
+  Rust (`with_logic`) to the main window's `AppLogic` (`set-param`, `load-preset`,
+  `save-preset`, `delete-preset` — `key` plus an index into the window's preset list or a
+  name). At the top, a `PresetBar`: a preset `ComboBox`, "Save…" (an inline name field,
+  prefilled with the current user preset's name — saving the same name overwrites) and "Delete"
+  (user presets only, confirmed inline), plus a status line for results/errors. Loading a
+  preset rebuilds every row from `Engine::param_value`. Below it, one `ParamControl`
   (`ParamRow`) per parameter, by kind: a `Switch` (toggle), a `ComboBox` beside the name (choice), a slider with
   `step` (stepped/note), a 0..1 slider mapped exponentially (logarithmic), or a plain slider —
   each with the value text (`param_text`) beside the name. **Slint gotcha:** a widget that sets its
@@ -413,9 +468,9 @@ behind format-agnostic cores:
   toggles). Snapping is host-side: `set-param`
   snaps via `ParamInfo::snap` and skips values equal to the last one sent, so a stepped slider
   only sends when it crosses a step. Sending a value calls `Engine::set_param`, while edits from a plugin's own GUI arrive over the
-  `(key, param_id, value)` channel and go through `Engine::send_param_change`; both paths record
-  the value (`Rack::set_param_value`), updating an open parameter window's row, so a window
-  shows current values, not defaults.
+  `(key, param_id, value)` channel and go through `Engine::send_param_change`; the engine
+  records the value either way, and `Rack::show_param_value` updates an open window's row, so
+  a window shows current values, not defaults.
   Every structural change re-records the slot's chain into the config (`record_chain`). Meant as the base for
   future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
@@ -454,7 +509,11 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 ### Known simplifications (not bugs)
 
 - Restarting the stream (device change while running) re-instantiates every loaded plugin at
-  default parameter values — plugin state isn't carried over.
+  default parameter values — plugin state isn't carried over (presets could do this now, but
+  don't yet).
+- An open LV2 plugin GUI never gets `port_event`, so it doesn't follow host-side port changes
+  (the parameter window, a loaded preset's port values); GUIs that read the plugin's own state
+  (e.g. Surge XT, via instance access) do follow a preset's state. VST3 editors follow both.
 - MIDI events always get `frame_offset = 0` — `midir`'s callback doesn't hand back a
   sample-accurate offset relative to the audio clock, so events are applied at the start of
   whichever block consumes them. Fine for a keyboard-driven rack; would need revisiting for
@@ -496,7 +555,8 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   changes, no parameter-list refresh). Only the main audio buses are activated (others get
   buffers but stay inactive; only output bus 0 is read). The processor's
   `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
-  fixed 120 BPM 4/4, not playing). No plugin state save/restore yet (same as LV2).
+  fixed 120 BPM 4/4, not playing). Presets are `.vstpreset` files only — factory programs
+  exposed through `IUnitInfo` program lists aren't listed yet.
 - A VST3 editor runs on the GUI's main thread (see `crates/vst3-ui-host`), so — unlike an LV2
   GUI, which wedges only its own thread — a VST3 editor that hangs inside a call freezes the
   whole app. There's no way around it within the VST3 threading rules short of out-of-process

@@ -8,7 +8,8 @@ pub use filter::{MidiFilter, MidiRouter};
 pub use midi::MidiEvent;
 pub use param::ParamChange;
 pub use plugin::{
-    HostedPlugin, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, note_name,
+    HostedPlugin, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo,
+    note_name,
 };
 pub use ring::{
     Consumer, MidiConsumer, MidiProducer, Producer, PushError, ParamConsumer, ParamProducer, midi_ring_buffer,
