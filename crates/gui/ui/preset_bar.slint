@@ -1,0 +1,216 @@
+import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { AppState, AppLogic, EffectRow, PresetRow } from "globals.slint";
+
+// One preset in a preset browser.
+component PresetItem inherits Rectangle {
+    in property <PresetRow> preset;
+    callback choose();
+    callback toggle-pin();
+
+    height: 30px;
+    border-radius: 4px;
+    background: root.preset.current ? Palette.selection-background
+        : choose-area.has-hover ? Palette.alternate-background : transparent;
+
+    // Behind the layout, so the star gets its own clicks and the rest of the row
+    // chooses.
+    choose-area := TouchArea {
+        clicked => { root.choose(); }
+    }
+
+    if root.preset.after-pinned : Rectangle {
+        y: 0;
+        height: 1px;
+        background: Palette.border;
+    }
+
+    HorizontalLayout {
+        padding-right: 12px;
+        spacing: 4px;
+        Rectangle {
+            width: 28px;
+            Text {
+                text: root.preset.pinned ? "★" : "☆";
+                font-size: 15px;
+                color: root.preset.pinned ? #e0a020 : star-area.has-hover ? Palette.foreground : gray;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            star-area := TouchArea {
+                clicked => { root.toggle-pin(); }
+            }
+        }
+        Text {
+            text: root.preset.name;
+            color: root.preset.current ? Palette.selection-foreground : Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.preset.user : Text {
+            text: "user";
+            font-size: 11px;
+            color: gray;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Under a chain row: the plugin's current preset (greyed "changed" once a
+// parameter moved since it was loaded or saved), which opens a searchable
+// browser of its presets (favourites on top) to load another; saving the current
+// settings as a preset; and deleting the current one if the user saved it.
+// Saving and deleting ask for a name or confirmation inline. One browser is open
+// at a time, for `AppState.preset-browser-key`.
+export component PresetBar inherits VerticalLayout {
+    in property <EffectRow> plugin;
+
+    // 0: the current preset, 1: naming a preset to save, 2: confirming a delete.
+    property <int> mode: 0;
+    property <bool> browsing: AppState.preset-browser-key == root.plugin.key;
+
+    spacing: 4px;
+
+    if root.mode == 0 && !root.browsing : HorizontalLayout {
+        spacing: 4px;
+        // Otherwise the row grows to fill the panel (std Buttons don't cap
+        // their height).
+        max-height: self.min-height;
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Palette.border;
+            background: browse-area.has-hover ? Palette.alternate-background : Palette.control-background;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+                Text {
+                    text: root.plugin.preset-name != "" ? root.plugin.preset-name : "Presets";
+                    color: root.plugin.preset-name != "" ? Palette.foreground : gray;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.plugin.preset-changed : Text {
+                    text: "changed";
+                    color: gray;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "▾";
+                    font-size: 16px;
+                    vertical-alignment: center;
+                }
+            }
+            browse-area := TouchArea {
+                clicked => { AppLogic.open-preset-browser(root.plugin.key); }
+            }
+        }
+        Button {
+            text: "Save…";
+            clicked => { root.mode = 1; }
+        }
+        Button {
+            text: "Delete";
+            enabled: root.plugin.preset-user;
+            clicked => { root.mode = 2; }
+        }
+    }
+
+    if root.mode == 1 : HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        name := LineEdit {
+            horizontal-stretch: 1;
+            placeholder-text: "Preset name";
+            // Saving over the current user preset is the common case.
+            text: root.plugin.preset-user ? root.plugin.preset-name : "";
+            init => { self.focus(); }
+            accepted => {
+                if (self.text != "") {
+                    AppLogic.save-preset(root.plugin.key, self.text);
+                    root.mode = 0;
+                }
+            }
+        }
+        Button {
+            text: "Save";
+            primary: true;
+            enabled: name.text != "";
+            clicked => {
+                AppLogic.save-preset(root.plugin.key, name.text);
+                root.mode = 0;
+            }
+        }
+        Button {
+            text: "Cancel";
+            clicked => { root.mode = 0; }
+        }
+    }
+
+    if root.mode == 2 : HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        Text {
+            text: "Delete \"\{root.plugin.preset-name}\"?";
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Delete";
+            primary: true;
+            clicked => {
+                AppLogic.delete-preset(root.plugin.key);
+                root.mode = 0;
+            }
+        }
+        Button {
+            text: "Cancel";
+            clicked => { root.mode = 0; }
+        }
+    }
+
+    if root.mode == 0 && root.browsing : VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 4px;
+            max-height: self.min-height;
+            search := LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "Search presets";
+                // Rows are rebuilt when their slot changes; keep the search.
+                text: AppState.preset-query;
+                init => { self.focus(); }
+                edited => { AppLogic.filter-presets(self.text); }
+                // Enter loads the first match.
+                accepted => {
+                    if (AppState.preset-rows.length > 0) {
+                        AppLogic.load-preset(0);
+                    }
+                }
+            }
+            Button {
+                text: "Close";
+                clicked => { AppLogic.close-preset-browser(); }
+            }
+        }
+        if AppState.preset-rows.length == 0 : Text {
+            text: AppState.preset-count == 0 ? "This plugin has no presets." : "No presets match \"\{search.text}\".";
+            color: gray;
+            wrap: word-wrap;
+        }
+        ListView {
+            // Up to 8 rows, then it scrolls.
+            height: min(AppState.preset-rows.length, 8) * 30px;
+            for row[index] in AppState.preset-rows : PresetItem {
+                preset: row;
+                choose => { AppLogic.load-preset(index); }
+                toggle-pin => { AppLogic.toggle-preset-pin(index); }
+            }
+        }
+    }
+}

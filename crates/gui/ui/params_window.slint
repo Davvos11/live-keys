@@ -1,4 +1,4 @@
-import { Button, ComboBox, LineEdit, ListView, Palette, Slider, Switch, VerticalBox } from "std-widgets.slint";
+import { ComboBox, ListView, Palette, Slider, Switch, VerticalBox } from "std-widgets.slint";
 import { ParamRow } from "globals.slint";
 
 // One parameter, with the control its kind calls for: a switch, a dropdown, a
@@ -73,129 +73,14 @@ component ParamControl inherits VerticalLayout {
     }
 }
 
-// Load a preset from a menu, save the current settings as one, or delete one
-// the user saved. Saving and deleting ask for a name or confirmation inline.
-component PresetBar inherits VerticalLayout {
-    in property <[string]> presets;
-    // Whether each preset was saved by the user (only those can be deleted).
-    in property <[bool]> preset-user;
-    // The preset last loaded or saved; -1 if none.
-    in property <int> preset-index;
-    in property <string> status;
-    callback load(/* index */ int);
-    callback save(/* name */ string);
-    callback delete(/* index */ int);
-
-    // 0: the menu, 1: naming a preset to save, 2: confirming a delete.
-    property <int> mode: 0;
-    property <bool> can-delete: root.preset-index >= 0 && root.preset-user[root.preset-index];
-
-    spacing: 4px;
-
-    if root.mode == 0 : HorizontalLayout {
-        spacing: 6px;
-        // Otherwise the row grows to fill the window (std ComboBox/Button
-        // don't cap their height).
-        max-height: self.min-height;
-        ComboBox {
-            horizontal-stretch: 1;
-            enabled: root.presets.length > 0;
-            model: root.presets.length > 0 ? root.presets : ["No presets"];
-            current-index: self.source;
-            // Picking sets `current-index` itself, replacing its binding; this
-            // keeps following the host (a save, a failed load).
-            property <int> source: root.presets.length > 0 ? root.preset-index : 0;
-            changed source => { self.current-index = self.source; }
-            selected => { root.load(self.current-index); }
-        }
-        Button {
-            text: "Save…";
-            clicked => { root.mode = 1; }
-        }
-        Button {
-            text: "Delete";
-            enabled: root.can-delete;
-            clicked => { root.mode = 2; }
-        }
-    }
-
-    if root.mode == 1 : HorizontalLayout {
-        spacing: 6px;
-        max-height: self.min-height;
-        name := LineEdit {
-            horizontal-stretch: 1;
-            placeholder-text: "Preset name";
-            // Saving over the current user preset is the common case.
-            text: root.can-delete ? root.presets[root.preset-index] : "";
-            init => { self.focus(); }
-            accepted => {
-                if (self.text != "") {
-                    root.save(self.text);
-                    root.mode = 0;
-                }
-            }
-        }
-        Button {
-            text: "Save";
-            primary: true;
-            enabled: name.text != "";
-            clicked => {
-                root.save(name.text);
-                root.mode = 0;
-            }
-        }
-        Button {
-            text: "Cancel";
-            clicked => { root.mode = 0; }
-        }
-    }
-
-    if root.mode == 2 : HorizontalLayout {
-        spacing: 6px;
-        max-height: self.min-height;
-        Text {
-            text: "Delete \"\{root.presets[root.preset-index]}\"?";
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-        Button {
-            text: "Delete";
-            primary: true;
-            clicked => {
-                root.delete(root.preset-index);
-                root.mode = 0;
-            }
-        }
-        Button {
-            text: "Cancel";
-            clicked => { root.mode = 0; }
-        }
-    }
-
-    if root.status != "" : Text {
-        text: root.status;
-        color: gray;
-        font-size: 11px;
-        wrap: word-wrap;
-    }
-}
-
-// A window of its own per plugin: its presets, and its parameters — an editor
-// usable whether or not the plugin has its own GUI. Opened from a chain row's
-// "Params" button. Its own callbacks rather than `AppLogic`'s, since every
+// A window of its own per plugin listing its parameters — an editor usable
+// whether or not the plugin has its own GUI. Opened from a chain row's "Params"
+// button. Its own callbacks rather than `AppLogic`'s, since every
 // window has its own instance of each global.
 export component ParamsWindow inherits Window {
     in property <string> plugin-name;
     in property <[ParamRow]> params;
-    in property <[string]> presets;
-    in property <[bool]> preset-user;
-    in property <int> preset-index: -1;
-    in property <string> status;
     callback set-param(/* param-id */ int, float);
-    callback load-preset(/* index */ int);
-    callback save-preset(/* name */ string);
-    callback delete-preset(/* index */ int);
 
     title: "\{root.plugin-name} — Parameters";
     preferred-width: 420px;
@@ -210,15 +95,6 @@ export component ParamsWindow inherits Window {
             font-size: 15px;
             font-weight: 600;
             overflow: elide;
-        }
-        PresetBar {
-            presets: root.presets;
-            preset-user: root.preset-user;
-            preset-index: root.preset-index;
-            status: root.status;
-            load(index) => { root.load-preset(index); }
-            save(name) => { root.save-preset(name); }
-            delete(index) => { root.delete-preset(index); }
         }
         Rectangle {
             height: 1px;

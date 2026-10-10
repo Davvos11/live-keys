@@ -17,6 +17,10 @@ pub struct AppConfig {
     /// `PluginInfo::id`s pinned to the top of the plugin picker.
     #[serde(default)]
     pub pinned_plugins: Vec<String>,
+    /// `PresetInfo::id`s of favourite presets, listed first in a parameter
+    /// window's preset browser. Unique across plugins (a preset URI or file path).
+    #[serde(default)]
+    pub pinned_presets: Vec<String>,
 }
 
 /// One Live-tab slot's saved setup.

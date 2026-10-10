@@ -53,11 +53,11 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (3 side-by-side rack
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
-# reorderable, any plugin's GUI and its parameter window (with presets) openable — and a MIDI
+# reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and a MIDI
 # channel/note-range/velocity-range filter and a volume fader)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
-# folders, pinned plugin ids, and per slot: last instrument id + MIDI/audio effect ids, MIDI
+# folders, pinned plugin ids, favourite preset ids, and per slot: last instrument id + MIDI/audio effect ids, MIDI
 # filter, volume), loaded on startup. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
@@ -427,36 +427,47 @@ behind format-agnostic cores:
   Picking calls `pick-plugin(slot, category, id)`, which loads an instrument (replacing) or
   appends to the matching effect section. The Settings tab lists every plugin with its kind
   and format. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
-  `AppState.slots` entry (`SlotState`: instrument name/key/GUI state,
-  `midi-effects`/`audio-effects: [EffectRow]`, which GUIs/parameter windows are open,
-  status, routing), laid out top to bottom in signal order: MIDI filter, MIDI effects,
+  `AppState.slots` entry (`SlotState`: `instrument: EffectRow` — key -1 when empty —
+  `midi-effects`/`audio-effects: [EffectRow]`, status, routing; an `EffectRow` is one
+  plugin's name/key, whether its GUI/parameter window is open, and its current preset),
+  laid out top to bottom in signal order: MIDI filter, MIDI effects,
   instrument, audio effects, volume. The instrument and each effect render as a `ChainRow`:
   the name, a GUI toggle and a Params toggle (highlighted while open), ↑/↓
-  (effects only), ✕ to remove. `AppLogic` actions take the slot index for structural changes
+  (effects only), ✕ to remove — and below it a `PresetBar` (`ui/preset_bar.slint`): the
+  current preset (with a grey "changed" once a parameter moved since it was loaded or saved
+  — `Rack::mark_changed`, on host-side edits and on plugin-GUI edits that actually change a
+  value, so GUIs echoing values back don't count; LV2 plugin state changed outside its ports
+  isn't seen), which opens an inline browser — a search field (every word must appear in the
+  name; Enter loads the first match) over a list with a star per row to make it a favourite
+  (`AppConfig.pinned_presets`, by `PresetInfo::id`, listed first) — plus "Save…" (an inline
+  name field, prefilled with the current user preset's name — saving the same name
+  overwrites) and "Delete" (the current preset, user presets only, confirmed inline). Only
+  one browser is open at a time: it lives in `AppState` (`preset-browser-key`,
+  `preset-rows`, `preset-count`, `preset-query`) and in Rust as `Rack::browser`
+  (`PresetBrowser`: the plugin's presets, read when it opens, the query and the shown ones),
+  filtered in Rust like the plugin picker. Preset errors go to the slot's status line. `AppLogic` actions take the slot index for structural changes
   (`pick-plugin`, `remove-effect(slot, section, index)`, `move-effect(slot, section, from,
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
-  (`open-plugin-gui`, `toggle-params`, `set-param`). The engine stream is started lazily by the
+  (`open-plugin-gui`, `toggle-params`, `set-param`, `save-preset`, `delete-preset`); the
+  preset browser's actions act on the open browser's plugin. The engine stream is started lazily by the
   first load (on the devices chosen in Settings) and restarted — closing all plugin GUIs first,
   since their instance handles go stale (and keys change) — when the device selection changes
   while running. Replacing/removing a plugin likewise closes its GUI and parameter window
   first (`Rack::forget`). On the Rust side, `Rack` owns the slots' `VecModel`s, every open GUI
   keyed by `PluginKey` as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own thread — or
   `Vst3(Vst3Editor)` — main thread), every open parameter window (`ParamWindow`: the window and
-  its rows model and its preset list), and the preset last loaded/saved per plugin
-  (`current_presets`, so a reopened window shows it); the poll timer calls
+  its rows model), and the preset last loaded/saved per plugin (`current_presets`, with its
+  changed flag); the poll timer calls
   `Rack::poll_uis`, which pumps open VST3 editors (`idle`) and forgets any GUI or parameter
   window that has closed (a window closed by its title bar is only hidden, so it's noticed by
-  `is_visible`). Each slot's effect models are created once and refilled in place, so
-  refreshing a slot's other fields doesn't rebuild its rows. The parameter editor is a separate
+  `is_visible`). Each slot's effect models are created once and refilled in place, changing only rows
+  that differ (`sync_model`), so refreshing a slot doesn't rebuild its rows (and lose a
+  half-typed preset name). The parameter editor is a separate
   top-level window per plugin (`ParamsWindow` in `ui/params_window.slint`, exported from
   `app.slint` so Rust can create it; `Rack::open_params`). Every Slint window has its own
-  instance of each global, so it can't call `AppLogic` itself: its callbacks are forwarded by
-  Rust (`with_logic`) to the main window's `AppLogic` (`set-param`, `load-preset`,
-  `save-preset`, `delete-preset` — `key` plus an index into the window's preset list or a
-  name). At the top, a `PresetBar`: a preset `ComboBox`, "Save…" (an inline name field,
-  prefilled with the current user preset's name — saving the same name overwrites) and "Delete"
-  (user presets only, confirmed inline), plus a status line for results/errors. Loading a
-  preset rebuilds every row from `Engine::param_value`. Below it, one `ParamControl`
+  instance of each global, so it can't call `AppLogic` itself: its `set-param` is forwarded by
+  Rust (`with_logic`) to the main window's `AppLogic`. Loading a preset rebuilds every row of
+  an open window from `Engine::param_value`. It lists one `ParamControl`
   (`ParamRow`) per parameter, by kind: a `Switch` (toggle), a `ComboBox` beside the name (choice), a slider with
   `step` (stepped/note), a 0..1 slider mapped exponentially (logarithmic), or a plain slider —
   each with the value text (`param_text`) beside the name. **Slint gotcha:** a widget that sets its

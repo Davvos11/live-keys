@@ -1,6 +1,7 @@
 import { Button, ComboBox, GroupBox, HorizontalBox, Palette, Slider, VerticalBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
+import { PresetBar } from "preset_bar.slint";
 
 component SectionTitle inherits Text {
     font-weight: 600;
@@ -27,12 +28,9 @@ component SectionHeader inherits HorizontalLayout {
 }
 
 // One plugin in a slot's chain, with buttons for its own GUI and its
-// parameter window.
-component ChainRow inherits Rectangle {
-    in property <string> name;
-    in property <bool> gui-supported;
-    in property <bool> gui-open;
-    in property <bool> params-open;
+// parameter window, and its presets below.
+component ChainRow inherits VerticalLayout {
+    in property <EffectRow> plugin;
     // Shows the move buttons (effects only).
     in property <bool> movable;
     in property <bool> can-move-up;
@@ -43,11 +41,14 @@ component ChainRow inherits Rectangle {
     callback move-up();
     callback move-down();
 
+    padding-bottom: 4px;
+    spacing: 2px;
+
     HorizontalLayout {
         padding-left: 6px;
         spacing: 2px;
         Text {
-            text: root.name;
+            text: root.plugin.name;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
@@ -56,15 +57,15 @@ component ChainRow inherits Rectangle {
             text: "GUI";
             // Highlighted while open. Not `checkable`: a click would set
             // `checked` itself, cutting it loose from `gui-open`.
-            primary: root.gui-open;
+            primary: root.plugin.gui-open;
             // A wedged plugin GUI may never report closing; the button stays
             // usable to force it closed.
-            enabled: root.gui-supported || root.gui-open;
+            enabled: root.plugin.gui-supported || root.plugin.gui-open;
             clicked => { root.toggle-gui(); }
         }
         Button {
             text: "Params";
-            primary: root.params-open;
+            primary: root.plugin.params-open;
             clicked => { root.toggle-params(); }
         }
         if root.movable : Button {
@@ -82,6 +83,11 @@ component ChainRow inherits Rectangle {
             clicked => { root.remove(); }
         }
     }
+
+    PresetBar {
+        padding-left: 6px;
+        plugin: root.plugin;
+    }
 }
 
 // The effect rows of one chain section, with move/remove buttons.
@@ -93,10 +99,7 @@ component EffectList inherits VerticalLayout {
     in property <string> empty-text;
 
     for effect[index] in root.effects : ChainRow {
-        name: effect.name;
-        gui-supported: effect.gui-supported;
-        gui-open: effect.gui-open;
-        params-open: effect.params-open;
+        plugin: effect;
         movable: true;
         can-move-up: index > 0;
         can-move-down: index < root.effects.length - 1;
@@ -205,25 +208,22 @@ component SlotPanel inherits GroupBox {
 
         SectionHeader {
             title: "Instrument";
-            action: root.slot.instrument-key >= 0 ? "Replace" : "+ Choose";
+            action: root.slot.instrument.key >= 0 ? "Replace" : "+ Choose";
             clicked => { root.choose-plugin(Category.instrument); }
         }
-        if root.slot.instrument-key >= 0 : ChainRow {
-            name: root.slot.plugin-name;
-            gui-supported: root.slot.gui-supported;
-            gui-open: root.slot.gui-open;
-            params-open: root.slot.params-open;
-            toggle-params => { AppLogic.toggle-params(root.slot.instrument-key); }
+        if root.slot.instrument.key >= 0 : ChainRow {
+            plugin: root.slot.instrument;
+            toggle-params => { AppLogic.toggle-params(root.slot.instrument.key); }
             toggle-gui => {
-                if (root.slot.gui-open) {
-                    AppLogic.close-plugin-gui(root.slot.instrument-key);
+                if (root.slot.instrument.gui-open) {
+                    AppLogic.close-plugin-gui(root.slot.instrument.key);
                 } else {
-                    AppLogic.open-plugin-gui(root.slot.instrument-key);
+                    AppLogic.open-plugin-gui(root.slot.instrument.key);
                 }
             }
             remove => { AppLogic.unload-plugin(root.slot-index); }
         }
-        if root.slot.instrument-key < 0 : Text {
+        if root.slot.instrument.key < 0 : Text {
             text: "None";
             color: gray;
         }

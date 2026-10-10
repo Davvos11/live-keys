@@ -32,35 +32,48 @@ export struct ParamRow {
     choice-index: int,
 }
 
-// One effect (MIDI or audio) in a slot's chain.
+// One preset in the preset browser.
+export struct PresetRow {
+    name: string,
+    // Saved by the user (and so deletable).
+    user: bool,
+    // A favourite, listed first.
+    pinned: bool,
+    // The first non-favourite row after some favourites, drawn with a divider above.
+    after-pinned: bool,
+    // The preset last loaded or saved.
+    current: bool,
+}
+
+// One plugin (an instrument or a MIDI or audio effect) in a slot's chain.
 export struct EffectRow {
-    // The engine's `PluginKey` of this instance.
+    // The engine's `PluginKey` of this instance, or -1 for no plugin.
     key: int,
     name: string,
+    // Whether the plugin has any GUI this host can show at all.
     gui-supported: bool,
+    // Whether we currently believe the plugin's GUI session is open. A plugin's
+    // own UI can wedge internally (observed with some External UI plugins) and
+    // never signal back that it closed — "GUI" lets the user force this back to
+    // false so they can at least try a fresh session, independent of whatever
+    // the previous one's hosting thread is stuck doing.
     gui-open: bool,
     // Whether its parameter window is open.
     params-open: bool,
+    // The preset last loaded or saved; empty if none.
+    preset-name: string,
+    // Whether that preset was saved by the user (and so can be deleted).
+    preset-user: bool,
+    // Whether a parameter changed since that preset was loaded or saved.
+    preset-changed: bool,
 }
 
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
 // effects.
 export struct SlotState {
-    // Empty when no instrument is loaded into this slot.
-    plugin-name: string,
-    // The instrument's `PluginKey`, or -1 if none.
-    instrument-key: int,
-    // Whether the instrument has any GUI this host can show at all.
-    gui-supported: bool,
-    // Whether we currently believe the instrument's GUI session is open. A
-    // plugin's own UI can wedge internally (observed with some External UI
-    // plugins) and never signal back that it closed — "Close GUI" lets the user
-    // force this back to false so they can at least try a fresh session,
-    // independent of whatever the previous one's hosting thread is stuck doing.
-    gui-open: bool,
-    // Whether the instrument's parameter window is open.
-    params-open: bool,
-    // Why the GUI can't be opened, or the last load/open error; empty if none.
+    // Its key is -1 when no instrument is loaded into this slot.
+    instrument: EffectRow,
+    // The last load/open/preset error; empty if none.
     status: string,
     // In processing order, in front of the instrument.
     midi-effects: [EffectRow],
@@ -97,6 +110,13 @@ export global AppState {
     // Volume fader range; the minimum means muted.
     in property <float> min-volume-db: -60;
     in property <float> max-volume-db: 6;
+    // The plugin whose preset browser is open, or -1; one at a time.
+    in property <int> preset-browser-key: -1;
+    // Its presets matching `preset-query`, favourites first, and how many
+    // presets it has in all.
+    in property <[PresetRow]> preset-rows;
+    in property <int> preset-count;
+    in property <string> preset-query;
 }
 
 // Plugin categories, as the picker's tabs and `category` arguments number them.
@@ -132,11 +152,19 @@ export global AppLogic {
     // Invoked by the Rust side for a `ParamsWindow`'s edits (a separate window
     // can't reach this window's globals itself).
     callback set-param(/* key */ int, /* param-id */ int, float);
-    // Preset actions of a `ParamsWindow`, forwarded like `set-param`. `index`
-    // is into that window's preset list.
-    callback load-preset(/* key */ int, /* index */ int);
+    // Presets. The browser's actions act on `AppState.preset-browser-key`'s
+    // plugin; `index` is into `AppState.preset-rows`.
+    callback open-preset-browser(/* key */ int);
+    callback close-preset-browser();
+    // Shows the presets whose name contains every word of `query`.
+    callback filter-presets(/* query */ string);
+    // Loads the preset and closes the browser.
+    callback load-preset(/* index */ int);
+    // Adds the preset to the favourites, or removes it.
+    callback toggle-preset-pin(/* index */ int);
     callback save-preset(/* key */ int, /* name */ string);
-    callback delete-preset(/* key */ int, /* index */ int);
+    // Deletes the plugin's current preset.
+    callback delete-preset(/* key */ int);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);

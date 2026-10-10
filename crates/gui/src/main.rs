@@ -105,11 +105,10 @@ impl Picker {
     /// `query` (case-insensitively), pinned ones first.
     fn filter(&self, kind: PluginKind, query: &str, pinned: &[String]) {
         *self.filter.borrow_mut() = (kind, query.to_string());
-        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         let plugins = self.plugins.borrow();
         let matches = plugins.iter().filter(|plugin| {
-            let text = format!("{} {}", plugin.name, plugin.format.label()).to_lowercase();
-            plugin.kind == kind && words.iter().all(|word| text.contains(word.as_str()))
+            plugin.kind == kind
+                && matches_query(&format!("{} {}", plugin.name, plugin.format.label()), query)
         });
         let (pinned_rows, other_rows): (Vec<_>, Vec<_>) =
             matches.partition(|plugin| pinned.contains(&plugin.id));
@@ -133,6 +132,22 @@ impl Picker {
     fn refilter(&self, pinned: &[String]) {
         let (kind, query) = self.filter.borrow().clone();
         self.filter(kind, &query, pinned);
+    }
+}
+
+/// Whether `text` contains every word of `query`, case-insensitively.
+fn matches_query(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query.split_whitespace().all(|word| text.contains(&word.to_lowercase()))
+}
+
+/// Toggles `id`'s membership of `pinned`.
+fn toggle_pinned(pinned: &mut Vec<String>, id: &str) {
+    match pinned.iter().position(|pinned| pinned == id) {
+        Some(index) => {
+            pinned.remove(index);
+        }
+        None => pinned.push(id.to_string()),
     }
 }
 
@@ -172,12 +187,41 @@ fn param_row(engine: &Engine, key: PluginKey, param: &ParamInfo, value: f32) -> 
     }
 }
 
-/// A plugin's open parameter window, the model its list shows, and the presets
-/// its preset menu lists (in the same order).
+/// A plugin's open parameter window and the model its list shows.
 struct ParamWindow {
     window: ParamsWindow,
     rows: Rc<VecModel<ParamRow>>,
+}
+
+/// The preset a plugin last loaded or saved, and whether a parameter changed
+/// since.
+struct CurrentPreset {
+    preset: PresetInfo,
+    changed: bool,
+}
+
+/// The open preset browser: whose presets, all of them, the search, and the
+/// ones shown for it (in the same order as `AppState.preset-rows`).
+struct PresetBrowser {
+    key: PluginKey,
     presets: Vec<PresetInfo>,
+    query: String,
+    shown: Vec<PresetInfo>,
+}
+
+/// Makes `model` hold `rows`, changing only the rows that differ, so Slint keeps
+/// the other rows' elements (and their local state, like a half-typed preset
+/// name) instead of rebuilding them all.
+fn sync_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
+    if model.row_count() != rows.len() {
+        model.set_vec(rows);
+        return;
+    }
+    for (index, row) in rows.into_iter().enumerate() {
+        if model.row_data(index).as_ref() != Some(&row) {
+            model.set_row_data(index, row);
+        }
+    }
 }
 
 /// Runs `action` with the main window's `AppLogic`, if the window still exists.
@@ -222,9 +266,11 @@ struct Rack {
     audio_effects: Vec<Rc<VecModel<EffectRow>>>,
     open_uis: RefCell<HashMap<PluginKey, OpenEditor>>,
     param_windows: RefCell<HashMap<PluginKey, ParamWindow>>,
-    /// The preset last loaded or saved per plugin, by [`PresetInfo::id`], for its
-    /// parameter window's preset menu to show.
-    current_presets: RefCell<HashMap<PluginKey, String>>,
+    /// The preset last loaded or saved per plugin.
+    current_presets: RefCell<HashMap<PluginKey, CurrentPreset>>,
+    browser: RefCell<Option<PresetBrowser>>,
+    /// Backs `AppState.preset-rows`.
+    preset_rows: Rc<VecModel<PresetRow>>,
 }
 
 impl Rack {
@@ -237,7 +283,10 @@ impl Rack {
             .map(|slot| SlotState {
                 midi_effects: ModelRc::from(midi_effects[slot].clone()),
                 audio_effects: ModelRc::from(audio_effects[slot].clone()),
-                instrument_key: -1,
+                instrument: EffectRow {
+                    key: -1,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -248,6 +297,8 @@ impl Rack {
             open_uis: RefCell::new(HashMap::new()),
             param_windows: RefCell::new(HashMap::new()),
             current_presets: RefCell::new(HashMap::new()),
+            browser: RefCell::new(None),
+            preset_rows: Rc::new(VecModel::default()),
         }
     }
 
@@ -257,34 +308,38 @@ impl Rack {
         let empty = SlotChain::default();
         let chain = engine.slot(slot).unwrap_or(&empty);
 
-        let open_uis = self.open_uis.borrow();
-        let param_windows = self.param_windows.borrow();
         let effect_rows = |section: Section| -> Vec<EffectRow> {
-            chain
-                .effects(section)
-                .iter()
-                .map(|meta| EffectRow {
-                    key: meta.key as i32,
-                    name: meta.name.clone().into(),
-                    gui_supported: gui_supported(meta),
-                    gui_open: open_uis.contains_key(&meta.key),
-                    params_open: param_windows.contains_key(&meta.key),
-                })
-                .collect()
+            chain.effects(section).iter().map(|meta| self.plugin_row(meta)).collect()
         };
-        self.midi_effects[slot].set_vec(effect_rows(Section::Midi));
-        self.audio_effects[slot].set_vec(effect_rows(Section::Audio));
+        sync_model(&self.midi_effects[slot], effect_rows(Section::Midi));
+        sync_model(&self.audio_effects[slot], effect_rows(Section::Audio));
 
-        let instrument = chain.instrument.as_ref();
         let mut row = self.slots.row_data(slot).unwrap();
-        row.plugin_name = instrument.map(|meta| meta.name.as_str()).unwrap_or_default().into();
-        row.instrument_key = instrument.map_or(-1, |meta| meta.key as i32);
-        row.gui_supported = instrument.is_some_and(gui_supported);
-        row.gui_open = instrument.is_some_and(|meta| open_uis.contains_key(&meta.key));
-        row.params_open = instrument.is_some_and(|meta| param_windows.contains_key(&meta.key));
+        row.instrument = chain.instrument.as_ref().map_or(
+            EffectRow {
+                key: -1,
+                ..Default::default()
+            },
+            |meta| self.plugin_row(meta),
+        );
         row.status = error.unwrap_or_default().into();
-        drop((open_uis, param_windows));
         self.slots.set_row_data(slot, row);
+    }
+
+    /// The chain row of a loaded plugin.
+    fn plugin_row(&self, meta: &LoadedPluginMeta) -> EffectRow {
+        let current_presets = self.current_presets.borrow();
+        let current = current_presets.get(&meta.key);
+        EffectRow {
+            key: meta.key as i32,
+            name: meta.name.as_str().into(),
+            gui_supported: gui_supported(meta),
+            gui_open: self.open_uis.borrow().contains_key(&meta.key),
+            params_open: self.param_windows.borrow().contains_key(&meta.key),
+            preset_name: current.map(|c| c.preset.name.as_str()).unwrap_or_default().into(),
+            preset_user: current.is_some_and(|c| c.preset.user),
+            preset_changed: current.is_some_and(|c| c.changed),
+        }
     }
 
     /// Opens a window listing `key`'s parameters at their current values. Its
@@ -307,63 +362,113 @@ impl Rack {
         window.on_set_param(move |param_id, value| {
             with_logic(&app_weak, |logic| logic.invoke_set_param(key as i32, param_id, value));
         });
-        let app_weak = app.as_weak();
-        window.on_load_preset(move |index| {
-            with_logic(&app_weak, |logic| logic.invoke_load_preset(key as i32, index));
-        });
-        let app_weak = app.as_weak();
-        window.on_save_preset(move |name| {
-            with_logic(&app_weak, |logic| logic.invoke_save_preset(key as i32, name.clone()));
-        });
-        let app_weak = app.as_weak();
-        window.on_delete_preset(move |index| {
-            with_logic(&app_weak, |logic| logic.invoke_delete_preset(key as i32, index));
-        });
         // Closing it by its title bar only hides it; `poll_uis` notices and
         // drops it.
         window.show()?;
-        self.param_windows.borrow_mut().insert(
-            key,
-            ParamWindow {
-                window,
-                rows,
-                presets: Vec::new(),
-            },
-        );
-        self.refresh_presets(engine, key, None);
+        self.param_windows.borrow_mut().insert(key, ParamWindow { window, rows });
         Ok(())
     }
 
-    /// Re-reads `key`'s presets into its parameter window's preset menu, showing
-    /// `status` (empty clears it). The current preset stays selected.
-    fn refresh_presets(&self, engine: &Engine, key: PluginKey, status: Option<String>) {
-        let mut windows = self.param_windows.borrow_mut();
-        let Some(open) = windows.get_mut(&key) else {
+    /// Opens `key`'s preset browser (closing any other), listing all its presets.
+    fn open_browser(&self, app: &AppWindow, engine: &Engine, key: PluginKey, pinned: &[String]) {
+        *self.browser.borrow_mut() = Some(PresetBrowser {
+            key,
+            presets: engine.presets(key),
+            query: String::new(),
+            shown: Vec::new(),
+        });
+        self.show_browser(app, pinned);
+    }
+
+    fn close_browser(&self, app: &AppWindow) {
+        *self.browser.borrow_mut() = None;
+        self.show_browser(app, &[]);
+    }
+
+    /// Shows only the browser's presets matching `query`.
+    fn filter_browser(&self, app: &AppWindow, query: &str, pinned: &[String]) {
+        if let Some(browser) = self.browser.borrow_mut().as_mut() {
+            browser.query = query.to_string();
+        }
+        self.show_browser(app, pinned);
+    }
+
+    /// Re-reads the browser's presets, e.g. after one was saved or deleted.
+    fn reread_browser(&self, app: &AppWindow, engine: &Engine, pinned: &[String]) {
+        if let Some(browser) = self.browser.borrow_mut().as_mut() {
+            browser.presets = engine.presets(browser.key);
+        }
+        self.show_browser(app, pinned);
+    }
+
+    /// Fills `AppState`'s browser properties: the presets matching the search,
+    /// favourites first, or nothing if no browser is open.
+    fn show_browser(&self, app: &AppWindow, pinned: &[String]) {
+        let state = app.global::<AppState>();
+        let mut browser = self.browser.borrow_mut();
+        let Some(browser) = browser.as_mut() else {
+            state.set_preset_browser_key(-1);
+            self.preset_rows.set_vec(Vec::new());
             return;
         };
-        open.presets = engine.presets(key);
-        let current = self.current_presets.borrow().get(&key).cloned();
-        let index = current
-            .and_then(|id| open.presets.iter().position(|preset| preset.id == id))
-            .map_or(-1, |index| index as i32);
-        let names: Vec<String> = open.presets.iter().map(|preset| preset.name.clone()).collect();
-        let user: Vec<bool> = open.presets.iter().map(|preset| preset.user).collect();
-        open.window.set_presets(string_model(names));
-        open.window.set_preset_user(ModelRc::new(VecModel::from(user)));
-        open.window.set_preset_index(index);
-        open.window.set_status(status.unwrap_or_default().into());
+        let (pinned_presets, others): (Vec<_>, Vec<_>) = browser
+            .presets
+            .iter()
+            .filter(|preset| matches_query(&preset.name, &browser.query))
+            .cloned()
+            .partition(|preset| pinned.contains(&preset.id));
+        let divider_at = (!pinned_presets.is_empty()).then_some(pinned_presets.len());
+        browser.shown = pinned_presets.into_iter().chain(others).collect();
+        let current_presets = self.current_presets.borrow();
+        let current = current_presets.get(&browser.key).map(|c| c.preset.id.as_str());
+        let rows = browser
+            .shown
+            .iter()
+            .enumerate()
+            .map(|(index, preset)| PresetRow {
+                name: preset.name.as_str().into(),
+                user: preset.user,
+                pinned: divider_at.is_some_and(|divider| index < divider),
+                after_pinned: divider_at == Some(index),
+                current: current == Some(preset.id.as_str()),
+            })
+            .collect::<Vec<_>>();
+        self.preset_rows.set_vec(rows);
+        state.set_preset_browser_key(browser.key as i32);
+        state.set_preset_count(browser.presets.len() as i32);
+        state.set_preset_query(browser.query.as_str().into());
     }
 
-    /// The preset at `index` in `key`'s parameter window's menu.
-    fn preset_at(&self, key: PluginKey, index: i32) -> Option<PresetInfo> {
-        let windows = self.param_windows.borrow();
-        windows.get(&key)?.presets.get(usize::try_from(index).ok()?).cloned()
+    /// The open browser's plugin and its preset at `index` in the shown rows.
+    fn browser_preset(&self, index: i32) -> Option<(PluginKey, PresetInfo)> {
+        let browser = self.browser.borrow();
+        let browser = browser.as_ref()?;
+        Some((browser.key, browser.shown.get(usize::try_from(index).ok()?)?.clone()))
     }
 
-    fn set_current_preset(&self, key: PluginKey, preset_id: Option<String>) {
+    fn current_preset(&self, key: PluginKey) -> Option<PresetInfo> {
+        self.current_presets.borrow().get(&key).map(|c| c.preset.clone())
+    }
+
+    /// Notes that one of `key`'s parameters moved, so its current preset (if
+    /// any) shows as changed.
+    fn mark_changed(&self, engine: &Engine, key: PluginKey) {
+        let newly_changed = match self.current_presets.borrow_mut().get_mut(&key) {
+            Some(current) if !current.changed => {
+                current.changed = true;
+                true
+            }
+            _ => false,
+        };
+        if newly_changed && let Some(slot) = slot_of(engine, key) {
+            self.refresh_slot(engine, slot, None);
+        }
+    }
+
+    fn set_current_preset(&self, key: PluginKey, preset: Option<PresetInfo>) {
         let mut current = self.current_presets.borrow_mut();
-        match preset_id {
-            Some(id) => current.insert(key, id),
+        match preset {
+            Some(preset) => current.insert(key, CurrentPreset { preset, changed: false }),
             None => current.remove(&key),
         };
     }
@@ -443,6 +548,12 @@ impl Rack {
         self.close_ui(key);
         self.close_params(key);
         self.set_current_preset(key, None);
+        let mut browser = self.browser.borrow_mut();
+        if browser.as_ref().is_some_and(|browser| browser.key == key) {
+            // Its rows stay in `AppState` until the next browser opens, but no
+            // chain row shows them once the key is gone.
+            *browser = None;
+        }
     }
 
     /// Lets go of every plugin, for when the engine is about to reload or drop
@@ -457,6 +568,7 @@ impl Rack {
             self.close_params(key);
         }
         self.current_presets.borrow_mut().clear();
+        *self.browser.borrow_mut() = None;
     }
 
     /// Pumps open VST3 editors, and forgets any GUI or parameter window that has
@@ -553,6 +665,7 @@ fn main() -> anyhow::Result<()> {
     state.set_max_midi_effects(MAX_MIDI_EFFECTS as i32);
     state.set_max_effects(MAX_EFFECTS as i32);
     state.set_picker_rows(ModelRc::from(picker.rows.clone()));
+    state.set_preset_rows(ModelRc::from(rack.preset_rows.clone()));
     refresh_plugin_folders(&app, &config.borrow());
     refresh_plugin_list(&app, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
@@ -656,14 +769,8 @@ fn main() -> anyhow::Result<()> {
         let picker = picker.clone();
         logic.on_toggle_pin(move |plugin_id| {
             let mut config = config.borrow_mut();
-            let pinned = &mut config.pinned_plugins;
-            match pinned.iter().position(|id| id == plugin_id.as_str()) {
-                Some(index) => {
-                    pinned.remove(index);
-                }
-                None => pinned.push(plugin_id.to_string()),
-            }
-            picker.refilter(pinned);
+            toggle_pinned(&mut config.pinned_plugins, &plugin_id);
+            picker.refilter(&config.pinned_plugins);
             log_on_err(config::save(&config));
         });
     }
@@ -865,22 +972,76 @@ fn main() -> anyhow::Result<()> {
             }
             engine.borrow_mut().set_param(key, param_id, value);
             rack.show_param_value(&engine.borrow(), key, param_id, value);
+            rack.mark_changed(&engine.borrow(), key);
         });
     }
 
     {
+        let app_weak = app.as_weak();
+        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_load_preset(move |key, index| {
-            let key = key as PluginKey;
-            let Some(preset) = rack.preset_at(key, index) else {
+        logic.on_open_preset_browser(move |key| {
+            let Some(app) = app_weak.upgrade() else {
                 return;
             };
+            let pinned = &config.borrow().pinned_presets;
+            rack.open_browser(&app, &engine.borrow(), key as PluginKey, pinned);
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        let rack = rack.clone();
+        logic.on_close_preset_browser(move || {
+            if let Some(app) = app_weak.upgrade() {
+                rack.close_browser(&app);
+            }
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        let config = config.clone();
+        let rack = rack.clone();
+        logic.on_filter_presets(move |query| {
+            if let Some(app) = app_weak.upgrade() {
+                rack.filter_browser(&app, &query, &config.borrow().pinned_presets);
+            }
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        let config = config.clone();
+        let rack = rack.clone();
+        logic.on_toggle_preset_pin(move |index| {
+            let (Some(app), Some((_, preset))) = (app_weak.upgrade(), rack.browser_preset(index))
+            else {
+                return;
+            };
+            let mut config = config.borrow_mut();
+            toggle_pinned(&mut config.pinned_presets, &preset.id);
+            rack.show_browser(&app, &config.pinned_presets);
+            log_on_err(config::save(&config));
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_load_preset(move |index| {
+            let (Some(app), Some((key, preset))) = (app_weak.upgrade(), rack.browser_preset(index))
+            else {
+                return;
+            };
+            rack.close_browser(&app);
             let result = engine.borrow_mut().load_preset(key, &preset.id);
             let engine = engine.borrow();
-            let status = match result {
+            let error = match result {
                 Ok(()) => {
-                    rack.set_current_preset(key, Some(preset.id));
+                    rack.set_current_preset(key, Some(preset));
                     rack.refresh_param_rows(&engine, key);
                     None
                 }
@@ -889,53 +1050,79 @@ fn main() -> anyhow::Result<()> {
                     Some(format!("Loading \"{}\" failed: {err}", preset.name))
                 }
             };
-            rack.refresh_presets(&engine, key, status);
+            if let Some(slot) = slot_of(&engine, key) {
+                rack.refresh_slot(&engine, slot, error);
+            }
         });
     }
 
     {
+        let app_weak = app.as_weak();
+        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_save_preset(move |key, name| {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
             let key = key as PluginKey;
             let name = name.trim();
             if name.is_empty() {
                 return;
             }
             let result = engine.borrow_mut().save_preset(key, name);
-            let status = match result {
+            let engine = engine.borrow();
+            let error = match result {
                 Ok(preset) => {
-                    rack.set_current_preset(key, Some(preset.id));
-                    format!("Saved \"{name}\".")
+                    rack.set_current_preset(key, Some(preset));
+                    None
                 }
                 Err(err) => {
                     log::error!("failed to save preset '{name}': {err:#}");
-                    format!("Saving failed: {err}")
+                    Some(format!("Saving preset \"{name}\" failed: {err}"))
                 }
             };
-            rack.refresh_presets(&engine.borrow(), key, Some(status));
+            rack.reread_browser(&app, &engine, &config.borrow().pinned_presets);
+            if let Some(slot) = slot_of(&engine, key) {
+                rack.refresh_slot(&engine, slot, error);
+            }
         });
     }
 
     {
+        let app_weak = app.as_weak();
+        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_delete_preset(move |key, index| {
-            let key = key as PluginKey;
-            let Some(preset) = rack.preset_at(key, index) else {
+        logic.on_delete_preset(move |key| {
+            let Some(app) = app_weak.upgrade() else {
                 return;
             };
-            let status = match engine.borrow_mut().delete_preset(key, &preset.id) {
+            let key = key as PluginKey;
+            let Some(preset) = rack.current_preset(key) else {
+                return;
+            };
+            let result = engine.borrow_mut().delete_preset(key, &preset.id);
+            let engine = engine.borrow();
+            let error = match result {
                 Ok(()) => {
                     rack.set_current_preset(key, None);
-                    format!("Deleted \"{}\".", preset.name)
+                    let mut config = config.borrow_mut();
+                    if config.pinned_presets.contains(&preset.id) {
+                        config.pinned_presets.retain(|id| *id != preset.id);
+                        log_on_err(config::save(&config));
+                    }
+                    None
                 }
                 Err(err) => {
                     log::error!("failed to delete preset '{}': {err:#}", preset.name);
-                    format!("Deleting failed: {err}")
+                    Some(format!("Deleting \"{}\" failed: {err}", preset.name))
                 }
             };
-            rack.refresh_presets(&engine.borrow(), key, Some(status));
+            rack.reread_browser(&app, &engine, &config.borrow().pinned_presets);
+            if let Some(slot) = slot_of(&engine, key) {
+                rack.refresh_slot(&engine, slot, error);
+            }
         });
     }
 
@@ -987,8 +1174,14 @@ fn main() -> anyhow::Result<()> {
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             rack.poll_uis(&engine.borrow());
             while let Ok((key, param_id, value)) = param_rx.try_recv() {
+                // Plugin GUIs also echo values back (e.g. every value when
+                // opening); only an actual change counts as an edit.
+                if engine.borrow().param_value(key, param_id) == Some(value) {
+                    continue;
+                }
                 engine.borrow_mut().send_param_change(key, param_id, value);
                 rack.show_param_value(&engine.borrow(), key, param_id, value);
+                rack.mark_changed(&engine.borrow(), key);
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {
