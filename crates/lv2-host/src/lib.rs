@@ -205,6 +205,38 @@ impl Lv2Host {
         }
     }
 
+    /// Saves `instance`'s current settings as a state bundle at `bundle` that
+    /// isn't one of the plugin's presets (e.g. part of a bigger preset of this
+    /// app's); returns the state file to pass to [`Lv2Host::restore_file`].
+    ///
+    /// # Safety
+    /// As for [`Lv2Host::restore_preset`].
+    pub unsafe fn save_file(
+        &self,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        bundle: &std::path::Path,
+        value: &dyn Fn(u32) -> f32,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        let features = StateFeatures::new(&self.features);
+        unsafe { self.preset_world().save_file(&features, instance, plugin_uri, bundle, value) }
+    }
+
+    /// Like [`Lv2Host::restore_preset`], from a state file written by
+    /// [`Lv2Host::save_file`].
+    ///
+    /// # Safety
+    /// As for [`Lv2Host::restore_preset`].
+    pub unsafe fn restore_file(
+        &self,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<(u32, f32)>> {
+        let features = StateFeatures::new(&self.features);
+        unsafe { self.preset_world().restore_file(&features, instance, plugin_uri, path) }
+    }
+
     /// Deletes a user preset (see [`PresetInfo::user`]).
     pub fn delete_preset(&self, preset_uri: &str) -> anyhow::Result<()> {
         let features = StateFeatures::new(&self.features);

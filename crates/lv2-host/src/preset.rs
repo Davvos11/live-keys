@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use anyhow::{Context, Result};
@@ -240,8 +240,38 @@ impl PresetWorld {
         plugin_uri: &str,
         preset_uri: &str,
     ) -> Result<Vec<(u32, f32)>> {
-        let plugin = self.plugin(plugin_uri)?;
         let state = self.state(features, preset_uri)?;
+        unsafe { self.restore_state(features, instance, plugin_uri, &state) }
+    }
+
+    /// Like [`PresetWorld::restore`], from a state file written by
+    /// [`PresetWorld::save_file`] (which the world doesn't know about).
+    ///
+    /// # Safety
+    /// As for [`PresetWorld::restore`].
+    pub unsafe fn restore_file(
+        &self,
+        features: &StateFeatures,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        path: &Path,
+    ) -> Result<Vec<(u32, f32)>> {
+        let path_c = CString::new(path.display().to_string())?;
+        let state = unsafe {
+            lib::lilv_state_new_from_file(self.world, features.map, ptr::null(), path_c.as_ptr())
+        };
+        anyhow::ensure!(!state.is_null(), "couldn't read plugin state {}", path.display());
+        unsafe { self.restore_state(features, instance, plugin_uri, &State(state)) }
+    }
+
+    unsafe fn restore_state(
+        &self,
+        features: &StateFeatures,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        state: &State,
+    ) -> Result<Vec<(u32, f32)>> {
+        let plugin = self.plugin(plugin_uri)?;
         let mut collect = PortValues {
             ports: self.control_inputs(plugin),
             types: [ATOM_FLOAT, ATOM_DOUBLE, ATOM_INT, ATOM_LONG, ATOM_BOOL].map(|uri| features.urid(uri)),
@@ -278,10 +308,59 @@ impl PresetWorld {
         name: &str,
         value: &dyn Fn(u32) -> f32,
     ) -> Result<PresetInfo> {
-        let plugin = self.plugin(plugin_uri)?;
         let root = user_preset_root().context("no home folder to save presets in")?;
         let bundle = root.join(format!("{}_{}.lv2", file_name(plugin_name), file_name(name)));
         let file = format!("{}.ttl", file_name(name));
+        unsafe { self.save_state(features, instance, plugin_uri, &bundle, &file, name, value) }?;
+
+        // Make the new (or rewritten) bundle part of the world.
+        let dir = CString::new(format!("{}/", bundle.display()))?;
+        unsafe {
+            let bundle_uri = Node(lib::lilv_new_file_uri(self.world, ptr::null(), dir.as_ptr()));
+            lib::lilv_world_unload_bundle(self.world, bundle_uri.0);
+            lib::lilv_world_load_bundle(self.world, bundle_uri.0);
+        }
+        let path = CString::new(bundle.join(&file).display().to_string())?;
+        let uri = unsafe { Node(lib::lilv_new_file_uri(self.world, ptr::null(), path.as_ptr())) };
+        Ok(PresetInfo {
+            id: unsafe { node_string(uri.0) },
+            name: name.to_string(),
+            user: true,
+        })
+    }
+
+    /// Saves the plugin's current settings as a state bundle at `bundle` (created
+    /// if missing, its state file `state.ttl`) that isn't a preset: the world
+    /// doesn't load it, so it doesn't show up among the plugin's presets. Returns
+    /// the state file's path, for [`PresetWorld::restore_file`].
+    ///
+    /// # Safety
+    /// As for [`PresetWorld::restore`].
+    pub unsafe fn save_file(
+        &self,
+        features: &StateFeatures,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        bundle: &Path,
+        value: &dyn Fn(u32) -> f32,
+    ) -> Result<PathBuf> {
+        let file = "state.ttl";
+        unsafe { self.save_state(features, instance, plugin_uri, bundle, file, "", value) }?;
+        Ok(bundle.join(file))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn save_state(
+        &self,
+        features: &StateFeatures,
+        instance: InstanceRef,
+        plugin_uri: &str,
+        bundle: &Path,
+        file: &str,
+        label: &str,
+        value: &dyn Fn(u32) -> f32,
+    ) -> Result<()> {
+        let plugin = self.plugin(plugin_uri)?;
         let ports: HashMap<CString, f32> = self
             .control_inputs(plugin)
             .into_iter()
@@ -294,8 +373,8 @@ impl PresetWorld {
 
         // lilv wants directories with a trailing slash.
         let dir = CString::new(format!("{}/", bundle.display()))?;
-        let file_c = CString::new(file.as_str())?;
-        let label = CString::new(name)?;
+        let file_c = CString::new(file)?;
+        let label = CString::new(label)?;
         let mut lilv_instance = instance.lilv_instance();
         unsafe {
             let state = lib::lilv_state_new_from_instance(
@@ -313,7 +392,9 @@ impl PresetWorld {
             );
             anyhow::ensure!(!state.is_null(), "the plugin's state couldn't be captured");
             let state = State(state);
-            lib::lilv_state_set_label(state.0, label.as_ptr());
+            if !label.is_empty() {
+                lib::lilv_state_set_label(state.0, label.as_ptr());
+            }
             let result = lib::lilv_state_save(
                 self.world,
                 features.map,
@@ -323,20 +404,9 @@ impl PresetWorld {
                 dir.as_ptr(),
                 file_c.as_ptr(),
             );
-            anyhow::ensure!(result == 0, "saving the preset to {} failed", bundle.display());
-
-            // Make the new (or rewritten) bundle part of the world.
-            let bundle_uri = Node(lib::lilv_new_file_uri(self.world, ptr::null(), dir.as_ptr()));
-            lib::lilv_world_unload_bundle(self.world, bundle_uri.0);
-            lib::lilv_world_load_bundle(self.world, bundle_uri.0);
+            anyhow::ensure!(result == 0, "saving plugin state to {} failed", bundle.display());
         }
-        let path = CString::new(bundle.join(&file).display().to_string())?;
-        let uri = unsafe { Node(lib::lilv_new_file_uri(self.world, ptr::null(), path.as_ptr())) };
-        Ok(PresetInfo {
-            id: unsafe { node_string(uri.0) },
-            name: name.to_string(),
-            user: true,
-        })
+        Ok(())
     }
 
     /// Deletes user preset `preset_uri`: its files, and its bundle if that's left

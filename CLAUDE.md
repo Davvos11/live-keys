@@ -54,11 +54,12 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
 # reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and a MIDI
-# channel/note-range/velocity-range filter and a volume fader)
+# channel/note-range/velocity-range filter, a volume fader, and slot presets: the whole chain
+# with every plugin's settings, browsed by instrument)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
 # folders, pinned plugin ids, favourite preset ids, and per slot: last instrument id + MIDI/audio effect ids, MIDI
-# filter, volume), loaded on startup. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
+# filter, volume), loaded on startup. Slot presets live in ~/.local/share/live-keys/slot-presets/. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
@@ -187,7 +188,9 @@ behind format-agnostic cores:
   `pset:Preset`s related to the plugin (user = under `~/.lv2`); `restore_preset` returns the
   preset's port values for the caller to apply (lilv only restores the plugin's own state);
   `save_preset` writes `~/.lv2/<Plugin>_<Preset>.lv2/` (Ardour's layout) and reloads that
-  bundle; `delete_preset` only touches user presets. **Threading:** LV2 state save/restore must
+  bundle; `delete_preset` only touches user presets. `save_file`/`restore_file` do the same
+  with a state bundle anywhere (`state.ttl`) that the world never loads, so it isn't listed as
+  a preset — for slot presets. **Threading:** LV2 state save/restore must
   not overlap `run`, so both are `unsafe fn`s whose caller guarantees that for a plugin with
   state (`InstanceRef::has_state`, asked of the plugin's `extension_data`, since metadata
   doesn't always declare it); for a plugin without state they only read/report port values.
@@ -254,6 +257,8 @@ behind format-agnostic cores:
     `PFactoryInfo`). `Vst3Controller::state`/`set_state` get/set the component's and the
     controller's state (`setState`, then `setComponentState`, then the controller's own) —
     allowed from the main thread while processing, so no lending needed. Round-trip unit-tested.
+    `Vst3Host::save_file` writes a `.vstpreset` anywhere (for slot presets; `load_preset`
+    reads it back).
   `Vst3Host` (`lib.rs`) owns one scan's results, instantiates by `PluginInfo::id`, and wraps
   presets (`presets`/`load_preset`/`save_preset`/`delete_preset`).
 
@@ -361,7 +366,10 @@ behind format-agnostic cores:
   lent, port values set on the lent plugin; LV2 without: port values queued as param changes,
   no gap; VST3: `set_state` on the controller, then every parameter read back with
   `getParamNormalized`), `save_preset(key, name)` (LV2 with state lent; port values from the
-  record), `delete_preset(key, id)`. Two ways to change a parameter: `send_param_change(key, id, value)`
+  record), `delete_preset(key, id)`; `save_state_file(key, dir, stem)`/`load_state_file(key,
+  path)` are the same for a state file outside the plugin's presets (`<stem>.lv2/` or
+  `<stem>.vstpreset`), which slot presets are made of. Both loads go through one `restore`
+  (`StateSource`), both LV2 saves through `save_lv2` (lending, port values). Two ways to change a parameter: `send_param_change(key, id, value)`
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
   open editor follows. (An open LV2 GUI isn't told about host-side port changes at all — see
@@ -445,7 +453,23 @@ behind format-agnostic cores:
   one browser is open at a time: it lives in `AppState` (`preset-browser-key`,
   `preset-rows`, `preset-count`, `preset-query`) and in Rust as `Rack::browser`
   (`PresetBrowser`: the plugin's presets, read when it opens, the query and the shown ones),
-  filtered in Rust like the plugin picker. Preset errors go to the slot's status line. `AppLogic` actions take the slot index for structural changes
+  filtered in Rust like the plugin picker. Preset errors go to the slot's status line.
+  **Slot presets** (`src/slot_presets.rs`, `ui/slot_presets.slint`, at the bottom of each
+  slot, filling the rest of it): a slot's whole chain under a name — a folder
+  `<data dir>/live-keys/slot-presets/<instrument name>/<name>/` with `slot.json` (each
+  plugin's id, name, state file, and its plugin preset + changed flag, so its preset bar shows
+  them again) and one state file per plugin from `Engine::save_state_file` (saved into a
+  temporary folder and swapped in, so a failed save keeps the old one; the same name for the
+  same instrument overwrites). The browser groups them by instrument id (`SlotFolder`: all
+  folders, or one — `Of(None)` for slots without an instrument); a newly loaded instrument
+  opens its folder, an empty slot shows all folders (`Rack::last_instruments` notices the
+  change in `refresh_slot`). Clicking a preset loads it at once (`load_slot_preset`): the
+  instrument is kept if it's already the same plugin, a section's effects are kept if their
+  ids match in order, otherwise replaced; then every plugin's state is restored; plugins that
+  fail to load are skipped and reported in the slot's status line. A grey "changed" shows
+  once the chain changes, any of its plugins' parameters moves, or a plugin preset is loaded
+  (`Rack::mark_slot_changed`). Slot presets don't include the MIDI filter or volume (those are
+  about the keyboard split and the mix, which scenes will cover). `AppLogic` actions take the slot index for structural changes
   (`pick-plugin`, `remove-effect(slot, section, index)`, `move-effect(slot, section, from,
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
   (`open-plugin-gui`, `toggle-params`, `set-param`, `save-preset`, `delete-preset`); the
@@ -522,6 +546,13 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 - Restarting the stream (device change while running) re-instantiates every loaded plugin at
   default parameter values — plugin state isn't carried over (presets could do this now, but
   don't yet).
+- After a VST3 state load (preset or slot preset), the parameter values read back from the
+  controller can be stale: Surge XT applies a loaded state on its audio thread, and its JUCE
+  controller only catches up asynchronously, which doesn't happen without its editor open
+  (confirmed: the component's state after loading equals the saved one byte for byte, while
+  `getParamNormalized` keeps the old value). The sound is right; the parameter window and the
+  recorded values may not be. Surge also calls `restartComponent(kParamValuesChanged)`, which
+  is ignored. Restarting the stream doesn't carry slot presets' state over either.
 - An open LV2 plugin GUI never gets `port_event`, so it doesn't follow host-side port changes
   (the parameter window, a loaded preset's port values); GUIs that read the plugin's own state
   (e.g. Surge XT, via instance access) do follow a preset's state. VST3 editors follow both.

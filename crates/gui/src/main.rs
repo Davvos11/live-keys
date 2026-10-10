@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod config;
+mod slot_presets;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -209,6 +210,29 @@ struct PresetBrowser {
     shown: Vec<PresetInfo>,
 }
 
+/// The slot preset a slot last loaded or saved, and whether its chain or a
+/// parameter changed since.
+struct CurrentSlotPreset {
+    dir: std::path::PathBuf,
+    name: String,
+    changed: bool,
+}
+
+/// What a slot's slot-preset browser shows: every instrument's folder, or one
+/// folder — the presets of slots with that instrument (`None`: without one).
+#[derive(Clone, PartialEq)]
+enum SlotFolder {
+    All,
+    Of(Option<String>),
+}
+
+/// A row of a slot-preset browser and what choosing it does.
+enum SlotEntry {
+    Folder { instrument: Option<String>, label: String, count: usize },
+    /// An index into `Rack::slot_store`.
+    Preset(usize),
+}
+
 /// Makes `model` hold `rows`, changing only the rows that differ, so Slint keeps
 /// the other rows' elements (and their local state, like a half-typed preset
 /// name) instead of rebuilding them all.
@@ -271,6 +295,15 @@ struct Rack {
     browser: RefCell<Option<PresetBrowser>>,
     /// Backs `AppState.preset-rows`.
     preset_rows: Rc<VecModel<PresetRow>>,
+    /// Per slot, like the effect models: its slot-preset browser's rows.
+    slot_preset_rows: Vec<Rc<VecModel<SlotPresetRow>>>,
+    /// Every slot preset on disk.
+    slot_store: RefCell<Vec<slot_presets::Stored>>,
+    current_slot_presets: RefCell<Vec<Option<CurrentSlotPreset>>>,
+    slot_folders: RefCell<Vec<SlotFolder>>,
+    /// Each slot's instrument id when last refreshed, to notice it changing (and
+    /// open the new instrument's folder).
+    last_instruments: RefCell<Vec<Option<String>>>,
 }
 
 impl Rack {
@@ -279,10 +312,12 @@ impl Rack {
             (0..SLOT_COUNT).map(|_| Rc::new(VecModel::default())).collect()
         }
         let (midi_effects, audio_effects) = (models(), models());
+        let slot_preset_rows = models();
         let slots = (0..SLOT_COUNT)
             .map(|slot| SlotState {
                 midi_effects: ModelRc::from(midi_effects[slot].clone()),
                 audio_effects: ModelRc::from(audio_effects[slot].clone()),
+                slot_preset_rows: ModelRc::from(slot_preset_rows[slot].clone()),
                 instrument: EffectRow {
                     key: -1,
                     ..Default::default()
@@ -299,6 +334,11 @@ impl Rack {
             current_presets: RefCell::new(HashMap::new()),
             browser: RefCell::new(None),
             preset_rows: Rc::new(VecModel::default()),
+            slot_preset_rows,
+            slot_store: RefCell::new(slot_presets::list()),
+            current_slot_presets: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
+            slot_folders: RefCell::new(vec![SlotFolder::All; SLOT_COUNT]),
+            last_instruments: RefCell::new(vec![None; SLOT_COUNT]),
         }
     }
 
@@ -323,7 +363,125 @@ impl Rack {
             |meta| self.plugin_row(meta),
         );
         row.status = error.unwrap_or_default().into();
+
+        // A newly loaded instrument opens its folder of slot presets; without
+        // one, all folders show.
+        let instrument_id = chain.instrument.as_ref().map(|meta| meta.id.clone());
+        if self.last_instruments.borrow()[slot] != instrument_id {
+            self.slot_folders.borrow_mut()[slot] = match &instrument_id {
+                Some(id) => SlotFolder::Of(Some(id.clone())),
+                None => SlotFolder::All,
+            };
+            self.last_instruments.borrow_mut()[slot] = instrument_id;
+        }
+        {
+            let current = self.current_slot_presets.borrow();
+            let current = current[slot].as_ref();
+            row.slot_preset_name = current.map(|c| c.name.as_str()).unwrap_or_default().into();
+            row.slot_preset_changed = current.is_some_and(|c| c.changed);
+            let store = self.slot_store.borrow();
+            row.slot_preset_folder = match &self.slot_folders.borrow()[slot] {
+                SlotFolder::All => "".into(),
+                SlotFolder::Of(None) => slot_presets::NO_INSTRUMENT.into(),
+                SlotFolder::Of(Some(id)) => store
+                    .iter()
+                    .find(|stored| stored.preset.instrument_id() == Some(id.as_str()))
+                    .map(|stored| stored.preset.instrument_name())
+                    .or(chain.instrument.as_ref().map(|meta| meta.name.as_str()))
+                    .unwrap_or(id.as_str())
+                    .into(),
+            };
+            let rows = self
+                .slot_entries(slot)
+                .into_iter()
+                .map(|entry| match entry {
+                    SlotEntry::Folder { label, count, .. } => SlotPresetRow {
+                        name: label.into(),
+                        folder: true,
+                        count: count as i32,
+                        current: false,
+                    },
+                    SlotEntry::Preset(index) => SlotPresetRow {
+                        name: store[index].preset.name.as_str().into(),
+                        folder: false,
+                        count: 0,
+                        current: current.is_some_and(|c| c.dir == store[index].dir),
+                    },
+                })
+                .collect();
+            sync_model(&self.slot_preset_rows[slot], rows);
+        }
         self.slots.set_row_data(slot, row);
+    }
+
+    /// What `slot`'s slot-preset browser lists, in order: the instrument folders
+    /// (by name), or the open folder's presets (by name).
+    fn slot_entries(&self, slot: usize) -> Vec<SlotEntry> {
+        let store = self.slot_store.borrow();
+        match &self.slot_folders.borrow()[slot] {
+            SlotFolder::All => {
+                let mut folders: Vec<SlotEntry> = Vec::new();
+                for stored in store.iter() {
+                    let instrument = stored.preset.instrument_id().map(str::to_string);
+                    let existing = folders.iter_mut().find(|entry| {
+                        matches!(entry, SlotEntry::Folder { instrument: other, .. } if *other == instrument)
+                    });
+                    match existing {
+                        Some(SlotEntry::Folder { count, .. }) => *count += 1,
+                        _ => folders.push(SlotEntry::Folder {
+                            instrument,
+                            label: stored.preset.instrument_name().to_string(),
+                            count: 1,
+                        }),
+                    }
+                }
+                folders.sort_by_key(|entry| match entry {
+                    SlotEntry::Folder { label, .. } => label.to_lowercase(),
+                    SlotEntry::Preset(_) => String::new(),
+                });
+                folders
+            }
+            SlotFolder::Of(instrument) => store
+                .iter()
+                .enumerate()
+                .filter(|(_, stored)| stored.preset.instrument_id() == instrument.as_deref())
+                .map(|(index, _)| SlotEntry::Preset(index))
+                .collect(),
+        }
+    }
+
+    fn show_slot_folder(&self, slot: usize, folder: SlotFolder) {
+        self.slot_folders.borrow_mut()[slot] = folder;
+    }
+
+    fn set_current_slot_preset(&self, slot: usize, current: Option<CurrentSlotPreset>) {
+        self.current_slot_presets.borrow_mut()[slot] = current;
+    }
+
+    /// Notes that `slot`'s chain changed, so its current slot preset (if any)
+    /// shows as changed. Returns whether that's news.
+    fn mark_slot_changed(&self, slot: usize) -> bool {
+        match self.current_slot_presets.borrow_mut()[slot].as_mut() {
+            Some(current) if !current.changed => {
+                current.changed = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Re-reads the slot presets on disk, after one was saved or deleted.
+    fn reload_slot_store(&self) {
+        *self.slot_store.borrow_mut() = slot_presets::list();
+    }
+
+    /// `key`'s current plugin preset and whether it changed since, for saving in
+    /// a slot preset.
+    fn plugin_preset_state(&self, key: PluginKey) -> (Option<PresetInfo>, bool) {
+        match self.current_presets.borrow().get(&key) {
+            Some(current) => (Some(current.preset.clone()), current.changed),
+            None => (None, false),
+        }
     }
 
     /// The chain row of a loaded plugin.
@@ -460,15 +618,22 @@ impl Rack {
             }
             _ => false,
         };
-        if newly_changed && let Some(slot) = slot_of(engine, key) {
+        let Some(slot) = slot_of(engine, key) else {
+            return;
+        };
+        if self.mark_slot_changed(slot) || newly_changed {
             self.refresh_slot(engine, slot, None);
         }
     }
 
     fn set_current_preset(&self, key: PluginKey, preset: Option<PresetInfo>) {
+        self.set_current_preset_changed(key, preset, false);
+    }
+
+    fn set_current_preset_changed(&self, key: PluginKey, preset: Option<PresetInfo>, changed: bool) {
         let mut current = self.current_presets.borrow_mut();
         match preset {
-            Some(preset) => current.insert(key, CurrentPreset { preset, changed: false }),
+            Some(preset) => current.insert(key, CurrentPreset { preset, changed }),
             None => current.remove(&key),
         };
     }
@@ -569,6 +734,10 @@ impl Rack {
         }
         self.current_presets.borrow_mut().clear();
         *self.browser.borrow_mut() = None;
+        // The plugins come back at their defaults, if at all.
+        for slot in 0..SLOT_COUNT {
+            self.mark_slot_changed(slot);
+        }
     }
 
     /// Pumps open VST3 editors, and forgets any GUI or parameter window that has
@@ -802,6 +971,7 @@ fn main() -> anyhow::Result<()> {
             let error = match result {
                 Ok(_) => {
                     record_chain(&config, &engine.borrow(), slot);
+                    rack.mark_slot_changed(slot);
                     None
                 }
                 Err(err) => {
@@ -829,6 +999,7 @@ fn main() -> anyhow::Result<()> {
             }
             engine.borrow_mut().unload_instrument(slot);
             record_chain(&config, &engine.borrow(), slot);
+            rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
@@ -849,6 +1020,7 @@ fn main() -> anyhow::Result<()> {
             }
             engine.borrow_mut().remove_effect(slot, section, index);
             record_chain(&config, &engine.borrow(), slot);
+            rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
@@ -863,6 +1035,7 @@ fn main() -> anyhow::Result<()> {
                 .borrow_mut()
                 .move_effect(slot, section_from(section), from as usize, to as usize);
             record_chain(&config, &engine.borrow(), slot);
+            rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
@@ -1043,6 +1216,9 @@ fn main() -> anyhow::Result<()> {
                 Ok(()) => {
                     rack.set_current_preset(key, Some(preset));
                     rack.refresh_param_rows(&engine, key);
+                    if let Some(slot) = slot_of(&engine, key) {
+                        rack.mark_slot_changed(slot);
+                    }
                     None
                 }
                 Err(err) => {
@@ -1128,6 +1304,110 @@ fn main() -> anyhow::Result<()> {
 
     {
         let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_choose_slot_preset(move |slot, index| {
+            let slot = slot as usize;
+            let entry = usize::try_from(index)
+                .ok()
+                .and_then(|index| rack.slot_entries(slot).into_iter().nth(index));
+            let error = match entry {
+                Some(SlotEntry::Folder { instrument, .. }) => {
+                    rack.show_slot_folder(slot, SlotFolder::Of(instrument));
+                    None
+                }
+                Some(SlotEntry::Preset(index)) => {
+                    let stored = rack.slot_store.borrow()[index].clone();
+                    let errors = load_slot_preset(&engine, &config, &rack, slot, &stored);
+                    (!errors.is_empty()).then(|| errors.join("\n"))
+                }
+                None => None,
+            };
+            rack.refresh_slot(&engine.borrow(), slot, error);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_show_slot_preset_folders(move |slot| {
+            rack.show_slot_folder(slot as usize, SlotFolder::All);
+            rack.refresh_slot(&engine.borrow(), slot as usize, None);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_save_slot_preset(move |slot, name| {
+            let slot = slot as usize;
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
+            let result = slot_presets::save(&mut engine.borrow_mut(), slot, name, |key| {
+                rack.plugin_preset_state(key)
+            });
+            let error = match result {
+                Ok(stored) => {
+                    rack.set_current_slot_preset(
+                        slot,
+                        Some(CurrentSlotPreset {
+                            dir: stored.dir,
+                            name: stored.preset.name,
+                            changed: false,
+                        }),
+                    );
+                    None
+                }
+                Err(err) => {
+                    log::error!("failed to save slot preset '{name}': {err:#}");
+                    Some(format!("Saving slot preset \"{name}\" failed: {err:#}"))
+                }
+            };
+            rack.reload_slot_store();
+            // Other slots may list the same folder.
+            rack.refresh_all(&engine.borrow());
+            rack.refresh_slot(&engine.borrow(), slot, error);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_delete_slot_preset(move |slot| {
+            let slot = slot as usize;
+            let Some((dir, name)) = rack.current_slot_presets.borrow()[slot]
+                .as_ref()
+                .map(|current| (current.dir.clone(), current.name.clone()))
+            else {
+                return;
+            };
+            let error = match slot_presets::delete(&dir) {
+                Ok(()) => {
+                    for other in 0..SLOT_COUNT {
+                        let deleted = rack.current_slot_presets.borrow()[other]
+                            .as_ref()
+                            .is_some_and(|current| current.dir == dir);
+                        if deleted {
+                            rack.set_current_slot_preset(other, None);
+                        }
+                    }
+                    None
+                }
+                Err(err) => {
+                    log::error!("failed to delete slot preset '{name}': {err:#}");
+                    Some(format!("Deleting slot preset \"{name}\" failed: {err:#}"))
+                }
+            };
+            rack.reload_slot_store();
+            rack.refresh_all(&engine.borrow());
+            rack.refresh_slot(&engine.borrow(), slot, error);
+        });
+    }
+
+    {
+        let config = config.clone();
         let config_dirty = config_dirty.clone();
         let engine = engine.clone();
         let rack = rack.clone();
@@ -1196,6 +1476,114 @@ fn main() -> anyhow::Result<()> {
 
 /// Runs `action` on the engine, first starting the audio/MIDI stream on the
 /// configured devices if this is the first plugin loaded.
+/// Recalls slot preset `stored` into `slot`: makes the chain match (keeping
+/// plugins that are already in place, so switching between presets of the same
+/// instrument doesn't reload it), then restores each plugin's settings. Returns
+/// what went wrong (e.g. a plugin that's no longer installed); the rest is
+/// recalled anyway.
+fn load_slot_preset(
+    engine: &RefCell<Engine>,
+    config: &RefCell<config::AppConfig>,
+    rack: &Rack,
+    slot: usize,
+    stored: &slot_presets::Stored,
+) -> Vec<String> {
+    let preset = &stored.preset;
+    let mut errors = Vec::new();
+
+    let current_instrument = engine
+        .borrow()
+        .slot(slot)
+        .and_then(|chain| chain.instrument.as_ref().map(|meta| (meta.key, meta.id.clone())));
+    let wanted = preset.instrument.as_ref();
+    if current_instrument.as_ref().map(|(_, id)| id.as_str()) != wanted.map(|plugin| plugin.id.as_str()) {
+        if let Some((key, _)) = current_instrument {
+            rack.forget(key);
+        }
+        match wanted {
+            Some(plugin) => {
+                let result = with_running_engine(engine, &config.borrow(), |engine| {
+                    engine.load_instrument(slot, &plugin.id)
+                });
+                if let Err(err) = result {
+                    log::error!("slot preset '{}': loading {} failed: {err:#}", preset.name, plugin.name);
+                    errors.push(format!("{} couldn't be loaded: {err}", plugin.name));
+                }
+            }
+            None => engine.borrow_mut().unload_instrument(slot),
+        }
+    }
+
+    for section in [Section::Midi, Section::Audio] {
+        let wanted = preset.effects(section);
+        let current: Vec<(PluginKey, String)> = engine
+            .borrow()
+            .slot(slot)
+            .map(|chain| chain.effects(section).iter().map(|meta| (meta.key, meta.id.clone())).collect())
+            .unwrap_or_default();
+        if current.iter().map(|(_, id)| id).eq(wanted.iter().map(|plugin| &plugin.id)) {
+            continue;
+        }
+        for (key, _) in &current {
+            rack.forget(*key);
+            engine.borrow_mut().remove_effect(slot, section, 0);
+        }
+        for plugin in wanted {
+            let result = with_running_engine(engine, &config.borrow(), |engine| {
+                engine.add_effect(slot, section, &plugin.id)
+            });
+            if let Err(err) = result {
+                log::error!("slot preset '{}': loading {} failed: {err:#}", preset.name, plugin.name);
+                errors.push(format!("{} couldn't be loaded: {err}", plugin.name));
+            }
+        }
+    }
+
+    // Pair the chain's plugins with the preset's in order, skipping any the
+    // preset has that failed to load.
+    let mut pairs: Vec<(PluginKey, &slot_presets::PluginState)> = Vec::new();
+    if let Some(chain) = engine.borrow().slot(slot) {
+        if let (Some(meta), Some(plugin)) = (&chain.instrument, &preset.instrument)
+            && meta.id == plugin.id
+        {
+            pairs.push((meta.key, plugin));
+        }
+        for section in [Section::Midi, Section::Audio] {
+            let mut loaded = chain.effects(section).iter().peekable();
+            for plugin in preset.effects(section) {
+                if let Some(meta) = loaded.next_if(|meta| meta.id == plugin.id) {
+                    pairs.push((meta.key, plugin));
+                }
+            }
+        }
+    }
+    for (key, plugin) in pairs {
+        let result = engine.borrow_mut().load_state_file(key, &stored.dir.join(&plugin.state));
+        match result {
+            Ok(()) => {
+                let current = plugin.preset.as_ref().map(PresetInfo::from);
+                rack.set_current_preset_changed(key, current, plugin.preset_changed);
+                rack.refresh_param_rows(&engine.borrow(), key);
+            }
+            Err(err) => {
+                log::error!("slot preset '{}': restoring {} failed: {err:#}", preset.name, plugin.name);
+                errors.push(format!("{}'s settings couldn't be restored: {err}", plugin.name));
+            }
+        }
+    }
+
+    record_chain(config, &engine.borrow(), slot);
+    rack.set_current_slot_preset(
+        slot,
+        Some(CurrentSlotPreset {
+            dir: stored.dir.clone(),
+            name: preset.name.clone(),
+            changed: !errors.is_empty(),
+        }),
+    );
+    errors
+}
+
 fn with_running_engine<T>(
     engine: &RefCell<Engine>,
     config: &config::AppConfig,

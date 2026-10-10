@@ -2,6 +2,7 @@ import { Button, ComboBox, GroupBox, HorizontalBox, Palette, Slider, VerticalBox
 import { RangeSlider } from "range_slider.slint";
 import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
 import { PresetBar } from "preset_bar.slint";
+import { SlotPresets } from "slot_presets.slint";
 
 component SectionTitle inherits Text {
     font-weight: 600;
@@ -139,7 +140,7 @@ component SlotPanel inherits GroupBox {
     }
 
     // Top to bottom in signal order: which MIDI the slot takes, MIDI effects,
-    // instrument, audio effects, volume.
+    // instrument, audio effects, volume; then the slot's presets.
     VerticalBox {
         SectionTitle { text: "MIDI in"; }
 
@@ -265,8 +266,12 @@ component SlotPanel inherits GroupBox {
             wrap: word-wrap;
         }
 
-        // Keeps the content at the top of a tall panel.
-        Rectangle { vertical-stretch: 1; }
+        // Fills the rest of the panel.
+        SlotPresets {
+            vertical-stretch: 1;
+            slot-index: root.slot-index;
+            slot: root.slot;
+        }
     }
 }
 

@@ -1,0 +1,202 @@
+import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { AppLogic, SlotPresetRow, SlotState } from "globals.slint";
+
+component SlotPresetItem inherits Rectangle {
+    in property <SlotPresetRow> entry;
+    callback choose();
+
+    height: 28px;
+    border-radius: 4px;
+    background: root.entry.current ? Palette.selection-background
+        : area.has-hover ? Palette.alternate-background : transparent;
+
+    area := TouchArea {
+        clicked => { root.choose(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 12px;
+        spacing: 6px;
+        if root.entry.folder : Text {
+            text: "▸";
+            color: gray;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.entry.name;
+            color: root.entry.current ? Palette.selection-foreground : Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.entry.folder : Text {
+            text: root.entry.count;
+            font-size: 11px;
+            color: gray;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The bottom of a slot: its current slot preset (greyed "changed" once the
+// chain or a parameter changed since it was loaded or saved), saving and
+// deleting it, and a browser of slot presets grouped by instrument — the loaded
+// instrument's folder open, or every folder when there's no instrument. Clicking
+// a preset loads it straight away.
+export component SlotPresets inherits VerticalLayout {
+    in property <int> slot-index;
+    in property <SlotState> slot;
+
+    // 0: browsing, 1: naming a preset to save, 2: confirming a delete.
+    property <int> mode: 0;
+
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        Text {
+            text: "Slot preset";
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.mode == 0 : Button {
+            text: "Save…";
+            clicked => { root.mode = 1; }
+        }
+        if root.mode == 0 : Button {
+            text: "Delete";
+            enabled: root.slot.slot-preset-name != "";
+            clicked => { root.mode = 2; }
+        }
+    }
+
+    if root.mode == 0 && root.slot.slot-preset-name != "" : HorizontalLayout {
+        spacing: 6px;
+        Text {
+            text: root.slot.slot-preset-name;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.slot.slot-preset-changed : Text {
+            text: "changed";
+            color: gray;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.mode == 1 : HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        name := LineEdit {
+            horizontal-stretch: 1;
+            placeholder-text: "Slot preset name";
+            // Saving over the current preset is the common case.
+            text: root.slot.slot-preset-name;
+            init => { self.focus(); }
+            accepted => {
+                if (self.text != "") {
+                    AppLogic.save-slot-preset(root.slot-index, self.text);
+                    root.mode = 0;
+                }
+            }
+        }
+        Button {
+            text: "Save";
+            primary: true;
+            enabled: name.text != "";
+            clicked => {
+                AppLogic.save-slot-preset(root.slot-index, name.text);
+                root.mode = 0;
+            }
+        }
+        Button {
+            text: "Cancel";
+            clicked => { root.mode = 0; }
+        }
+    }
+
+    if root.mode == 2 : HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        Text {
+            text: "Delete \"\{root.slot.slot-preset-name}\"?";
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Delete";
+            primary: true;
+            clicked => {
+                AppLogic.delete-slot-preset(root.slot-index);
+                root.mode = 0;
+            }
+        }
+        Button {
+            text: "Cancel";
+            clicked => { root.mode = 0; }
+        }
+    }
+
+    Rectangle {
+        vertical-stretch: 1;
+        min-height: 120px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        VerticalLayout {
+            padding: 2px;
+            HorizontalLayout {
+                padding-left: 4px;
+                spacing: 4px;
+                height: 28px;
+                if root.slot.slot-preset-folder != "" : Rectangle {
+                    width: 24px;
+                    border-radius: 4px;
+                    background: back-area.has-hover ? Palette.alternate-background : transparent;
+                    Text {
+                        text: "‹";
+                        font-size: 18px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    back-area := TouchArea {
+                        clicked => { AppLogic.show-slot-preset-folders(root.slot-index); }
+                    }
+                }
+                Text {
+                    text: root.slot.slot-preset-folder != "" ? root.slot.slot-preset-folder : "All instruments";
+                    color: gray;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+            if root.slot.slot-preset-rows.length == 0 : VerticalLayout {
+                padding: 8px;
+                Text {
+                    text: root.slot.slot-preset-folder != "" ? "No slot presets for this instrument yet." : "No slot presets yet.";
+                    color: gray;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+            }
+            ListView {
+                vertical-stretch: 1;
+                for row[index] in root.slot.slot-preset-rows : SlotPresetItem {
+                    entry: row;
+                    choose => { AppLogic.choose-slot-preset(root.slot-index, index); }
+                }
+            }
+        }
+    }
+}

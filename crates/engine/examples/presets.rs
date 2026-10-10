@@ -1,7 +1,11 @@
 //! Manual smoke test for presets through the running engine: loads each plugin
 //! given (default: an LV2 one without state, an LV2 one with state, a VST3 one)
 //! into slot 0 of a live stream, applies its first preset, saves a user preset,
-//! reloads it and deletes it again.
+//! reloads it and deletes it again, then does the same with a state file in a
+//! temporary folder (as slot presets store plugins).
+//! For a VST3 plugin that applies a loaded state asynchronously (Surge XT), the
+//! "reloaded" values print stale even though the state was restored — see
+//! CLAUDE.md's "Known simplifications".
 //! `cargo run -p live-keys-engine --example presets --release -- [plugin id]...`
 
 use live_keys_engine::Engine;
@@ -46,6 +50,25 @@ fn main() -> anyhow::Result<()> {
             println!("  listed: {}", engine.presets(key).iter().any(|p| p.id == saved.id));
             engine.delete_preset(key, &saved.id)?;
             println!("  deleted, still listed: {}", engine.presets(key).iter().any(|p| p.id == saved.id));
+
+            // A state file outside the plugin's presets, as slot presets use.
+            let dir = std::env::temp_dir().join("live-keys-state-smoke");
+            std::fs::create_dir_all(&dir)?;
+            // Let the audio thread apply each change before the next step.
+            let settle = || std::thread::sleep(std::time::Duration::from_millis(50));
+            engine.set_param(key, param, 0.25);
+            settle();
+            let path = engine.save_state_file(key, &dir, "plugin")?;
+            engine.set_param(key, param, 0.75);
+            settle();
+            engine.load_state_file(key, &path)?;
+            println!(
+                "  state file {}: first param now {:?}, listed as preset: {}",
+                path.display(),
+                engine.param_value(key, param),
+                engine.presets(key).iter().any(|p| p.id.contains("live-keys-state-smoke"))
+            );
+            std::fs::remove_dir_all(&dir)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }

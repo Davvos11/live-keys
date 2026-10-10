@@ -68,6 +68,16 @@ export struct EffectRow {
     preset-changed: bool,
 }
 
+// One row of a slot's slot-preset browser: an instrument's folder, or a preset.
+export struct SlotPresetRow {
+    name: string,
+    folder: bool,
+    // A folder's number of presets.
+    count: int,
+    // The slot's current preset.
+    current: bool,
+}
+
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
 // effects.
 export struct SlotState {
@@ -87,6 +97,14 @@ export struct SlotState {
     velocity-low: int,
     velocity-high: int,
     volume-db: float,
+    // The slot preset last loaded or saved; empty if none.
+    slot-preset-name: string,
+    // Whether the chain or a parameter changed since.
+    slot-preset-changed: bool,
+    // The instrument folder the slot-preset browser shows; empty when it lists
+    // the folders.
+    slot-preset-folder: string,
+    slot-preset-rows: [SlotPresetRow],
 }
 
 // State the host (Rust) pushes into the UI.
@@ -165,6 +183,13 @@ export global AppLogic {
     callback save-preset(/* key */ int, /* name */ string);
     // Deletes the plugin's current preset.
     callback delete-preset(/* key */ int);
+    // Slot presets. Choosing a folder row opens it; choosing a preset loads it.
+    callback choose-slot-preset(/* slot */ int, /* index into slot-preset-rows */ int);
+    // Back from a folder to the list of folders.
+    callback show-slot-preset-folders(/* slot */ int);
+    callback save-slot-preset(/* slot */ int, /* name */ string);
+    // Deletes the slot's current slot preset.
+    callback delete-slot-preset(/* slot */ int);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);

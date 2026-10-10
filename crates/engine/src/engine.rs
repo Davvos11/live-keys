@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use live_keys_core::{
     Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
@@ -8,7 +8,7 @@ use live_keys_lv2_host::{InstanceRef, Lv2Host, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -150,6 +150,33 @@ struct RunningStream {
     /// Where a lent plugin goes back to that arrived too late (see
     /// [`Engine::with_lent`]); it's returned as soon as it shows up.
     overdue_lend: Option<(usize, ChainPosition)>,
+}
+
+/// Where [`Engine::restore`] reads a plugin's settings from.
+#[derive(Clone, Copy)]
+enum StateSource<'a> {
+    /// A [`PresetInfo::id`].
+    Preset(&'a str),
+    /// A file from [`Engine::save_state_file`].
+    File(&'a Path),
+}
+
+impl StateSource<'_> {
+    /// # Safety
+    /// As for [`Lv2Host::restore_preset`].
+    unsafe fn restore_lv2(
+        self,
+        lv2: &Lv2Host,
+        instance: InstanceRef,
+        plugin_uri: &str,
+    ) -> Result<Vec<(u32, f32)>> {
+        unsafe {
+            match self {
+                StateSource::Preset(uri) => lv2.restore_preset(instance, plugin_uri, uri),
+                StateSource::File(path) => lv2.restore_file(instance, plugin_uri, path),
+            }
+        }
+    }
 }
 
 /// Owns the plugin hosts, the running audio/MIDI stream (if any), and the chain of
@@ -467,6 +494,16 @@ impl Engine {
     /// [`Engine::param_value`] afterwards. An LV2 plugin with state of its own is
     /// briefly taken off the audio thread for this (see [`Engine::with_lent`]).
     pub fn load_preset(&mut self, key: PluginKey, preset_id: &str) -> Result<()> {
+        self.restore(key, StateSource::Preset(preset_id))
+    }
+
+    /// Like [`Engine::load_preset`], from a state file written by
+    /// [`Engine::save_state_file`].
+    pub fn load_state_file(&mut self, key: PluginKey, path: &Path) -> Result<()> {
+        self.restore(key, StateSource::File(path))
+    }
+
+    fn restore(&mut self, key: PluginKey, source: StateSource<'_>) -> Result<()> {
         let (slot, position) = self.locate(key).context("plugin isn't loaded")?;
         let meta = self.plugin(key).context("plugin isn't loaded")?;
         let plugin_id = meta.id.clone();
@@ -476,7 +513,7 @@ impl Engine {
                 if instance.has_state() {
                     let values = self.with_lent(slot, position, |lv2, plugin| {
                         // SAFETY: the plugin is lent, so it isn't running.
-                        let values = unsafe { lv2.restore_preset(instance, &plugin_id, preset_id) }?;
+                        let values = unsafe { source.restore_lv2(lv2, instance, &plugin_id) }?;
                         for &(index, value) in &values {
                             plugin.set_param(index, value);
                         }
@@ -486,14 +523,18 @@ impl Engine {
                     meta.values.extend(values);
                 } else {
                     // SAFETY: without state, restoring only reports port values.
-                    let values = unsafe { self.lv2.restore_preset(instance, &plugin_id, preset_id) }?;
+                    let values = unsafe { source.restore_lv2(&self.lv2, instance, &plugin_id) }?;
                     for (index, value) in values {
                         self.send_param_change(key, index, value);
                     }
                 }
             }
             PluginEditor::Vst3(controller) => {
-                self.vst3.load_preset(controller, &plugin_id, preset_id)?;
+                let path = match source {
+                    StateSource::Preset(path) => path.to_string(),
+                    StateSource::File(path) => path.display().to_string(),
+                };
+                self.vst3.load_preset(controller, &plugin_id, &path)?;
                 // The processor has the preset's values now; only our record of
                 // them needs updating, from the controller.
                 let values: Vec<(u32, f32)> = meta
@@ -511,32 +552,67 @@ impl Engine {
     /// Saves the current settings of the plugin with `key` as user preset `name`,
     /// replacing one of the same name.
     pub fn save_preset(&mut self, key: PluginKey, name: &str) -> Result<PresetInfo> {
-        let (slot, position) = self.locate(key).context("plugin isn't loaded")?;
         let meta = self.plugin(key).context("plugin isn't loaded")?;
         let (plugin_id, plugin_name) = (meta.id.clone(), meta.name.clone());
         match &meta.editor {
-            PluginEditor::Lv2 { plugin, instance, .. } => {
-                let instance = *instance;
-                // Every control port's value: as last sent, else its default.
-                let values: HashMap<u32, f32> = plugin
-                    .ports_with_type(livi::PortType::ControlInput)
-                    .map(|port| {
-                        let index = port.index.0 as u32;
-                        (index, meta.values.get(&index).copied().unwrap_or(port.default_value))
-                    })
-                    .collect();
-                let value = |index: u32| values.get(&index).copied().unwrap_or_default();
-                if instance.has_state() {
-                    self.with_lent(slot, position, |lv2, _| {
-                        // SAFETY: the plugin is lent, so it isn't running.
-                        unsafe { lv2.save_preset(instance, &plugin_id, &plugin_name, name, &value) }
-                    })?
-                } else {
-                    // SAFETY: without state, saving only reads port values.
-                    unsafe { self.lv2.save_preset(instance, &plugin_id, &plugin_name, name, &value) }
-                }
-            }
+            PluginEditor::Lv2 { .. } => self.save_lv2(key, |lv2, instance, value| {
+                // SAFETY: as `save_lv2` guarantees.
+                unsafe { lv2.save_preset(instance, &plugin_id, &plugin_name, name, value) }
+            }),
             PluginEditor::Vst3(controller) => self.vst3.save_preset(controller, &plugin_id, name),
+        }
+    }
+
+    /// Saves the current settings of the plugin with `key` into folder `dir`, as a
+    /// state file (or bundle) named after `stem` that isn't one of the plugin's
+    /// presets, for a bigger preset of the caller's. Returns the path to pass to
+    /// [`Engine::load_state_file`].
+    pub fn save_state_file(&mut self, key: PluginKey, dir: &Path, stem: &str) -> Result<PathBuf> {
+        let meta = self.plugin(key).context("plugin isn't loaded")?;
+        let plugin_id = meta.id.clone();
+        match &meta.editor {
+            PluginEditor::Lv2 { .. } => {
+                let bundle = dir.join(format!("{stem}.lv2"));
+                self.save_lv2(key, |lv2, instance, value| {
+                    // SAFETY: as `save_lv2` guarantees.
+                    unsafe { lv2.save_file(instance, &plugin_id, &bundle, value) }
+                })
+            }
+            PluginEditor::Vst3(controller) => {
+                let path = dir.join(format!("{stem}.vstpreset"));
+                self.vst3.save_file(controller, &plugin_id, &path)?;
+                Ok(path)
+            }
+        }
+    }
+
+    /// Runs `save` for the LV2 plugin with `key` with its instance and every
+    /// control port's value (as last sent, else its default) — lent off the audio
+    /// thread if it has state, so `save` may capture it.
+    fn save_lv2<T>(
+        &mut self,
+        key: PluginKey,
+        save: impl FnOnce(&Lv2Host, InstanceRef, &dyn Fn(u32) -> f32) -> Result<T>,
+    ) -> Result<T> {
+        let (slot, position) = self.locate(key).context("plugin isn't loaded")?;
+        let meta = self.plugin(key).context("plugin isn't loaded")?;
+        let PluginEditor::Lv2 { plugin, instance, .. } = &meta.editor else {
+            bail!("not an LV2 plugin");
+        };
+        let instance = *instance;
+        let values: HashMap<u32, f32> = plugin
+            .ports_with_type(livi::PortType::ControlInput)
+            .map(|port| {
+                let index = port.index.0 as u32;
+                (index, meta.values.get(&index).copied().unwrap_or(port.default_value))
+            })
+            .collect();
+        let value = |index: u32| values.get(&index).copied().unwrap_or_default();
+        if instance.has_state() {
+            self.with_lent(slot, position, |lv2, _| save(lv2, instance, &value))?
+        } else {
+            // Without state, saving only reads port values.
+            save(&self.lv2, instance, &value)
         }
     }
 

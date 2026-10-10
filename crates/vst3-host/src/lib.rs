@@ -138,6 +138,16 @@ impl Vst3Host {
         })
     }
 
+    /// Saves the running plugin `controller`'s (of plugin `id`) current state as a
+    /// `.vstpreset` file at `path`, which isn't one of its presets (e.g. part of
+    /// a bigger preset of this app's); [`Vst3Host::load_preset`] reads it back.
+    /// Main thread only.
+    pub fn save_file(&self, controller: &Vst3Controller, id: &str, path: &Path) -> Result<()> {
+        let class_id = id.strip_prefix(ID_PREFIX).context("not a VST3 plugin id")?;
+        let (component, controller_state) = controller.state()?;
+        preset::write(path, class_id, &component, &controller_state)
+    }
+
     /// Deletes a user preset file (see [`PresetInfo::user`]).
     pub fn delete_preset(&self, path: &str) -> Result<()> {
         preset::delete(Path::new(path))
