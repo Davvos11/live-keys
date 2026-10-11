@@ -22,8 +22,8 @@ fn open_and_wait_for_close(
         plugin: plugin.plugin(),
         features: plugin.features().clone(),
         instance_handle: plugin.raw_handle(),
-        port_write: Box::new(move |port_index, value| {
-            println!("[round {round}] port {port_index} -> {value}");
+        port_write: Box::new(move |message| {
+            println!("[round {round}] {message:?}");
         }),
     };
     let mut handle = live_keys_lv2_ui::launch_ui(request)?;

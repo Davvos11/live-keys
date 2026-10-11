@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 live-keys-core = { path = "../core" }
+rtrb = "0.3"
 livi = "0.7"
 lv2_raw = "0.2"
 lilv-sys = "0.2"

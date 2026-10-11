@@ -69,6 +69,14 @@ unsafe extern "C" {
 
     pub fn suil_instance_get_widget(instance: *mut SuilInstance) -> SuilWidget;
 
+    pub fn suil_instance_port_event(
+        instance: *mut SuilInstance,
+        port_index: u32,
+        buffer_size: u32,
+        format: u32,
+        buffer: *const c_void,
+    );
+
     pub fn suil_instance_extension_data(
         instance: *mut SuilInstance,
         uri: *const c_char,

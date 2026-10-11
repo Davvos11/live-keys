@@ -16,12 +16,34 @@ use x11rb::protocol::xproto::{
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::suil_sys::{self, SuilController};
-use crate::{LaunchUiRequest, PluginUiHandle};
+use crate::{EVENT_TRANSFER_URI, LaunchUiRequest, PluginUiHandle, PortMessage};
 
 const X11_UI_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#X11UI";
 const UI_PARENT_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#parent";
 const IDLE_INTERFACE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#idleInterface";
 const INSTANCE_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/instance-access";
+const RESIZE_URI: &CStr = c"http://lv2plug.in/ns/extensions/ui#resize";
+
+/// `LV2UI_Resize` (not in `lv2_raw`): offered by the host so the UI can ask for
+/// a size, and by a UI so the host can tell it its new size.
+#[repr(C)]
+struct Lv2UiResize {
+    handle: *mut c_void,
+    ui_resize: extern "C" fn(handle: *mut c_void, width: c_int, height: c_int) -> c_int,
+}
+
+/// Records a UI's size request (handle: a `Cell<Option<(u32, u32)>>`), applied
+/// by the hosting loop — this may be called while the UI is being created,
+/// before there's a widget to resize.
+extern "C" fn request_resize(handle: *mut c_void, width: c_int, height: c_int) -> c_int {
+    if width <= 0 || height <= 0 {
+        return 1;
+    }
+    // SAFETY: `handle` is the hosting thread's `Cell`, alive as long as the UI.
+    let requested = unsafe { &*(handle as *const std::cell::Cell<Option<(u32, u32)>>) };
+    requested.set(Some((width as u32, height as u32)));
+    0
+}
 /// Fills the slot `livi::Features::iter_features` needs for a "worker" feature,
 /// which UIs never need. A private URI guarantees nothing will ever match it.
 const UNUSED_FEATURE_URI: &CStr = c"urn:live-keys:unused-feature";
@@ -100,6 +122,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let port_write = request.port_write;
 
     let (close_tx, close_rx) = mpsc::channel::<()>();
+    let (notify_tx, notify_rx) = mpsc::channel::<PortMessage>();
     let closed = Arc::new(AtomicBool::new(false));
     let closed_for_thread = closed.clone();
 
@@ -120,6 +143,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
                 port_symbols,
                 &closed_for_thread,
                 &close_rx,
+                &notify_rx,
             ) {
                 log::error!("X11 UI hosting failed: {err:#}");
             }
@@ -127,7 +151,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
         })
         .context("failed to spawn X11 UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, closed))
+    Ok(PluginUiHandle::new(close_tx, notify_tx, closed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -140,10 +164,11 @@ fn run(
     binary_path: &str,
     features: &Arc<livi::Features>,
     instance_ptr: SendPtr,
-    port_write: Box<dyn Fn(u32, f32) + Send>,
+    port_write: Box<dyn Fn(PortMessage) + Send>,
     port_symbols: Vec<(String, u32)>,
     closed: &Arc<AtomicBool>,
     close_rx: &mpsc::Receiver<()>,
+    notify_rx: &mpsc::Receiver<PortMessage>,
 ) -> Result<()> {
     let (conn, screen_num) = x11rb::connect(None).context("failed to connect to X server")?;
     let screen = &conn.setup().roots[screen_num];
@@ -203,17 +228,29 @@ fn run(
         uri: UI_PARENT_URI.as_ptr(),
         data: window as usize as *mut c_void,
     };
+    let requested_size = std::cell::Cell::new(None::<(u32, u32)>);
+    let host_resize = Lv2UiResize {
+        handle: std::ptr::from_ref(&requested_size) as *mut c_void,
+        ui_resize: request_resize,
+    };
+    let resize_feature = LV2Feature {
+        uri: RESIZE_URI.as_ptr(),
+        data: std::ptr::from_ref(&host_resize) as *mut c_void,
+    };
     let mut feature_ptrs: Vec<*const LV2Feature> = features
         .iter_features(&unused_feature)
         .map(std::ptr::from_ref)
         .collect();
     feature_ptrs.push(std::ptr::from_ref(&instance_access_feature));
     feature_ptrs.push(std::ptr::from_ref(&parent_feature));
+    feature_ptrs.push(std::ptr::from_ref(&resize_feature));
     feature_ptrs.push(std::ptr::null());
 
+    let event_transfer = features.urid(EVENT_TRANSFER_URI);
     let callbacks = Box::into_raw(Box::new(UiCallbacks {
         port_write,
         port_symbols,
+        event_transfer,
     }));
 
     // SAFETY: FFI into suil, following its documented calling convention.
@@ -268,23 +305,14 @@ fn run(
     conn.map_window(widget_xid)?;
     conn.flush()?;
 
-    // The widget's own preferred size is usually not our window's initial 800x600,
-    // and without implementing the LV2 ui:resize protocol there's no other way to
-    // learn it — so just grow our window to fit once the widget reports its real
-    // geometry, rather than leaving the plugin's UI clipped.
-    if let Ok(cookie) = conn.get_geometry(widget_xid)
-        && let Ok(geometry) = cookie.reply()
-    {
-        log_if_err(
-            conn.configure_window(
-                window,
-                &x11rb::protocol::xproto::ConfigureWindowAux::new()
-                    .width(u32::from(geometry.width))
-                    .height(u32::from(geometry.height)),
-            ),
-            "configure_window to fit widget geometry",
-        );
-        log_if_err(conn.flush(), "flush after resize");
+    // Fit our window to the size the UI asked for (`ui:resize`), else to the
+    // widget's own geometry, rather than leaving it at the initial 800x600.
+    let initial_size = requested_size.take().or_else(|| {
+        let geometry = conn.get_geometry(widget_xid).ok()?.reply().ok()?;
+        Some((u32::from(geometry.width), u32::from(geometry.height)))
+    });
+    if let Some((width, height)) = initial_size {
+        resize(&conn, window, width, height);
     }
 
     // SAFETY: instance is non-null and stays alive until suil_instance_free below.
@@ -292,18 +320,63 @@ fn run(
         suil_sys::suil_instance_extension_data(instance, IDLE_INTERFACE_URI.as_ptr())
     } as *const LV2UIIdleInterface;
     let ui_handle = unsafe { suil_sys::suil_instance_get_handle(instance) };
+    // The UI's side of `ui:resize`, if it has one: how it learns its new size
+    // when the user resizes our window.
+    // SAFETY: as for `idle_interface`.
+    let ui_resize = unsafe { suil_sys::suil_instance_extension_data(instance, RESIZE_URI.as_ptr()) }
+        as *const Lv2UiResize;
+    let mut widget_size = initial_size;
 
     while !closed.load(Ordering::SeqCst) && close_rx.try_recv().is_err() {
         while let Some(event) = conn.poll_for_event()? {
-            if let Event::ClientMessage(msg) = event {
-                let data = msg.data.as_data32();
-                if msg.window == window && data[0] == wm_delete_window {
-                    closed.store(true, Ordering::SeqCst);
+            match event {
+                Event::ClientMessage(msg) => {
+                    let data = msg.data.as_data32();
+                    if msg.window == window && data[0] == wm_delete_window {
+                        closed.store(true, Ordering::SeqCst);
+                    }
                 }
+                // The user resized our window: the embedded widget follows.
+                Event::ConfigureNotify(configure) if configure.window == window => {
+                    let size = (u32::from(configure.width), u32::from(configure.height));
+                    if widget_size != Some(size) {
+                        widget_size = Some(size);
+                        resize(&conn, widget_xid, size.0, size.1);
+                        if !ui_resize.is_null() {
+                            // The UI's own interface takes its UI handle, like the
+                            // idle interface — not the struct's `handle`, which UIs
+                            // leave unset (JUCE's is null: Surge XT crashed on it).
+                            // SAFETY: valid while `instance` is, like `idle_interface`.
+                            unsafe { ((*ui_resize).ui_resize)(ui_handle, size.0 as c_int, size.1 as c_int) };
+                        }
+                    }
+                }
+                _ => {}
             }
+        }
+        // The UI asked for a new size: our window follows, and the widget with it
+        // (via the ConfigureNotify above).
+        if let Some((width, height)) = requested_size.take() {
+            resize(&conn, window, width, height);
         }
         if closed.load(Ordering::SeqCst) {
             break;
+        }
+        while let Ok(message) = notify_rx.try_recv() {
+            let (port, format, bytes): (u32, u32, &[u8]) = match &message {
+                PortMessage::Control { port, value } => (*port, 0, bytemuck_f32(value)),
+                PortMessage::Atom { port, atom } => (*port, event_transfer, atom),
+            };
+            // SAFETY: instance is live; suil only reads `bytes` during the call.
+            unsafe {
+                suil_sys::suil_instance_port_event(
+                    instance,
+                    port,
+                    bytes.len() as u32,
+                    format,
+                    bytes.as_ptr().cast(),
+                )
+            };
         }
         if !idle_interface.is_null() {
             // SAFETY: idle_interface is non-null and, per suil's contract, valid
@@ -326,9 +399,27 @@ fn run(
     Ok(())
 }
 
+fn resize(conn: &impl Connection, window: u32, width: u32, height: u32) {
+    log_if_err(
+        conn.configure_window(
+            window,
+            &x11rb::protocol::xproto::ConfigureWindowAux::new().width(width).height(height),
+        ),
+        "configure_window",
+    );
+    log_if_err(conn.flush(), "flush after resize");
+}
+
 struct UiCallbacks {
-    port_write: Box<dyn Fn(u32, f32) + Send>,
+    port_write: Box<dyn Fn(PortMessage) + Send>,
     port_symbols: Vec<(String, u32)>,
+    event_transfer: u32,
+}
+
+/// A float's bytes, as `port_event` takes a control value.
+fn bytemuck_f32(value: &f32) -> &[u8] {
+    // SAFETY: any f32 is 4 initialized bytes; the slice borrows `value`.
+    unsafe { std::slice::from_raw_parts(std::ptr::from_ref(value).cast(), size_of::<f32>()) }
 }
 
 extern "C" fn write_function(
@@ -338,15 +429,14 @@ extern "C" fn write_function(
     protocol: u32,
     buffer: *const c_void,
 ) {
-    if protocol != 0 || buffer.is_null() || buffer_size as usize != size_of::<f32>() {
-        return;
-    }
     // SAFETY: controller is the pointer we handed to suil_instance_new, a live
     // `UiCallbacks` for as long as the UI instance exists.
     let callbacks = unsafe { &*(controller as *const UiCallbacks) };
-    // SAFETY: checked above that buffer is non-null and sized for one f32.
-    let value = unsafe { *(buffer as *const f32) };
-    (callbacks.port_write)(port_index, value);
+    if let Some(message) =
+        unsafe { crate::port_message(port_index, buffer_size, protocol, buffer, callbacks.event_transfer) }
+    {
+        (callbacks.port_write)(message);
+    }
 }
 
 extern "C" fn port_index_function(controller: SuilController, port_symbol: *const c_char) -> u32 {

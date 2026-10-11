@@ -12,7 +12,7 @@ use lv2_raw::ui::{
     LV2UIWidget,
 };
 
-use crate::{LaunchUiRequest, PluginUiHandle};
+use crate::{EVENT_TRANSFER_URI, LaunchUiRequest, PluginUiHandle, PortMessage};
 
 const INSTANCE_ACCESS_URI: &CStr = c"http://lv2plug.in/ns/ext/instance-access";
 const EXTERNAL_UI_HOST_URI: &CStr = c"http://kxstudio.sf.net/ns/lv2ext/external-ui#Host";
@@ -49,6 +49,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let port_write = request.port_write;
 
     let (close_tx, close_rx) = mpsc::channel::<()>();
+    let (notify_tx, notify_rx) = mpsc::channel::<PortMessage>();
     let closed = Arc::new(AtomicBool::new(false));
     let closed_for_thread = closed.clone();
 
@@ -66,6 +67,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
                 port_write,
                 &closed_for_thread,
                 &close_rx,
+                &notify_rx,
             ) {
                 log::error!("external UI hosting failed: {err:#}");
             }
@@ -73,7 +75,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
         })
         .context("failed to spawn external UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, closed))
+    Ok(PluginUiHandle::new(close_tx, notify_tx, closed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -84,9 +86,10 @@ fn run(
     binary_path: &str,
     features: &Arc<livi::Features>,
     instance_ptr: SendPtr,
-    port_write: Box<dyn Fn(u32, f32) + Send>,
+    port_write: Box<dyn Fn(PortMessage) + Send>,
     closed: &Arc<AtomicBool>,
     close_rx: &mpsc::Receiver<()>,
+    notify_rx: &mpsc::Receiver<PortMessage>,
 ) -> Result<()> {
     // SAFETY: dlopen'ing a plugin's own UI binary. The library is kept alive for
     // this whole function (dropped last), so descriptor/instantiate/cleanup
@@ -137,8 +140,10 @@ fn run(
     feature_ptrs.push(std::ptr::from_ref(&external_ui_host_feature));
     feature_ptrs.push(std::ptr::null());
 
+    let event_transfer = features.urid(EVENT_TRANSFER_URI);
     let callbacks = Box::into_raw(Box::new(UiCallbacks {
         port_write,
+        event_transfer,
         closed: closed.clone(),
     }));
 
@@ -168,7 +173,31 @@ fn run(
         show(widget);
     }
 
+    // `lv2_raw` types `port_event` as a plain function pointer, but C allows it
+    // to be NULL ("not interested in port events"); read it as the `Option` it is.
+    // SAFETY: `Option<fn>` has the same layout as a nullable function pointer.
+    let port_event = unsafe {
+        std::ptr::addr_of!((*descriptor_ptr).port_event)
+            .cast::<Option<PortEventFn>>()
+            .read()
+    };
+
     while !closed.load(Ordering::SeqCst) && close_rx.try_recv().is_err() {
+        while let Ok(message) = notify_rx.try_recv() {
+            let Some(port_event) = port_event else {
+                continue;
+            };
+            let value;
+            let (port, format, bytes): (u32, u32, &[u8]) = match &message {
+                PortMessage::Control { port, value: v } => {
+                    value = v.to_ne_bytes();
+                    (*port, 0, &value)
+                }
+                PortMessage::Atom { port, atom } => (*port, event_transfer, atom),
+            };
+            // SAFETY: handle is the live UI; it only reads `bytes` during the call.
+            port_event(handle, port, bytes.len() as u32, format, bytes.as_ptr().cast());
+        }
         if let Some(run_fn) = unsafe { (*widget).run } {
             // May synchronously invoke `ui_closed` if the user closed the window.
             run_fn(widget);
@@ -187,6 +216,14 @@ fn run(
 
     Ok(())
 }
+
+type PortEventFn = extern "C" fn(
+    ui: lv2_raw::ui::LV2UIHandle,
+    port_index: std::ffi::c_uint,
+    buffer_size: std::ffi::c_uint,
+    format: std::ffi::c_uint,
+    buffer: *const c_void,
+);
 
 type Lv2UiDescriptorFn = unsafe extern "C" fn(index: u32) -> *const LV2UIDescriptorRaw;
 
@@ -218,7 +255,8 @@ fn find_descriptor(
 }
 
 struct UiCallbacks {
-    port_write: Box<dyn Fn(u32, f32) + Send>,
+    port_write: Box<dyn Fn(PortMessage) + Send>,
+    event_transfer: u32,
     closed: Arc<AtomicBool>,
 }
 
@@ -229,16 +267,15 @@ extern "C" fn write_function(
     port_protocol: u32,
     buffer: *const c_void,
 ) {
-    if port_protocol != 0 || buffer.is_null() || buffer_size as usize != size_of::<f32>() {
-        return;
-    }
     // SAFETY: controller is the pointer we handed to instantiate_raw, a live
     // `UiCallbacks` for as long as the UI instance exists.
     let callbacks = unsafe { &*(controller as *const UiCallbacks) };
-    // SAFETY: checked above that buffer is non-null and sized for one f32, per the
-    // "format 0" contract of LV2UI_Write_Function.
-    let value = unsafe { *(buffer as *const f32) };
-    (callbacks.port_write)(port_index, value);
+    // SAFETY: the UI passes `buffer_size` readable bytes, per LV2UI_Write_Function.
+    if let Some(message) = unsafe {
+        crate::port_message(port_index, buffer_size, port_protocol, buffer, callbacks.event_transfer)
+    } {
+        (callbacks.port_write)(message);
+    }
 }
 
 /// Called by the plugin's own UI (often from its own toolkit's thread, not our

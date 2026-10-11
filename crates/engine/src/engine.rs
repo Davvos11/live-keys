@@ -4,7 +4,7 @@ use live_keys_core::{
     Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
     PluginInfo, PluginKind, PresetInfo, Producer, PushError, midi_ring_buffer, ring_buffer,
 };
-use live_keys_lv2_host::{InstanceRef, Lv2Host, livi, lv2_raw};
+use live_keys_lv2_host::{InstanceRef, Lv2Host, PortEvent, UiChannel, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
 
 use std::collections::HashMap;
@@ -70,6 +70,9 @@ pub enum PluginEditor {
         raw_handle: lv2_raw::core::LV2Handle,
         /// For saving and restoring its state (presets).
         instance: InstanceRef,
+        /// Atoms between the plugin's atom ports and its GUI, if it has any (see
+        /// [`Engine::send_ui_atom`], [`Engine::drain_ui_events`]).
+        ui_channel: Option<UiChannel>,
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
@@ -125,6 +128,13 @@ impl SlotChain {
             .iter()
             .chain(&self.instrument)
             .chain(&self.audio_effects)
+    }
+
+    fn plugins_mut(&mut self) -> impl Iterator<Item = &mut LoadedPluginMeta> {
+        self.midi_effects
+            .iter_mut()
+            .chain(&mut self.instrument)
+            .chain(&mut self.audio_effects)
     }
 
     fn position_of(&self, key: PluginKey) -> Option<ChainPosition> {
@@ -247,14 +257,9 @@ impl Engine {
     }
 
     fn plugin_mut(&mut self, key: PluginKey) -> Option<&mut LoadedPluginMeta> {
-        self.slots.iter_mut().find_map(|chain| {
-            chain
-                .midi_effects
-                .iter_mut()
-                .chain(&mut chain.instrument)
-                .chain(&mut chain.audio_effects)
-                .find(|meta| meta.key == key)
-        })
+        self.slots
+            .iter_mut()
+            .find_map(|chain| chain.plugins_mut().find(|meta| meta.key == key))
     }
 
     /// Where parameter `param_id` of the plugin with `key` is: the last value
@@ -455,6 +460,36 @@ impl Engine {
         self.send_param_change(key, param_id, value);
     }
 
+    /// Passes an atom its GUI wrote (`LV2_Atom` header, then body) to atom input
+    /// `port` of the LV2 plugin with `key`, from its next block. Dropped if
+    /// malformed, too big, or the channel is full.
+    pub fn send_ui_atom(&mut self, key: PluginKey, port: u32, atom: &[u8]) {
+        if let Some(LoadedPluginMeta {
+            editor: PluginEditor::Lv2 { ui_channel: Some(channel), .. },
+            ..
+        }) = self.plugin_mut(key)
+            && let Some(event) = PortEvent::from_atom(port, atom)
+        {
+            let _ = channel.to_plugin.push(event);
+        }
+    }
+
+    /// Hands every event LV2 plugins wrote to their atom outputs since the last
+    /// call to `forward` (as the plugin's key, the port and the atom for its GUI),
+    /// emptying their channels. Call regularly, GUI or not: a full channel drops
+    /// newer events.
+    pub fn drain_ui_events(&mut self, mut forward: impl FnMut(PluginKey, u32, &PortEvent)) {
+        for chain in &mut self.slots {
+            for meta in chain.plugins_mut() {
+                if let PluginEditor::Lv2 { ui_channel: Some(channel), .. } = &mut meta.editor {
+                    while let Ok(event) = channel.from_plugin.pop() {
+                        forward(meta.key, event.port, &event);
+                    }
+                }
+            }
+        }
+    }
+
     /// Parameter `param_id` of the plugin with `key` at `value`, as text for display
     /// ("-6.0 dB", "Saw", "C#3"). A VST3 plugin formats its own values; otherwise
     /// it's formatted from the parameter's metadata. Empty if there's no such
@@ -651,10 +686,11 @@ impl Engine {
             };
             Ok((Box::new(plugin), meta))
         } else {
-            let plugin = self
+            let mut plugin = self
                 .lv2
                 .instantiate(plugin_id, sample_rate)
                 .with_context(|| format!("failed to instantiate LV2 plugin '{plugin_id}'"))?;
+            let ui_channel = plugin.take_ui_channel();
             let meta = LoadedPluginMeta {
                 key,
                 id: plugin_id.to_string(),
@@ -666,6 +702,7 @@ impl Engine {
                     features: plugin.features().clone(),
                     raw_handle: plugin.raw_handle(),
                     instance: plugin.instance_ref(),
+                    ui_channel,
                 },
                 values: HashMap::new(),
             };

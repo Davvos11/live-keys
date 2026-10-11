@@ -9,6 +9,21 @@ use std::sync::mpsc;
 
 pub use discovery::{UiKind, best_supported_ui};
 
+/// `atom:eventTransfer`: the port protocol for atoms passed between a plugin and
+/// its GUI.
+const EVENT_TRANSFER_URI: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#eventTransfer";
+
+/// Something passed between a plugin's DSP and its GUI through one of its ports.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PortMessage {
+    /// A control port's value (`ui:floatProtocol`).
+    Control { port: u32, value: f32 },
+    /// An atom for an atom port (`atom:eventTransfer`): its `LV2_Atom` header
+    /// followed by its body. Plugins whose GUI talks to the DSP only this way
+    /// (setBfree) have no control ports at all.
+    Atom { port: u32, atom: Vec<u8> },
+}
+
 /// A handle to a plugin's currently open GUI window, hosted on a dedicated
 /// background thread (never the audio thread, never the GUI's own event-loop
 /// thread).
@@ -26,12 +41,25 @@ pub use discovery::{UiKind, best_supported_ui};
 /// freezing the app.
 pub struct PluginUiHandle {
     close_tx: mpsc::Sender<()>,
+    notify_tx: mpsc::Sender<PortMessage>,
     closed: Arc<AtomicBool>,
 }
 
 impl PluginUiHandle {
-    fn new(close_tx: mpsc::Sender<()>, closed: Arc<AtomicBool>) -> Self {
-        Self { close_tx, closed }
+    fn new(close_tx: mpsc::Sender<()>, notify_tx: mpsc::Sender<PortMessage>, closed: Arc<AtomicBool>) -> Self {
+        Self {
+            close_tx,
+            notify_tx,
+            closed,
+        }
+    }
+
+    /// Tells the GUI about a port: a control port's new value (e.g. set from
+    /// the host's parameter window or a preset), or an atom the plugin wrote to an
+    /// output port the GUI listens to (`ui:portNotification`). Delivered on the
+    /// hosting thread's next idle tick. A no-op once closed.
+    pub fn notify(&self, message: PortMessage) {
+        let _ = self.notify_tx.send(message);
     }
 
     /// True once the UI has closed, whether the user closed the window themselves
@@ -56,15 +84,45 @@ impl Drop for PluginUiHandle {
     }
 }
 
+/// What a GUI's `write_function` call wrote, if it's a protocol this host
+/// handles: a float for a control port (format 0), or an atom (`event_transfer`,
+/// the `atom:eventTransfer` URID).
+///
+/// # Safety
+/// `buffer` must be null or point to `buffer_size` readable bytes.
+unsafe fn port_message(
+    port: u32,
+    buffer_size: u32,
+    format: u32,
+    buffer: *const std::ffi::c_void,
+    event_transfer: u32,
+) -> Option<PortMessage> {
+    if buffer.is_null() {
+        return None;
+    }
+    if format == 0 && buffer_size as usize == size_of::<f32>() {
+        // SAFETY: sized for one f32, per the check above and the caller.
+        let value = unsafe { buffer.cast::<f32>().read_unaligned() };
+        return Some(PortMessage::Control { port, value });
+    }
+    if format == event_transfer && buffer_size as usize >= 8 {
+        // SAFETY: as the caller guarantees.
+        let atom = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), buffer_size as usize) };
+        return Some(PortMessage::Atom { port, atom: atom.to_vec() });
+    }
+    None
+}
+
 /// Everything needed to launch a plugin's own GUI, independent of how it's hosted.
 pub struct LaunchUiRequest<'a> {
     pub plugin: &'a livi::Plugin,
     pub features: Arc<livi::Features>,
     pub instance_handle: lv2_raw::core::LV2Handle,
-    /// Called (from the hosting thread) whenever the plugin's own GUI writes a new
-    /// value to one of its control ports, e.g. the user turning a knob. Must be
-    /// safe to call from a thread other than wherever `launch_ui` was called from.
-    pub port_write: Box<dyn Fn(u32, f32) + Send>,
+    /// Called (from the hosting thread) whenever the plugin's own GUI writes to
+    /// one of the plugin's ports: a control port's new value (e.g. the user turning
+    /// a knob) or an atom for an atom input. Must be safe to call from a thread
+    /// other than wherever `launch_ui` was called from.
+    pub port_write: Box<dyn Fn(PortMessage) + Send>,
 }
 
 /// Discovers and launches the best UI this host can show for `request.plugin`.

@@ -64,6 +64,9 @@ cargo run -p live-keys-gui --release
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
 cargo run -p live-keys-lv2-ui --example test_surge   # X11UI path (needs Surge XT installed)
+cargo run -p live-keys-lv2-ui --example test_setbfree --release -- [seconds] [plugin uri]
+  # a plugin's GUI through a live engine (default setBfree, whose GUI uses atom ports only;
+  # needs an audio device and a MIDI port); prints how many messages crossed each way
 
 # Manual VST3 smoke tests (not part of the app)
 cargo run -p live-keys-vst3-host --example smoke --release   # scan, then render a chord offline
@@ -158,13 +161,20 @@ behind format-agnostic cores:
   output is reset to an empty chunk before every `run` (as LV2 requires — the plugin learns
   its capacity from it), and afterwards its MIDI events are read back into a pre-allocated
   `midi_out` (`HostedPlugin::midi_output`) — that's how a MIDI effect's output reaches the
-  next stage; for any other plugin it's simply ignored. CV outputs go to a discarded scratch
+  next stage; for any other plugin it's simply ignored. Every event on an atom output (MIDI or
+  not) also goes to the plugin's **GUI channel**: a plugin with atom ports gets a pair of
+  `rtrb` rings of fixed-size `PortEvent`s (an atom body up to `PORT_EVENT_BYTES`, its type
+  and port index; larger ones are dropped), whose control-thread end (`UiChannel`) is taken
+  once with `Lv2Plugin::take_ui_channel`. `process` puts the GUI's atoms into the matching atom
+  input at frame 0, ahead of the block's MIDI. Some GUIs talk to their DSP only this way —
+  setBfree has no control ports at all: settings go GUI → `control` input, and its state and
+  lit keys come back on `notify` (`ui:portNotification`). CV outputs go to a discarded scratch
   buffer. `plugin_kind` classifies at scan time: an instrument by class (or audio out + MIDI in
   and no audio in), a MIDI effect by having atom outputs (or the "MIDI Plugin" class) and no
   audio ports at all, an audio effect otherwise (onset triggers — audio in, MIDI out — included,
   since a MIDI chain has no audio to give them). `Lv2Plugin::process` pushes
-  MIDI into a persistent `LV2AtomSequence` — duplicated across however many atom-sequence input
-  ports the plugin actually declares (most effects have zero, unlike instruments) — and renders
+  MIDI into a persistent `LV2AtomSequence` per atom-sequence input port — the same MIDI in each
+  (most effects have none, unlike instruments) — and renders
   into persistent per-channel `Vec<f32>` buffers sized to `max_block_size` at instantiation — no
   allocation happens on the audio thread. Audio inputs read per-port `input_buffers` the host
   fills (`audio_input_mut`); CV inputs, which nothing routes, get a shared silent buffer.
@@ -372,8 +382,10 @@ behind format-agnostic cores:
   (`StateSource`), both LV2 saves through `save_lv2` (lending, port values). Two ways to change a parameter: `send_param_change(key, id, value)`
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
-  open editor follows. (An open LV2 GUI isn't told about host-side port changes at all — see
-  "Known simplifications".) `param_text(key, id, value)` is
+  open editor follows (an open LV2 GUI is told by the GUI crate instead, see below).
+  `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
+  `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
+  plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`). `param_text(key, id, value)` is
   a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
   unless already there; main thread only), else `ParamInfo::format_value`.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
@@ -403,18 +415,28 @@ behind format-agnostic cores:
     the plugin's widget into. Uses hand-written bindings to `suil` (the reference LV2
     UI-wrapping library; no Rust crate exists, hence `suil_sys.rs` instead of a `suil-sys`
     crate — linked via `build.rs` + the `pkg-config` crate) to load/wrap the UI, and `x11rb` to
-    create/manage the parent window (mapped, `WM_DELETE_WINDOW`-aware, resized to fit the
-    widget's actual geometry once known since there's no `ui:resize` protocol support).
-    Confirmed via Surge XT.
+    create/manage the parent window (mapped, `WM_DELETE_WINDOW`-aware). Sizing follows
+    `ui:resize` both ways: the host offers the feature (a UI's size request is recorded in a
+    `Cell` and applied by the idle loop, since it can come while the UI is still being
+    created), the window starts at the requested size or else the widget's geometry, and when
+    the user resizes the window, the widget is resized to match and the UI's own `ui:resize`
+    interface, if any, is told — called with the UI's own handle (`suil_instance_get_handle`),
+    like the idle interface, not the struct's `handle` field, which JUCE leaves null (passing
+    it crashed Surge XT). Confirmed via Surge XT and setBfree.
 
   Both mechanisms run their instantiate→show→idle-loop→cleanup lifecycle synchronously on a
   **dedicated background thread per open UI** (not the audio thread, not the GUI's own event-loop
   thread), and report closure back via `PluginUiHandle::is_closed()`/an internal `Arc<AtomicBool>`.
-  A UI's `port_write`/`write_function` callback is a plain `Fn(u32, f32) + Send` the caller
-  supplies — it does *not* touch the audio engine directly; the caller is expected to forward it
-  across a channel to whichever single thread actually drives `Engine::send_param_change` (see
+  Traffic between DSP and GUI is a `PortMessage`: `Control { port, value }`
+  (`ui:floatProtocol`) or `Atom { port, atom }` (`atom:eventTransfer`; the `LV2_Atom` header
+  plus body). A UI's writes reach the caller's `port_write: Fn(PortMessage) + Send` (parsed by
+  `port_message`) — it does *not* touch the audio engine directly; the caller is expected to
+  forward it across a channel to whichever single thread drives the engine (see
   `crates/gui/src/main.rs`'s `poll_timer` for the pattern), since `rtrb`'s producer side isn't
-  safe to call from more than one thread.
+  safe to call from more than one thread. The other way, `PluginUiHandle::notify` queues a
+  `PortMessage` for the hosting thread, which delivers it on its next idle tick
+  (`suil_instance_port_event`, or the External UI descriptor's `port_event`, read as an
+  `Option` since C allows NULL there although `lv2_raw` types it non-null).
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
@@ -503,9 +525,12 @@ behind format-agnostic cores:
   toggles). Snapping is host-side: `set-param`
   snaps via `ParamInfo::snap` and skips values equal to the last one sent, so a stepped slider
   only sends when it crosses a step. Sending a value calls `Engine::set_param`, while edits from a plugin's own GUI arrive over the
-  `(key, param_id, value)` channel and go through `Engine::send_param_change`; the engine
-  records the value either way, and `Rack::show_param_value` updates an open window's row, so
-  a window shows current values, not defaults.
+  `GuiEdit` channel (`Param`, or `Atom` for an LV2 plugin's atom input → `Engine::send_ui_atom`)
+  and go through `Engine::send_param_change`; the engine records the value either way, and
+  `Rack::show_param_value` updates an open window's row, so a window shows current values, not
+  defaults. An open LV2 GUI is told host-side changes (`Rack::notify_ui`; every value on opening
+  and after a preset load, in `refresh_param_rows`), and the poll timer forwards
+  `Engine::drain_ui_events` to open LV2 GUIs (dropping events of plugins without one).
   Every structural change re-records the slot's chain into the config (`record_chain`). Meant as the base for
   future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
@@ -553,9 +578,9 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   `getParamNormalized` keeps the old value). The sound is right; the parameter window and the
   recorded values may not be. Surge also calls `restartComponent(kParamValuesChanged)`, which
   is ignored. Restarting the stream doesn't carry slot presets' state over either.
-- An open LV2 plugin GUI never gets `port_event`, so it doesn't follow host-side port changes
-  (the parameter window, a loaded preset's port values); GUIs that read the plugin's own state
-  (e.g. Surge XT, via instance access) do follow a preset's state. VST3 editors follow both.
+- Settings an LV2 plugin only exchanges with its GUI as atoms (setBfree's drawbars etc.) aren't
+  recorded host-side: they don't show in the parameter window or mark presets "changed" —
+  though plugin and slot presets do capture them, through the plugin's state.
 - MIDI events always get `frame_offset = 0` — `midir`'s callback doesn't hand back a
   sample-accurate offset relative to the audio clock, so events are applied at the start of
   whichever block consumes them. Fine for a keyboard-driven rack; would need revisiting for
@@ -603,10 +628,11 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   GUI, which wedges only its own thread — a VST3 editor that hangs inside a call freezes the
   whole app. There's no way around it within the VST3 threading rules short of out-of-process
   hosting (see the out-of-process note below).
-- LV2 UI hosting: no `ui:resize` protocol support (X11UI windows are sized once, from the
-  widget's initial geometry, not kept in sync afterward); Gtk/Qt-wrapped UIs may work via suil's
-  adapter modules but aren't the validated/primary target (bare X11UI and External UI are); only
-  `ui:floatProtocol` (plain float control-port writes) is handled, not other port protocols.
+- LV2 UI hosting: Gtk/Qt-wrapped UIs may work via suil's adapter modules but aren't the
+  validated/primary target (bare X11UI and External UI are); only `ui:floatProtocol` and
+  `atom:eventTransfer` are handled (not `ui:peakProtocol` and the like), every atom output
+  goes to the GUI whether it asked for that port or not, and no `ui:portSubscribe`. An External
+  UI can't be resized by the host (it owns its window).
 - `PluginUiHandle` never joins its hosting thread (see its doc comment in
   `crates/lv2-ui-host/src/lib.rs`) — closing/reopening a plugin's GUI must never block the
   caller (typically the GUI's main thread) on that plugin's own teardown code finishing.

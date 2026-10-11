@@ -14,7 +14,9 @@ use live_keys_engine::{
     PluginInfo, PluginKey, PluginKind, PresetInfo, SLOT_COUNT, Section, SlotChain,
     default_plugin_search_paths, list_logical_output_devices, list_midi_ports,
 };
-use live_keys_lv2_ui::{LaunchUiRequest, PluginUiHandle, UiKind, best_supported_ui, launch_ui};
+use live_keys_lv2_ui::{
+    LaunchUiRequest, PluginUiHandle, PortMessage, UiKind, best_supported_ui, launch_ui,
+};
 use live_keys_vst3_ui::Vst3Editor;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
@@ -28,6 +30,14 @@ const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// Without this there's no way back to "no preference" once a specific device
 /// has been selected once.
 const SYSTEM_DEFAULT_LABEL: &str = "System Default";
+
+/// What a plugin's own GUI wrote, on its way to the poll timer (GUIs call back
+/// from their own threads).
+enum GuiEdit {
+    Param { key: PluginKey, param_id: u32, value: f32 },
+    /// An atom for an LV2 plugin's atom input (`LV2_Atom` header, then body).
+    Atom { key: PluginKey, port: u32, atom: Vec<u8> },
+}
 
 /// A plugin's open GUI. LV2 GUIs run on a thread of their own; VST3 editors live
 /// on this (the main) thread and need pumping.
@@ -640,9 +650,24 @@ impl Rack {
 
     /// Rebuilds every row of `key`'s parameter window, e.g. after a preset changed
     /// them all.
+    /// Its open LV2 GUI is told every value too, since it can't ask (a VST3
+    /// editor follows its controller by itself).
     fn refresh_param_rows(&self, engine: &Engine, key: PluginKey) {
         if let Some(open) = self.param_windows.borrow().get(&key) {
             open.rows.set_vec(param_rows(engine, key));
+        }
+        if let (Some(OpenEditor::Lv2(handle)), Some(meta)) = (self.open_uis.borrow().get(&key), engine.plugin(key)) {
+            for param in &meta.params {
+                let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
+                handle.notify(PortMessage::Control { port: param.id, value });
+            }
+        }
+    }
+
+    /// Tells `key`'s open LV2 GUI about a host-side parameter change.
+    fn notify_ui(&self, key: PluginKey, param_id: u32, value: f32) {
+        if let Some(OpenEditor::Lv2(handle)) = self.open_uis.borrow().get(&key) {
+            handle.notify(PortMessage::Control { port: param_id, value });
         }
     }
 
@@ -809,7 +834,7 @@ fn main() -> anyhow::Result<()> {
     // here and applied to the engine from this (the control) thread by the poll
     // timer below, since only one thread may drive the audio engine's command
     // queue.
-    let (param_tx, param_rx) = mpsc::channel::<(PluginKey, u32, f32)>();
+    let (edit_tx, edit_rx) = mpsc::channel::<GuiEdit>();
     let rack = Rc::new(Rack::new());
     let picker = Rc::new(Picker::new());
 
@@ -1076,12 +1101,20 @@ fn main() -> anyhow::Result<()> {
             let (Some(meta), Some(slot)) = (engine.plugin(key), slot_of(&engine, key)) else {
                 return;
             };
-            let param_tx = param_tx.clone();
-            // Fails only once the poll timer's receiver is gone, i.e. the app is
-            // already shutting down — nothing useful to do about it, and this can
-            // fire rapidly (e.g. a dragged knob), so it isn't logged.
+            // Sends fail only once the poll timer's receiver is gone, i.e. the app
+            // is already shutting down — nothing useful to do about it, and this
+            // can fire rapidly (e.g. a dragged knob), so it isn't logged.
+            let edit_tx_vst3 = edit_tx.clone();
             let forward_edit = move |param_id: u32, value: f32| {
-                let _ = param_tx.send((key, param_id, value));
+                let _ = edit_tx_vst3.send(GuiEdit::Param { key, param_id, value });
+            };
+            let edit_tx_lv2 = edit_tx.clone();
+            let forward_port_write = move |message: PortMessage| {
+                let edit = match message {
+                    PortMessage::Control { port, value } => GuiEdit::Param { key, param_id: port, value },
+                    PortMessage::Atom { port, atom } => GuiEdit::Atom { key, port, atom },
+                };
+                let _ = edit_tx_lv2.send(edit);
             };
             let opened = match &meta.editor {
                 PluginEditor::Lv2 {
@@ -1093,9 +1126,17 @@ fn main() -> anyhow::Result<()> {
                     plugin,
                     features: features.clone(),
                     instance_handle: *raw_handle,
-                    port_write: Box::new(forward_edit),
+                    port_write: Box::new(forward_port_write),
                 })
-                .map(OpenEditor::Lv2),
+                .map(|handle| {
+                    // Hosts tell a new LV2 GUI every control port's value; a GUI
+                    // without instance access has no other way to learn them.
+                    for param in &meta.params {
+                        let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
+                        handle.notify(PortMessage::Control { port: param.id, value });
+                    }
+                    OpenEditor::Lv2(handle)
+                }),
                 PluginEditor::Vst3(controller) => {
                     Vst3Editor::open(controller, &meta.name, Box::new(forward_edit))
                         .map(OpenEditor::Vst3)
@@ -1145,6 +1186,7 @@ fn main() -> anyhow::Result<()> {
             }
             engine.borrow_mut().set_param(key, param_id, value);
             rack.show_param_value(&engine.borrow(), key, param_id, value);
+            rack.notify_ui(key, param_id, value);
             rack.mark_changed(&engine.borrow(), key);
         });
     }
@@ -1453,15 +1495,32 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             rack.poll_uis(&engine.borrow());
-            while let Ok((key, param_id, value)) = param_rx.try_recv() {
-                // Plugin GUIs also echo values back (e.g. every value when
-                // opening); only an actual change counts as an edit.
-                if engine.borrow().param_value(key, param_id) == Some(value) {
-                    continue;
+            while let Ok(edit) = edit_rx.try_recv() {
+                match edit {
+                    GuiEdit::Param { key, param_id, value } => {
+                        // Plugin GUIs also echo values back (e.g. every value when
+                        // opening); only an actual change counts as an edit.
+                        if engine.borrow().param_value(key, param_id) == Some(value) {
+                            continue;
+                        }
+                        engine.borrow_mut().send_param_change(key, param_id, value);
+                        rack.show_param_value(&engine.borrow(), key, param_id, value);
+                        rack.mark_changed(&engine.borrow(), key);
+                    }
+                    // Settings that only travel as atoms (setBfree's) aren't
+                    // recorded, so they don't mark presets changed.
+                    GuiEdit::Atom { key, port, atom } => engine.borrow_mut().send_ui_atom(key, port, &atom),
                 }
-                engine.borrow_mut().send_param_change(key, param_id, value);
-                rack.show_param_value(&engine.borrow(), key, param_id, value);
-                rack.mark_changed(&engine.borrow(), key);
+            }
+            // What plugins wrote to their atom outputs goes to their open GUIs
+            // (setBfree's state and lit keys); for others it's dropped.
+            {
+                let open_uis = rack.open_uis.borrow();
+                engine.borrow_mut().drain_ui_events(|key, port, event| {
+                    if let Some(OpenEditor::Lv2(handle)) = open_uis.get(&key) {
+                        handle.notify(PortMessage::Atom { port, atom: event.to_atom() });
+                    }
+                });
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {

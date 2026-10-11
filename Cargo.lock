@@ -3206,6 +3206,7 @@ dependencies = [
  "livi",
  "log",
  "lv2_raw",
+ "rtrb",
 ]
 
 [[package]]
@@ -3216,6 +3217,7 @@ dependencies = [
  "env_logger",
  "libloading 0.8.9",
  "live-keys-core",
+ "live-keys-engine",
  "live-keys-lv2-host",
  "livi",
  "log",

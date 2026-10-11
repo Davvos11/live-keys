@@ -21,6 +21,51 @@ const MIDI_EVENT_BUFFER_BYTES: usize = 4096;
 const MAX_MIDI_MESSAGE_BYTES: usize = 32;
 /// Most MIDI events read back from a plugin's MIDI output per block.
 const MIDI_OUT_CAPACITY: usize = 512;
+/// Largest atom body passed between a plugin and its GUI; bigger ones are dropped.
+pub const PORT_EVENT_BYTES: usize = 512;
+/// Capacity of each direction of a plugin's GUI channel, in events. A GUI asking
+/// for the plugin's whole state (setBfree does on opening) gets a burst of them.
+const PORT_EVENT_CAPACITY: usize = 512;
+
+/// An atom passed between a plugin and its GUI through one of its atom ports,
+/// fixed-size so it can cross to and from the audio thread without allocating.
+#[derive(Clone, Copy)]
+pub struct PortEvent {
+    pub port: u32,
+    pub atom_type: u32,
+    pub size: u32,
+    pub body: [u8; PORT_EVENT_BYTES],
+}
+
+impl PortEvent {
+    /// From an atom as a GUI writes it (`LV2_Atom` header, then body). `None` if
+    /// it's malformed or too big.
+    pub fn from_atom(port: u32, atom: &[u8]) -> Option<Self> {
+        let size = u32::from_ne_bytes(atom.get(0..4)?.try_into().ok()?);
+        let atom_type = u32::from_ne_bytes(atom.get(4..8)?.try_into().ok()?);
+        let data = atom.get(8..8 + size as usize)?;
+        let mut body = [0; PORT_EVENT_BYTES];
+        body.get_mut(..data.len())?.copy_from_slice(data);
+        Some(Self { port, atom_type, size, body })
+    }
+
+    /// As an atom for a GUI (`LV2_Atom` header, then body).
+    pub fn to_atom(&self) -> Vec<u8> {
+        let mut atom = Vec::with_capacity(8 + self.size as usize);
+        atom.extend_from_slice(&self.size.to_ne_bytes());
+        atom.extend_from_slice(&self.atom_type.to_ne_bytes());
+        atom.extend_from_slice(&self.body[..self.size as usize]);
+        atom
+    }
+}
+
+/// The control thread's end of a plugin's GUI channel: atoms for the plugin's
+/// atom inputs (from its GUI), and what the plugin wrote to its atom outputs (for
+/// its GUI). See [`Lv2Plugin::take_ui_channel`].
+pub struct UiChannel {
+    pub to_plugin: rtrb::Producer<PortEvent>,
+    pub from_plugin: rtrb::Consumer<PortEvent>,
+}
 
 /// Classifies by class and ports. Atom-sequence ports usually carry MIDI, but not
 /// always (a synth's UI-state messages), so a class saying "instrument" wins over
@@ -283,15 +328,34 @@ impl Lv2Host {
             .collect();
 
         let params = read_params(&self.world, &plugin, sample_rate);
+        let port_indices = |kind: livi::PortType| -> Vec<u32> {
+            plugin.ports_with_type(kind).map(|port| port.index.0 as u32).collect()
+        };
+        let atom_in_ports = port_indices(livi::PortType::AtomSequenceInput);
+        let atom_out_ports = port_indices(livi::PortType::AtomSequenceOutput);
+        // Only plugins with atom ports can talk to their GUI through them.
+        let (ui_channel, ui_ends) = if atom_in_ports.is_empty() && atom_out_ports.is_empty() {
+            (None, None)
+        } else {
+            let (to_plugin, ui_in) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
+            let (ui_out, from_plugin) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
+            (Some(UiChannel { to_plugin, from_plugin }), Some((ui_in, ui_out)))
+        };
         Ok(Lv2Plugin {
             params,
             name,
             plugin,
             features: self.features.clone(),
             instance,
-            midi_in: LV2AtomSequence::new(&self.features, MIDI_EVENT_BUFFER_BYTES),
+            atom_in: atom_in_ports
+                .iter()
+                .map(|_| LV2AtomSequence::new(&self.features, MIDI_EVENT_BUFFER_BYTES))
+                .collect(),
+            atom_in_ports,
+            atom_out_ports,
+            ui_channel,
+            ui_ends,
             midi_urid: self.features.midi_urid(),
-            atom_sequence_input_count: port_counts.atom_sequence_inputs,
             output_buffers,
             frames_rendered: 0,
             input_buffers: (0..port_counts.audio_inputs)
@@ -313,13 +377,18 @@ pub struct Lv2Plugin {
     plugin: livi::Plugin,
     features: Arc<livi::Features>,
     instance: livi::Instance,
-    midi_in: LV2AtomSequence,
+    /// One per atom-sequence input port (a pure effect commonly has none, unlike
+    /// an instrument), each getting the block's MIDI and any atoms its GUI sent
+    /// to that port (see `process`).
+    atom_in: Vec<LV2AtomSequence>,
+    /// The port indices of `atom_in` and `atom_sequence_out`, in order.
+    atom_in_ports: Vec<u32>,
+    atom_out_ports: Vec<u32>,
+    /// The control thread's end of the GUI channel, until taken.
+    ui_channel: Option<UiChannel>,
+    /// The audio thread's end: atoms from the GUI, and atom output for it.
+    ui_ends: Option<(rtrb::Consumer<PortEvent>, rtrb::Producer<PortEvent>)>,
     midi_urid: u32,
-    /// Number of atom-sequence input ports the plugin actually declares — a
-    /// pure effect plugin commonly has zero, unlike an instrument. `midi_in` is
-    /// duplicated across all of them (see `process`); LV2 plugins with more
-    /// than one atom-sequence input are not a case seen in practice.
-    atom_sequence_input_count: usize,
     output_buffers: Vec<Vec<f32>>,
     frames_rendered: usize,
     /// One per audio input port, filled by the host (see
@@ -329,10 +398,9 @@ pub struct Lv2Plugin {
     /// routes CV yet.
     cv_silence: Vec<f32>,
     cv_input_count: usize,
-    /// Scratch buffer(s) connected to the plugin's atom-sequence output
-    /// port(s), if any — written by the plugin each block (e.g. MIDI-out, or a
-    /// synth's UI-state messages) and then discarded; nothing downstream
-    /// consumes it yet.
+    /// Buffer(s) connected to the plugin's atom-sequence output port(s), if any —
+    /// written by the plugin each block (e.g. MIDI-out, or a synth's UI-state
+    /// messages): MIDI goes to `midi_out`, and every event to the GUI channel.
     atom_sequence_out: Vec<LV2AtomSequence>,
     /// MIDI events found in `atom_sequence_out` after the last block — a MIDI
     /// effect's output (see `HostedPlugin::midi_output`).
@@ -378,6 +446,16 @@ impl Lv2Plugin {
     pub fn params(&self) -> &[ParamInfo] {
         &self.params
     }
+
+    /// The control thread's end of the channel between this plugin's atom ports
+    /// and its GUI, for a plugin that has atom ports (once; `None` after). The
+    /// audio thread passes the GUI's atoms to the plugin's atom inputs and every
+    /// event the plugin writes to its atom outputs back — some GUIs (setBfree)
+    /// talk to the DSP only this way. Output events are dropped while the channel
+    /// is full, so the owner should drain it even with no GUI open.
+    pub fn take_ui_channel(&mut self) -> Option<UiChannel> {
+        self.ui_channel.take()
+    }
 }
 
 impl HostedPlugin for Lv2Plugin {
@@ -398,15 +476,33 @@ impl HostedPlugin for Lv2Plugin {
     }
 
     fn process(&mut self, midi_in: &[MidiEvent], frames: usize) {
-        self.midi_in.clear();
-        for event in midi_in {
-            // Dropping an event that doesn't fit the sequence buffer is preferable
-            // to blocking or growing it on the audio thread.
-            let _ = self.midi_in.push_midi_event::<MAX_MIDI_MESSAGE_BYTES>(
-                i64::from(event.frame_offset),
-                self.midi_urid,
-                event.as_slice(),
-            );
+        for sequence in &mut self.atom_in {
+            sequence.clear();
+        }
+        // The GUI's atoms first, at frame 0, so each sequence stays in time order.
+        if let Some((ui_in, _)) = &mut self.ui_ends {
+            while let Ok(event) = ui_in.pop() {
+                let Some(index) = self.atom_in_ports.iter().position(|&port| port == event.port) else {
+                    continue;
+                };
+                let body = &event.body[..event.size as usize];
+                if let Ok(atom) =
+                    livi::event::LV2AtomEventBuilder::<PORT_EVENT_BYTES>::new(0, event.atom_type, body)
+                {
+                    let _ = self.atom_in[index].push_event(&atom);
+                }
+            }
+        }
+        for sequence in &mut self.atom_in {
+            for event in midi_in {
+                // Dropping an event that doesn't fit the sequence buffer is
+                // preferable to blocking or growing it on the audio thread.
+                let _ = sequence.push_midi_event::<MAX_MIDI_MESSAGE_BYTES>(
+                    i64::from(event.frame_offset),
+                    self.midi_urid,
+                    event.as_slice(),
+                );
+            }
         }
         self.frames_rendered = frames;
 
@@ -416,16 +512,13 @@ impl HostedPlugin for Lv2Plugin {
             sequence.clear_as_chunk();
         }
 
-        let midi_in = &self.midi_in;
         // Audio inputs read what the host wrote into `input_buffers`; every CV
-        // input gets the same silent buffer. Every atom-sequence input port gets
-        // the same MIDI, if the plugin has any — most effects have none, unlike
-        // instruments.
+        // input gets the same silent buffer.
         let cv_silence = &self.cv_silence[..frames];
         let ports = livi::EmptyPortConnections::new()
             .with_audio_inputs(self.input_buffers.iter().map(|buf| &buf[..frames]))
             .with_cv_inputs(std::iter::repeat_n(cv_silence, self.cv_input_count))
-            .with_atom_sequence_inputs(std::iter::repeat_n(midi_in, self.atom_sequence_input_count))
+            .with_atom_sequence_inputs(self.atom_in.iter())
             .with_audio_outputs(self.output_buffers.iter_mut().map(|buf| &mut buf[..frames]))
             .with_atom_sequence_outputs(self.atom_sequence_out.iter_mut())
             .with_cv_outputs(self.cv_out_buffers.iter_mut().map(|buf| &mut buf[..frames]));
@@ -435,13 +528,26 @@ impl HostedPlugin for Lv2Plugin {
         }
 
         self.midi_out.clear();
-        for sequence in &self.atom_sequence_out {
+        for (index, sequence) in self.atom_sequence_out.iter().enumerate() {
             for event in sequence.iter() {
+                if let Some((_, ui_out)) = &mut self.ui_ends
+                    && !ui_out.is_full()
+                    && event.data.len() <= PORT_EVENT_BYTES
+                {
+                    let mut body = [0; PORT_EVENT_BYTES];
+                    body[..event.data.len()].copy_from_slice(event.data);
+                    let _ = ui_out.push(PortEvent {
+                        port: self.atom_out_ports[index],
+                        atom_type: event.event.body.mytype,
+                        size: event.data.len() as u32,
+                        body,
+                    });
+                }
                 if event.event.body.mytype != self.midi_urid {
                     continue;
                 }
                 if self.midi_out.len() == self.midi_out.capacity() {
-                    break;
+                    continue;
                 }
                 let offset = event.event.time_in_frames.clamp(0, frames as i64) as u32;
                 if let Some(midi) = MidiEvent::from_raw(offset, event.data) {

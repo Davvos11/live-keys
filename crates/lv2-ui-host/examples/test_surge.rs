@@ -31,8 +31,8 @@ fn main() -> anyhow::Result<()> {
         plugin: &plugin,
         features,
         instance_handle,
-        port_write: Box::new(|port_index, value| {
-            println!("port {port_index} -> {value}");
+        port_write: Box::new(|message| {
+            println!("{message:?}");
         }),
     };
 
