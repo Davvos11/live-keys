@@ -1,0 +1,16 @@
+[package]
+name = "live-keys-plugin-check"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "plugin-check"
+path = "src/main.rs"
+
+[dependencies]
+live-keys-engine = { path = "../engine" }
+live-keys-lv2-ui = { path = "../lv2-ui-host" }
+live-keys-vst3-ui = { path = "../vst3-ui-host" }
+x11rb = "0.13"
+anyhow = "1"
+env_logger = "0.11"

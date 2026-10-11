@@ -1121,12 +1121,14 @@ fn main() -> anyhow::Result<()> {
                     plugin,
                     features,
                     raw_handle,
+                    gui_leases,
                     ..
                 } => launch_ui(LaunchUiRequest {
                     plugin,
                     features: features.clone(),
                     instance_handle: *raw_handle,
                     port_write: Box::new(forward_port_write),
+                    keep_alive: gui_leases.lease().map(|lease| Box::new(lease) as Box<dyn Send>),
                 })
                 .map(|handle| {
                     // Hosts tell a new LV2 GUI every control port's value; a GUI

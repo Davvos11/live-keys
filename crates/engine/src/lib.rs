@@ -9,9 +9,9 @@ pub use engine::{
     Engine, LoadedPluginMeta, PluginEditor, PluginKey, SLOT_COUNT, SlotChain, SlotSettings,
 };
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
-pub use live_keys_core::MidiFilter;
+pub use live_keys_core::{MidiEvent, MidiFilter};
 pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo};
-pub use live_keys_lv2_host::{livi, lv2_raw};
+pub use live_keys_lv2_host::{GuiLease, GuiLeases, livi, lv2_raw};
 pub use live_keys_vst3_host::{EditCallback, Vst3Controller};
 pub use midi::{find_midi_port, list_midi_ports};
 pub use paths::default_plugin_search_paths;

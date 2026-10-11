@@ -390,6 +390,11 @@ impl Vst3Editor {
         self.closed
     }
 
+    /// The X11 window the editor is embedded in (for tests resizing it).
+    pub fn window(&self) -> u32 {
+        self.window.id
+    }
+
     /// Detaches the editor and destroys its window. A no-op if already closed.
     pub fn close(&mut self) {
         if self.closed {

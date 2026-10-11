@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<PortMessage>();
     let handle = {
         let meta = engine.plugin(key).unwrap();
-        let PluginEditor::Lv2 { plugin, features, raw_handle, .. } = &meta.editor else {
+        let PluginEditor::Lv2 { plugin, features, raw_handle, gui_leases, .. } = &meta.editor else {
             anyhow::bail!("not LV2");
         };
         live_keys_lv2_ui::launch_ui(LaunchUiRequest {
@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
             port_write: Box::new(move |message| {
                 let _ = tx.send(message);
             }),
+            keep_alive: gui_leases.lease().map(|lease| Box::new(lease) as Box<dyn Send>),
         })?
     };
     println!("GUI open for {seconds}s");
@@ -61,9 +62,7 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(16));
     }
     println!("atoms GUI → DSP: {to_dsp}, DSP → GUI: {to_gui} (largest body {largest} bytes)");
-    // The GUI tears down on its own thread and may still read the plugin
-    // instance (Surge XT does), so give it time before the engine frees it.
+    // Dropping the engine waits for the GUI to finish closing (its lease).
     drop(handle);
-    std::thread::sleep(Duration::from_secs(1));
     Ok(())
 }

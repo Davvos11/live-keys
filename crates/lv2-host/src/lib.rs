@@ -1,7 +1,9 @@
 mod preset;
 
 use std::cell::OnceCell;
-use std::sync::Arc;
+use std::mem::ManuallyDrop;
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use live_keys_core::{
     HostedPlugin, MidiEvent, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind,
@@ -26,6 +28,29 @@ pub const PORT_EVENT_BYTES: usize = 512;
 /// Capacity of each direction of a plugin's GUI channel, in events. A GUI asking
 /// for the plugin's whole state (setBfree does on opening) gets a burst of them.
 const PORT_EVENT_CAPACITY: usize = 512;
+/// How long dropping an [`Lv2Plugin`] waits for its GUIs to finish tearing down
+/// before leaking the instance instead (see [`GuiLease`]).
+const GUI_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Keeps an [`Lv2Plugin`]'s DSP instance alive while held: a GUI hosting thread
+/// holds one until its UI is completely torn down, since a UI with
+/// `instance-access` can still use the instance while closing (Surge XT's does).
+/// Dropping the plugin waits for every lease to go, up to
+/// [`GUI_TEARDOWN_TIMEOUT`]; a GUI that doesn't finish by then (a wedged one)
+/// gets the instance leaked rather than freed under it.
+pub struct GuiLease(#[allow(dead_code)] Arc<()>);
+
+/// Where [`GuiLease`]s for one plugin come from; holding it doesn't keep the
+/// plugin alive.
+#[derive(Clone)]
+pub struct GuiLeases(Weak<()>);
+
+impl GuiLeases {
+    /// A lease, unless the plugin is already gone.
+    pub fn lease(&self) -> Option<GuiLease> {
+        self.0.upgrade().map(GuiLease)
+    }
+}
 
 /// An atom passed between a plugin and its GUI through one of its atom ports,
 /// fixed-size so it can cross to and from the audio thread without allocating.
@@ -90,6 +115,20 @@ fn plugin_kind(plugin: &livi::Plugin) -> PluginKind {
 const LV2_CORE: &str = "http://lv2plug.in/ns/lv2core#";
 const PORT_PROPS: &str = "http://lv2plug.in/ns/ext/port-props#";
 const UNITS: &str = "http://lv2plug.in/ns/extensions/units#";
+const RESIZE_PORT: &str = "http://lv2plug.in/ns/ext/resize-port#";
+
+/// The buffer size for atom port `port`: [`MIDI_EVENT_BUFFER_BYTES`], or the
+/// port's `rsz:minimumSize` if that's more (x42-eq wants 4320 bytes and
+/// disables its GUI's spectrum display with less).
+fn atom_buffer_bytes(world: &livi::World, plugin: &livi::Plugin, port: u32) -> usize {
+    let minimum_size = world.raw().new_uri(&format!("{RESIZE_PORT}minimumSize"));
+    plugin
+        .raw()
+        .port_by_index(port as usize)
+        .and_then(|port| port.get(&minimum_size))
+        .and_then(|size| size.as_int())
+        .map_or(MIDI_EVENT_BUFFER_BYTES, |size| (size.max(0) as usize).max(MIDI_EVENT_BUFFER_BYTES))
+}
 
 /// A `ParamInfo` for every control-input port, read from the plugin's metadata:
 /// kind from `lv2:toggled`/`lv2:integer`/`lv2:enumeration` and the
@@ -320,9 +359,6 @@ impl Lv2Host {
         let output_buffers = (0..port_counts.audio_outputs)
             .map(|_| vec![0.0f32; self.max_block_size])
             .collect();
-        let atom_sequence_out = (0..port_counts.atom_sequence_outputs)
-            .map(|_| LV2AtomSequence::new(&self.features, MIDI_EVENT_BUFFER_BYTES))
-            .collect();
         let cv_out_buffers = (0..port_counts.cv_outputs)
             .map(|_| vec![0.0f32; self.max_block_size])
             .collect();
@@ -333,6 +369,14 @@ impl Lv2Host {
         };
         let atom_in_ports = port_indices(livi::PortType::AtomSequenceInput);
         let atom_out_ports = port_indices(livi::PortType::AtomSequenceOutput);
+        let atom_buffers = |ports: &[u32]| -> Vec<LV2AtomSequence> {
+            ports
+                .iter()
+                .map(|&port| LV2AtomSequence::new(&self.features, atom_buffer_bytes(&self.world, &plugin, port)))
+                .collect()
+        };
+        let atom_sequence_out = atom_buffers(&atom_out_ports);
+        let atom_in = atom_buffers(&atom_in_ports);
         // Only plugins with atom ports can talk to their GUI through them.
         let (ui_channel, ui_ends) = if atom_in_ports.is_empty() && atom_out_ports.is_empty() {
             (None, None)
@@ -346,11 +390,9 @@ impl Lv2Host {
             name,
             plugin,
             features: self.features.clone(),
-            instance,
-            atom_in: atom_in_ports
-                .iter()
-                .map(|_| LV2AtomSequence::new(&self.features, MIDI_EVENT_BUFFER_BYTES))
-                .collect(),
+            instance: ManuallyDrop::new(instance),
+            gui_leases: Arc::new(()),
+            atom_in,
             atom_in_ports,
             atom_out_ports,
             ui_channel,
@@ -376,7 +418,10 @@ pub struct Lv2Plugin {
     name: String,
     plugin: livi::Plugin,
     features: Arc<livi::Features>,
-    instance: livi::Instance,
+    /// Dropped by hand, once no GUI uses it any more (see `Drop`).
+    instance: ManuallyDrop<livi::Instance>,
+    /// Counts the plugin's [`GuiLease`]s, besides this one.
+    gui_leases: Arc<()>,
     /// One per atom-sequence input port (a pure effect commonly has none, unlike
     /// an instrument), each getting the block's MIDI and any atoms its GUI sent
     /// to that port (see `process`).
@@ -425,8 +470,6 @@ impl Lv2Plugin {
         &self.features
     }
 
-    /// The raw handle to the running DSP instance, for the LV2 `instance-access`
-    /// feature — some plugin UIs (e.g. Helm's) require direct access to it.
     /// What saving and restoring presets needs of this instance.
     pub fn instance_ref(&self) -> InstanceRef {
         let instance = self.instance.raw().instance();
@@ -436,6 +479,9 @@ impl Lv2Plugin {
         }
     }
 
+    /// The raw handle to the running DSP instance, for the LV2 `instance-access`
+    /// feature — some plugin UIs (e.g. Helm's) require direct access to it. A GUI
+    /// using it should hold a [`GuiLease`] (see [`Lv2Plugin::gui_leases`]).
     pub fn raw_handle(&self) -> lv2_raw::core::LV2Handle {
         self.instance.raw().instance().handle()
     }
@@ -455,6 +501,28 @@ impl Lv2Plugin {
     /// is full, so the owner should drain it even with no GUI open.
     pub fn take_ui_channel(&mut self) -> Option<UiChannel> {
         self.ui_channel.take()
+    }
+
+    /// Where the plugin's GUIs get their [`GuiLease`]s.
+    pub fn gui_leases(&self) -> GuiLeases {
+        GuiLeases(Arc::downgrade(&self.gui_leases))
+    }
+}
+
+impl Drop for Lv2Plugin {
+    fn drop(&mut self) {
+        // Never runs on the audio thread (plugins leave it via the retired queue),
+        // so waiting here is allowed.
+        let deadline = Instant::now() + GUI_TEARDOWN_TIMEOUT;
+        while Arc::strong_count(&self.gui_leases) > 1 {
+            if Instant::now() >= deadline {
+                log::warn!("{}: its GUI didn't finish closing, leaking the plugin instance", self.name);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: dropped exactly once, here, and never used after.
+        unsafe { ManuallyDrop::drop(&mut self.instance) };
     }
 }
 

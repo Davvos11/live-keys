@@ -4,19 +4,20 @@ use live_keys_core::{
     Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
     PluginInfo, PluginKind, PresetInfo, Producer, PushError, midi_ring_buffer, ring_buffer,
 };
-use live_keys_lv2_host::{InstanceRef, Lv2Host, PortEvent, UiChannel, livi, lv2_raw};
+use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, PortEvent, UiChannel, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
 use crate::midi::find_midi_port;
 use crate::paths::build_lv2_path;
 use crate::rack::{
-    BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section,
+    BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section, SlotPeaks,
 };
 
 /// Number of plugin slots in the rack. Every slot sees the same MIDI input (each
@@ -73,6 +74,9 @@ pub enum PluginEditor {
         /// Atoms between the plugin's atom ports and its GUI, if it has any (see
         /// [`Engine::send_ui_atom`], [`Engine::drain_ui_events`]).
         ui_channel: Option<UiChannel>,
+        /// A GUI using `raw_handle` holds one of these while open (see
+        /// [`GuiLease`](live_keys_lv2_host::GuiLease)).
+        gui_leases: GuiLeases,
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
@@ -155,6 +159,10 @@ struct RunningStream {
     _midi_connection: midir::MidiInputConnection<()>,
     sample_rate: f64,
     command_tx: Producer<RackCommand>,
+    /// The MIDI queue's producer, shared by the MIDI input callback and
+    /// [`Engine::send_midi`] (neither runs on the audio thread, so a lock is fine).
+    midi_tx: Arc<Mutex<Producer<MidiEvent>>>,
+    peaks: SlotPeaks,
     retired_rx: Consumer<BoxedPlugin>,
     lent_rx: Consumer<BoxedPlugin>,
     /// Where a lent plugin goes back to that arrived too late (see
@@ -302,6 +310,23 @@ impl Engine {
         if slot < SLOT_COUNT {
             self.settings[slot].gain = gain;
             self.push_command(RackCommand::Gain { slot, gain });
+        }
+    }
+
+    /// Plays a MIDI event as if it came from the MIDI input (an on-screen
+    /// keyboard, tests). Fails if the stream isn't running or the queue is full.
+    pub fn send_midi(&mut self, event: MidiEvent) -> Result<()> {
+        let running = self.running.as_ref().context("audio stream isn't running")?;
+        let mut midi_tx = running.midi_tx.lock().map_err(|_| anyhow::anyhow!("MIDI queue poisoned"))?;
+        midi_tx.push(event).map_err(|_| anyhow::anyhow!("MIDI queue full"))
+    }
+
+    /// The loudest sample (absolute, after the slot's gain) slot `slot` played
+    /// since the last call, for a level meter; 0 when stopped.
+    pub fn take_slot_peak(&mut self, slot: usize) -> f32 {
+        match (&self.running, slot < SLOT_COUNT) {
+            (Some(running), true) => f32::from_bits(running.peaks[slot].swap(0, Ordering::Relaxed)),
+            _ => 0.0,
         }
     }
 
@@ -703,6 +728,7 @@ impl Engine {
                     raw_handle: plugin.raw_handle(),
                     instance: plugin.instance_ref(),
                     ui_channel,
+                    gui_leases: plugin.gui_leases(),
                 },
                 values: HashMap::new(),
             };
@@ -824,7 +850,10 @@ impl Engine {
         let channels = output_config.channels() as usize;
         log::info!("Output device: {output_device} ({channels} ch @ {sample_rate} Hz)");
 
-        let (mut midi_tx, mut midi_rx) = midi_ring_buffer(MIDI_RING_CAPACITY);
+        let (midi_tx, mut midi_rx) = midi_ring_buffer(MIDI_RING_CAPACITY);
+        let midi_tx = Arc::new(Mutex::new(midi_tx));
+        let midi_tx_input = midi_tx.clone();
+        let peaks = SlotPeaks::default();
         let (command_tx, mut command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
         let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
@@ -841,6 +870,7 @@ impl Engine {
                     // No sample-accurate timestamp is available here, so events are
                     // applied at the start of whichever audio block consumes them.
                     if let Some(event) = MidiEvent::from_raw(0, bytes)
+                        && let Ok(mut midi_tx) = midi_tx_input.lock()
                         && let Err(err) = midi_tx.push(event)
                     {
                         // This is midir's own callback thread, not the audio thread,
@@ -861,6 +891,7 @@ impl Engine {
             channels,
             self.max_block_size,
             MIDI_RING_CAPACITY,
+            peaks.clone(),
         );
         let stream_config: cpal::StreamConfig = output_config.into();
         let stream = output_device.build_output_stream(
@@ -884,6 +915,8 @@ impl Engine {
             _midi_connection: midi_connection,
             sample_rate,
             command_tx,
+            midi_tx,
+            peaks,
             retired_rx,
             lent_rx,
             overdue_lend: None,

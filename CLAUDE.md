@@ -68,6 +68,16 @@ cargo run -p live-keys-lv2-ui --example test_setbfree --release -- [seconds] [pl
   # a plugin's GUI through a live engine (default setBfree, whose GUI uses atom ports only;
   # needs an audio device and a MIDI port); prints how many messages crossed each way
 
+# Plugin check: one representative of every class of plugin with a known quirk (see
+# crates/plugin-check/src/cases.rs), each in a child process: load, play a note (heard?),
+# set a parameter and read it back (and hear it, where one is a volume), open the GUI (drawn?),
+# resize it (does the widget follow?), close it and unload at once. ~2 minutes; windows pop up.
+# Needs an X display, audio output and MIDI port; plugins not installed are skipped.
+cargo run -p live-keys-plugin-check --release              # all cases; exit code 1 on a failure
+cargo run -p live-keys-plugin-check --release -- vst3 lsp  # cases whose name contains a filter
+cargo run -p live-keys-plugin-check --release -- --info <plugin id>   # GUI kind + params, for a new case
+# Run it after touching plugin hosting or GUI hosting, and add a case when a plugin shows a new quirk.
+
 # Manual VST3 smoke tests (not part of the app)
 cargo run -p live-keys-vst3-host --example smoke --release   # scan, then render a chord offline
                                                              # through every instrument found
@@ -102,7 +112,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with seven crates, isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with eight crates, isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -168,8 +178,9 @@ behind format-agnostic cores:
   once with `Lv2Plugin::take_ui_channel`. `process` puts the GUI's atoms into the matching atom
   input at frame 0, ahead of the block's MIDI. Some GUIs talk to their DSP only this way —
   setBfree has no control ports at all: settings go GUI → `control` input, and its state and
-  lit keys come back on `notify` (`ui:portNotification`). CV outputs go to a discarded scratch
-  buffer. `plugin_kind` classifies at scan time: an instrument by class (or audio out + MIDI in
+  lit keys come back on `notify` (`ui:portNotification`). Atom buffers are
+  `MIDI_EVENT_BUFFER_BYTES`, or a port's `rsz:minimumSize` if larger (x42-eq wants 4320). CV
+  outputs go to a discarded scratch buffer. `plugin_kind` classifies at scan time: an instrument by class (or audio out + MIDI in
   and no audio in), a MIDI effect by having atom outputs (or the "MIDI Plugin" class) and no
   audio ports at all, an audio effect otherwise (onset triggers — audio in, MIDI out — included,
   since a MIDI chain has no audio to give them). `Lv2Plugin::process` pushes
@@ -178,6 +189,13 @@ behind format-agnostic cores:
   into persistent per-channel `Vec<f32>` buffers sized to `max_block_size` at instantiation — no
   allocation happens on the audio thread. Audio inputs read per-port `input_buffers` the host
   fills (`audio_input_mut`); CV inputs, which nothing routes, get a shared silent buffer.
+  **GUI leases**: a plugin GUI with `instance-access` can still use the DSP instance while it
+  closes on its own thread (Surge XT's does), so whoever opens one holds a `GuiLease`
+  (`Lv2Plugin::gui_leases()`, a `Weak` the engine keeps in `PluginEditor::Lv2 { gui_leases }`)
+  until the GUI is torn down, and `Lv2Plugin`'s `Drop` waits for its leases (the instance is a
+  `ManuallyDrop`) — up to `GUI_TEARDOWN_TIMEOUT` (3 s), after which the instance is leaked rather
+  than freed under a wedged GUI. Plugins are never dropped on the audio thread, so waiting is
+  fine; it covers every way a plugin goes (removal, stream restart, app exit).
   `Lv2Plugin::params()` returns a `ParamInfo` (port
   index as id) for every control-input port, for a parameter-editor UI, read once at
   instantiation (`read_params`, via the raw `lilv` world/plugin since `livi::Port` lacks this
@@ -286,6 +304,7 @@ behind format-agnostic cores:
   zero timeout; due timers fire once, missed ticks skipped). Handler lists are snapshotted
   before dispatch since callbacks may (un)register re-entrantly. `resizeView` from the plugin
   resizes the window, then calls `onSize`. Non-resizable editors get min=max WM size hints.
+  `Vst3Editor::window()` is its X11 window (for the plugin check).
   Confirmed with Surge XT (JUCE) and OT P1ANO S (HISE/JUCE).
 
 - **`crates/engine`** (`live-keys-engine`) — the real-time wiring (`cpal` + `midir` + an
@@ -313,7 +332,9 @@ behind format-agnostic cores:
     stereo duplicates, stereo → mono takes the left; zeroed when there's no previous stage,
     e.g. effects in a slot without an instrument) — and *sums* the last stage's output, times
     the slot's gain, into cpal's interleaved buffer. Gain changes ramp linearly across one block
-    so fader moves don't click. **Whenever the MIDI chain changes** (insert/remove/move), the
+    so fader moves don't click. Each slot's output peak goes into a shared atomic
+    (`SlotPeaks`, `fetch_max` on the float bits), read and reset by `Engine::take_slot_peak` —
+    a meter. **Whenever the MIDI chain changes** (insert/remove/move), the
     instrument's next block is preceded by CC 123 (all notes off) on all 16 channels: notes a
     removed transposer shifted, or an arpeggiator started, would otherwise never get their
     note-off — the router's note-off tracking only covers what enters the MIDI chain. Unit-tested
@@ -383,6 +404,9 @@ behind format-agnostic cores:
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
   open editor follows (an open LV2 GUI is told by the GUI crate instead, see below).
+  `send_midi(event)` plays MIDI as if from the input port (the MIDI queue's producer is shared
+  with the input callback behind a `Mutex`, neither being the audio thread);
+  `take_slot_peak(slot)` is the slot's loudest sample since the last call.
   `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
   `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
   plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`). `param_text(key, id, value)` is
@@ -436,7 +460,12 @@ behind format-agnostic cores:
   safe to call from more than one thread. The other way, `PluginUiHandle::notify` queues a
   `PortMessage` for the hosting thread, which delivers it on its next idle tick
   (`suil_instance_port_event`, or the External UI descriptor's `port_event`, read as an
-  `Option` since C allows NULL there although `lv2_raw` types it non-null).
+  `Option` since C allows NULL there although `lv2_raw` types it non-null). `LaunchUiRequest`'s
+  `keep_alive` (a `GuiLease`, see lv2-host) is dropped by the hosting thread only after the UI is
+  torn down. UI binaries are first `dlopen`ed with `RTLD_NODELETE` (`pin_library`) so they're
+  never unmapped: x42's UIs leave GLib thread-local data with destructors in their own code on
+  the hosting thread, which ran at thread exit after suil's `dlclose` and crashed the process.
+  `PluginUiHandle::window()` is an X11 UI's window (for the plugin check's resizing).
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
@@ -542,6 +571,19 @@ behind format-agnostic cores:
   `Rack::set_routing` its filter/volume fields. Edits that fire continuously (fader drags)
   mark the config dirty and the poll timer saves it, rather than writing the file per step.
 
+- **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
+  check against real installed plugins, not part of the app (see Common commands). `cases.rs`
+  is the table of plugin classes and their quirks (`Case`: plugin id, role — instrument, or an
+  effect around `mda EPiano` — whether a note should sound, a `ParamCheck` by exact name with an
+  optional dB drop it must cause, what resizing should do — `Resize::Follows`/`Fixed`/
+  `NotByHost`/`NoGui` — whether atoms should cross both ways, a warm-up). `main.rs` runs each
+  case as `plugin-check --case <name>` in a child (the child prints `STEP\t<step>\t<PASS|FAIL|
+  SKIP>\t<detail>` lines; a crash, hang — `CASE_TIMEOUT` — or nonzero exit fails the case, and
+  the child's stderr is shown). Sound is measured with `Engine::take_slot_peak`, GUI windows
+  are looked at and resized from outside through X11 (`x11.rs`: size, first child = the
+  plugin's widget, distinct colours in a pixel sample — at most 2 means a blank window). The
+  GUI side is pumped like the app's poll timer (edits forwarded, `drain_ui_events` to the GUI).
+
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
   around `live-keys-engine` (loads its one `--plugin` into slot 0). Uses `clap` (derive) for CLI args.
 
@@ -636,6 +678,7 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 - `PluginUiHandle` never joins its hosting thread (see its doc comment in
   `crates/lv2-ui-host/src/lib.rs`) — closing/reopening a plugin's GUI must never block the
   caller (typically the GUI's main thread) on that plugin's own teardown code finishing.
+  (Dropping the *plugin* does wait for that, up to 3 s — see GUI leases under lv2-host.)
   Observed concretely with Helm's LV2 build: closing its window very soon after opening
   (before its JUCE wrapper finishes initializing) can wedge its internal message pump inside
   our `run_fn` call — the window goes permanently unresponsive/black and the hosting thread

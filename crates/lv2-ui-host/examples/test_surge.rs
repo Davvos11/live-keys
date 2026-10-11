@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
         port_write: Box::new(|message| {
             println!("{message:?}");
         }),
+        keep_alive: None,
     };
 
     let mut handle = live_keys_lv2_ui::launch_ui(request)?;

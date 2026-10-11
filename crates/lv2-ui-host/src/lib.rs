@@ -4,7 +4,7 @@ mod suil_sys;
 mod x11_ui;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 
 pub use discovery::{UiKind, best_supported_ui};
@@ -43,15 +43,30 @@ pub struct PluginUiHandle {
     close_tx: mpsc::Sender<()>,
     notify_tx: mpsc::Sender<PortMessage>,
     closed: Arc<AtomicBool>,
+    /// The X11 window an X11 UI is embedded in, once created (0 until then, and
+    /// for an External UI, which owns its window).
+    window: Arc<AtomicU32>,
 }
 
 impl PluginUiHandle {
-    fn new(close_tx: mpsc::Sender<()>, notify_tx: mpsc::Sender<PortMessage>, closed: Arc<AtomicBool>) -> Self {
+    fn new(
+        close_tx: mpsc::Sender<()>,
+        notify_tx: mpsc::Sender<PortMessage>,
+        closed: Arc<AtomicBool>,
+        window: Arc<AtomicU32>,
+    ) -> Self {
         Self {
             close_tx,
             notify_tx,
             closed,
+            window,
         }
+    }
+
+    /// The X11 window an X11 UI is embedded in (for tests resizing it), once
+    /// created; `None` before that and for an External UI.
+    pub fn window(&self) -> Option<u32> {
+        Some(self.window.load(Ordering::SeqCst)).filter(|&id| id != 0)
     }
 
     /// Tells the GUI about a port: a control port's new value (e.g. set from
@@ -113,6 +128,25 @@ unsafe fn port_message(
     None
 }
 
+/// glibc's `RTLD_NODELETE` (not in `libloading`).
+const RTLD_NODELETE: std::ffi::c_int = 0x1000;
+
+/// Loads a plugin's UI binary for good: later `dlclose`s (suil's, or ours) leave
+/// it mapped. Some UIs leave thread-local data with destructors in their own
+/// code behind on the hosting thread (x42's, through the GLib they bundle), which
+/// run when the thread exits — after the UI is freed. Unmapped by then, that
+/// crashed the process. JUCE UIs don't survive unloading either (see the VST3
+/// host's never-unload rule).
+fn pin_library(binary_path: &str) -> anyhow::Result<()> {
+    use libloading::os::unix::{Library, RTLD_NOW};
+    // SAFETY: loading the plugin's own UI binary, as suil or the External UI
+    // host is about to anyway; running its initializers is expected.
+    let library = unsafe { Library::open(Some(binary_path), RTLD_NOW | RTLD_NODELETE) }
+        .map_err(|err| anyhow::anyhow!("failed to load UI binary '{binary_path}': {err}"))?;
+    std::mem::forget(library);
+    Ok(())
+}
+
 /// Everything needed to launch a plugin's own GUI, independent of how it's hosted.
 pub struct LaunchUiRequest<'a> {
     pub plugin: &'a livi::Plugin,
@@ -123,6 +157,10 @@ pub struct LaunchUiRequest<'a> {
     /// a knob) or an atom for an atom input. Must be safe to call from a thread
     /// other than wherever `launch_ui` was called from.
     pub port_write: Box<dyn Fn(PortMessage) + Send>,
+    /// Held by the hosting thread until the UI is completely torn down, then
+    /// dropped — for keeping the DSP instance alive while a closing UI may still
+    /// use it (`live_keys_lv2_host::GuiLease`).
+    pub keep_alive: Option<Box<dyn Send>>,
 }
 
 /// Discovers and launches the best UI this host can show for `request.plugin`.

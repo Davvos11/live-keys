@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -120,11 +120,14 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let features = request.features;
     let instance_ptr = SendPtr(request.instance_handle);
     let port_write = request.port_write;
+    let keep_alive = request.keep_alive;
 
     let (close_tx, close_rx) = mpsc::channel::<()>();
     let (notify_tx, notify_rx) = mpsc::channel::<PortMessage>();
     let closed = Arc::new(AtomicBool::new(false));
     let closed_for_thread = closed.clone();
+    let window = Arc::new(AtomicU32::new(0));
+    let window_for_thread = window.clone();
 
     // Intentionally not kept/joined — see `PluginUiHandle`'s docs for why.
     std::thread::Builder::new()
@@ -144,14 +147,17 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
                 &closed_for_thread,
                 &close_rx,
                 &notify_rx,
+                &window_for_thread,
             ) {
                 log::error!("X11 UI hosting failed: {err:#}");
             }
+            // The UI is gone; the plugin may be freed now.
+            drop(keep_alive);
             closed_for_thread.store(true, Ordering::SeqCst);
         })
         .context("failed to spawn X11 UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, notify_tx, closed))
+    Ok(PluginUiHandle::new(close_tx, notify_tx, closed, window))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -169,7 +175,10 @@ fn run(
     closed: &Arc<AtomicBool>,
     close_rx: &mpsc::Receiver<()>,
     notify_rx: &mpsc::Receiver<PortMessage>,
+    window_id: &AtomicU32,
 ) -> Result<()> {
+    // Before suil loads it, so its dlclose in `suil_instance_free` keeps it.
+    crate::pin_library(binary_path)?;
     let (conn, screen_num) = x11rb::connect(None).context("failed to connect to X server")?;
     let screen = &conn.setup().roots[screen_num];
     let window = conn.generate_id()?;
@@ -189,6 +198,7 @@ fn run(
             .event_mask(EventMask::STRUCTURE_NOTIFY),
     )?;
 
+    window_id.store(window, Ordering::SeqCst);
     let wm_protocols = conn.intern_atom(false, b"WM_PROTOCOLS")?.reply()?.atom;
     let wm_delete_window = conn.intern_atom(false, b"WM_DELETE_WINDOW")?.reply()?.atom;
     conn.change_property32(

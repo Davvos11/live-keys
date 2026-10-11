@@ -47,6 +47,7 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
     let features = request.features;
     let instance_ptr = SendPtr(request.instance_handle);
     let port_write = request.port_write;
+    let keep_alive = request.keep_alive;
 
     let (close_tx, close_rx) = mpsc::channel::<()>();
     let (notify_tx, notify_rx) = mpsc::channel::<PortMessage>();
@@ -71,11 +72,13 @@ pub(crate) fn launch(request: LaunchUiRequest<'_>, ui: UI) -> Result<PluginUiHan
             ) {
                 log::error!("external UI hosting failed: {err:#}");
             }
+            // The UI is gone; the plugin may be freed now.
+            drop(keep_alive);
             closed_for_thread.store(true, Ordering::SeqCst);
         })
         .context("failed to spawn external UI hosting thread")?;
 
-    Ok(PluginUiHandle::new(close_tx, notify_tx, closed))
+    Ok(PluginUiHandle::new(close_tx, notify_tx, closed, Default::default()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -94,6 +97,7 @@ fn run(
     // SAFETY: dlopen'ing a plugin's own UI binary. The library is kept alive for
     // this whole function (dropped last), so descriptor/instantiate/cleanup
     // pointers borrowed from it stay valid throughout.
+    crate::pin_library(binary_path)?;
     let library = unsafe { libloading::Library::new(binary_path) }
         .with_context(|| format!("failed to load UI binary '{binary_path}'"))?;
     let descriptor_ptr = find_descriptor(&library, ui_uri, binary_path)?;

@@ -3227,6 +3227,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "live-keys-plugin-check"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "live-keys-engine",
+ "live-keys-lv2-ui",
+ "live-keys-vst3-ui",
+ "x11rb",
+]
+
+[[package]]
 name = "live-keys-vst3-host"
 version = "0.1.0"
 dependencies = [

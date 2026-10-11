@@ -7,7 +7,15 @@ use live_keys_core::{
     PushError,
 };
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::engine::{SLOT_COUNT, SlotSettings};
+
+/// Each slot's output peak (absolute sample value, after its gain, as `f32`
+/// bits) since the control thread last took it — a meter. Non-negative floats
+/// order like their bits, so `fetch_max` on the bits keeps the larger one.
+pub(crate) type SlotPeaks = Arc<[AtomicU32; SLOT_COUNT]>;
 
 /// Most audio effects one slot's chain can hold after its instrument.
 pub const MAX_EFFECTS: usize = 8;
@@ -208,6 +216,7 @@ pub(crate) struct Rack {
     lent_tx: Producer<BoxedPlugin>,
     channels: usize,
     max_block_size: usize,
+    peaks: SlotPeaks,
 }
 
 impl Rack {
@@ -218,6 +227,7 @@ impl Rack {
         channels: usize,
         max_block_size: usize,
         midi_capacity: usize,
+        peaks: SlotPeaks,
     ) -> Self {
         Self {
             slots: std::array::from_fn(|slot| SlotRuntime {
@@ -236,6 +246,7 @@ impl Rack {
             lent_tx,
             channels,
             max_block_size,
+            peaks,
         }
     }
 
@@ -398,7 +409,7 @@ impl Rack {
         {
             let frames = data_chunk.len() / channels;
             data_chunk.fill(0.0);
-            for runtime in &mut self.slots {
+            for (slot, runtime) in self.slots.iter_mut().enumerate() {
                 let input: &[MidiEvent] = if chunk_index == 0 { &runtime.midi } else { &[] };
                 let midi = process_midi_chain(
                     &mut runtime.midi_chain,
@@ -414,6 +425,7 @@ impl Rack {
                 let output_channels = output_stage.audio_output_count();
                 if output_channels > 0 {
                     let gain_step = (runtime.target_gain - runtime.gain) / frames as f32;
+                    let mut peak = 0.0f32;
                     for channel in 0..channels {
                         let rendered = output_stage.audio_output(channel % output_channels);
                         for (frame_index, (frame, sample)) in
@@ -421,8 +433,11 @@ impl Rack {
                         {
                             let gain = runtime.gain + gain_step * frame_index as f32;
                             frame[channel] += sample * gain;
+                            peak = peak.max((sample * gain).abs());
                         }
                     }
+                    // `max` drops NaN; a NaN-producing plugin reads as silent.
+                    self.peaks[slot].fetch_max(peak.to_bits(), Ordering::Relaxed);
                 }
                 runtime.gain = runtime.target_gain;
             }
@@ -484,7 +499,7 @@ mod tests {
     fn rack() -> Rack {
         let (retired_tx, _retired_rx) = ring_buffer(64);
         let (lent_tx, _lent_rx) = ring_buffer(4);
-        Rack::new(&Default::default(), retired_tx, lent_tx, 2, BLOCK, 16)
+        Rack::new(&Default::default(), retired_tx, lent_tx, 2, BLOCK, 16, Default::default())
     }
 
     /// Renders one block and returns slot 0's first output sample (every slot but

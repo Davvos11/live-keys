@@ -25,6 +25,7 @@ fn open_and_wait_for_close(
         port_write: Box::new(move |message| {
             println!("[round {round}] {message:?}");
         }),
+        keep_alive: plugin.gui_leases().lease().map(|lease| Box::new(lease) as Box<dyn Send>),
     };
     let mut handle = live_keys_lv2_ui::launch_ui(request)?;
     println!("[round {round}] UI launched — close the window (up to {WAIT_FOR_CLOSE:?})");
