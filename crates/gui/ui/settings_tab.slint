@@ -1,5 +1,57 @@
-import { Button, ComboBox, GroupBox, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
-import { AppState, AppLogic } from "globals.slint";
+import { Button, CheckBox, ComboBox, GroupBox, Palette, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { AppState, AppLogic, MidiInputRow } from "globals.slint";
+
+// One MIDI input: its number, a button listing its devices that opens a
+// checklist of them, and (but for the first) a remove button.
+component MidiInputSetting inherits HorizontalLayout {
+    in property <int> index;
+    in property <MidiInputRow> input;
+
+    spacing: 6px;
+
+    Text {
+        text: "Input \{root.index + 1}";
+        vertical-alignment: center;
+        min-width: 60px;
+    }
+    devices-button := Button {
+        horizontal-stretch: 1;
+        text: root.input.summary + "  ▾";
+        clicked => { popup.show(); }
+    }
+    if root.index > 0 : Button {
+        text: "✕";
+        clicked => { AppLogic.remove-midi-input(root.index); }
+    }
+
+    popup := PopupWindow {
+        x: devices-button.x;
+        y: devices-button.y + devices-button.height;
+        width: devices-button.width;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 4px;
+        }
+        VerticalBox {
+            for device in root.input.devices : CheckBox {
+                text: device.available ? device.name : device.name + " (not connected)";
+                checked: device.checked;
+                // Clicking sets `checked` itself, replacing the binding above.
+                property <bool> source: device.checked;
+                changed source => { self.checked = self.source; }
+                toggled => { AppLogic.toggle-midi-device(root.index, device.name); }
+            }
+            if root.input.devices.length == 0 : Text {
+                text: "No MIDI devices found";
+                color: gray;
+            }
+        }
+    }
+}
 
 export component SettingsTab inherits VerticalBox {
     GroupBox {
@@ -12,11 +64,20 @@ export component SettingsTab inherits VerticalBox {
     }
 
     GroupBox {
-        title: "MIDI Input";
-        ComboBox {
-            model: AppState.midi-ports;
-            current-index: AppState.selected-midi-index;
-            selected(value) => { AppLogic.select-midi-port(value); }
+        title: "MIDI Inputs";
+        VerticalBox {
+            for input[index] in AppState.midi-inputs : MidiInputSetting {
+                index: index;
+                input: input;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: "+ Add MIDI input";
+                    enabled: AppState.midi-inputs.length < AppState.max-midi-inputs;
+                    clicked => { AppLogic.add-midi-input(); }
+                }
+            }
         }
     }
 

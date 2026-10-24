@@ -3,14 +3,14 @@
 //! allocates after construction.
 
 use live_keys_core::{
-    HostedPlugin, MidiConsumer, MidiEvent, MidiFilter, MidiRouter, ParamChange, Producer,
-    PushError,
+    Consumer, HostedPlugin, MidiEvent, MidiFilter, MidiRouter, ParamChange, Producer, PushError,
 };
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::engine::{SLOT_COUNT, SlotSettings};
+use crate::midi::RoutedMidi;
 
 /// Each slot's output peak (absolute sample value, after its gain, as `f32`
 /// bits) since the control thread last took it — a meter. Non-negative floats
@@ -208,7 +208,7 @@ fn feed_inputs(stage: &mut dyn HostedPlugin, source: Option<&dyn HostedPlugin>, 
 /// Every slot's chain and mixer state, owned by the audio callback.
 pub(crate) struct Rack {
     slots: [SlotRuntime; SLOT_COUNT],
-    midi_batch: Vec<MidiEvent>,
+    midi_batch: Vec<RoutedMidi>,
     /// Plugins taken out of a chain, handed back to the control thread to drop —
     /// a plugin's teardown can deallocate or block.
     retired_tx: Producer<BoxedPlugin>,
@@ -383,16 +383,16 @@ impl Rack {
 
     /// Renders one callback: drains MIDI, runs every slot's chain, and sums the
     /// slots' outputs (each at its gain) into the interleaved `data`.
-    pub fn render(&mut self, midi_rx: &mut MidiConsumer, data: &mut [f32]) {
+    pub fn render(&mut self, midi_rx: &mut Consumer<RoutedMidi>, data: &mut [f32]) {
         self.midi_batch.clear();
         while let Ok(event) = midi_rx.pop() {
             self.midi_batch.push(event);
         }
         for runtime in &mut self.slots {
             runtime.midi.clear();
-            for event in &self.midi_batch {
-                if runtime.router.accept(event) {
-                    runtime.midi.push(*event);
+            for routed in &self.midi_batch {
+                if runtime.router.accept(routed.inputs, &routed.event) {
+                    runtime.midi.push(routed.event);
                 }
             }
         }
@@ -448,7 +448,7 @@ impl Rack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use live_keys_core::{midi_ring_buffer, ring_buffer};
+    use live_keys_core::{ALL_INPUTS, ring_buffer};
 
     const BLOCK: usize = 16;
 
@@ -505,7 +505,7 @@ mod tests {
     /// Renders one block and returns slot 0's first output sample (every slot but
     /// 0 is empty).
     fn render(rack: &mut Rack) -> f32 {
-        let (_midi_tx, mut midi_rx) = midi_ring_buffer(1);
+        let (_midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(1);
         let mut data = vec![0.0; 2 * BLOCK];
         rack.render(&mut midi_rx, &mut data);
         assert!(data.iter().all(|&s| s == data[0]), "every sample should match");
@@ -674,10 +674,11 @@ mod tests {
                 }),
             });
         }
-        let (mut midi_tx, mut midi_rx) = midi_ring_buffer(4);
+        let (mut midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(4);
         let mut play = |rack: &mut Rack, note: Option<u8>| {
             if let Some(note) = note {
-                midi_tx.push(MidiEvent::from_raw(0, &[0x90, note, 100]).unwrap()).unwrap();
+                let event = MidiEvent::from_raw(0, &[0x90, note, 100]).unwrap();
+                midi_tx.push(RoutedMidi { inputs: ALL_INPUTS, event }).unwrap();
             }
             let mut data = vec![0.0; 2 * BLOCK];
             rack.render(&mut midi_rx, &mut data);

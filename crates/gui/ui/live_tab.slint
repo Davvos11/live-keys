@@ -147,6 +147,22 @@ component SlotPanel inherits GroupBox {
         HorizontalLayout {
             spacing: 6px;
             Text {
+                text: "Inputs";
+                vertical-alignment: center;
+            }
+            for listening[input] in root.slot.midi-inputs : Button {
+                text: input + 1;
+                // `primary`, not `checked`: the widget never writes it, so it
+                // keeps following the model.
+                primary: listening;
+                clicked => { AppLogic.toggle-slot-input(root.slot-index, input); }
+            }
+            Rectangle { }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
                 text: "Channel";
                 vertical-alignment: center;
             }

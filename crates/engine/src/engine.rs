@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use live_keys_core::{
-    Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
-    PluginInfo, PluginKind, PresetInfo, Producer, PushError, midi_ring_buffer, ring_buffer,
+    ALL_INPUTS, Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
+    PluginInfo, PluginKind, PresetInfo, Producer, PushError, ring_buffer,
 };
 use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, PortEvent, UiChannel, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host};
@@ -10,11 +10,11 @@ use live_keys_vst3_host::{Vst3Controller, Vst3Host};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
-use crate::midi::find_midi_port;
+use crate::midi::{MidiInputs, RoutedMidi};
 use crate::paths::build_lv2_path;
 use crate::rack::{
     BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section, SlotPeaks,
@@ -152,16 +152,12 @@ impl SlotChain {
     }
 }
 
-/// The running output stream + MIDI connection, and the control-thread ends of the
-/// queues into/out of its audio callback.
+/// The running output stream, and the control-thread ends of the queues
+/// into/out of its audio callback (but MIDI's, which is in [`MidiInputs`]).
 struct RunningStream {
     _stream: cpal::Stream,
-    _midi_connection: midir::MidiInputConnection<()>,
     sample_rate: f64,
     command_tx: Producer<RackCommand>,
-    /// The MIDI queue's producer, shared by the MIDI input callback and
-    /// [`Engine::send_midi`] (neither runs on the audio thread, so a lock is fine).
-    midi_tx: Arc<Mutex<Producer<MidiEvent>>>,
     peaks: SlotPeaks,
     retired_rx: Consumer<BoxedPlugin>,
     lent_rx: Consumer<BoxedPlugin>,
@@ -205,6 +201,7 @@ pub struct Engine {
     // Declared (so dropped) before the hosts: the stream's callback and retired
     // queue can still hold plugins, and an LV2 plugin must not outlive its world.
     running: Option<RunningStream>,
+    midi_inputs: MidiInputs,
     audio_host: cpal::Host,
     lv2: Lv2Host,
     vst3: Vst3Host,
@@ -224,6 +221,7 @@ impl Engine {
             vst3: Vst3Host::new(max_block_size, &[]),
             max_block_size,
             running: None,
+            midi_inputs: MidiInputs::new(),
             slots: Default::default(),
             settings: Default::default(),
             next_key: 0,
@@ -313,12 +311,29 @@ impl Engine {
         }
     }
 
-    /// Plays a MIDI event as if it came from the MIDI input (an on-screen
+    /// Plays a MIDI event as if it came from every MIDI input (an on-screen
     /// keyboard, tests). Fails if the stream isn't running or the queue is full.
     pub fn send_midi(&mut self, event: MidiEvent) -> Result<()> {
-        let running = self.running.as_ref().context("audio stream isn't running")?;
-        let mut midi_tx = running.midi_tx.lock().map_err(|_| anyhow::anyhow!("MIDI queue poisoned"))?;
-        midi_tx.push(event).map_err(|_| anyhow::anyhow!("MIDI queue full"))
+        let mut midi_tx = self.midi_inputs.tx.lock().map_err(|_| anyhow::anyhow!("MIDI queue poisoned"))?;
+        let midi_tx = midi_tx.as_mut().context("audio stream isn't running")?;
+        midi_tx
+            .push(RoutedMidi { inputs: ALL_INPUTS, event })
+            .map_err(|_| anyhow::anyhow!("MIDI queue full"))
+    }
+
+    /// Sets which MIDI devices (by [`midi_device_name`](crate::midi_device_name))
+    /// feed each MIDI input — input `n` is bit `n` of a slot's
+    /// [`MidiFilter::inputs`] — connecting those plugged in now. Returns every
+    /// MIDI input port present. Kept across stream restarts.
+    pub fn set_midi_inputs(&mut self, devices: Vec<Vec<String>>) -> Vec<String> {
+        self.midi_inputs.set_devices(devices)
+    }
+
+    /// Connects assigned MIDI devices that were plugged in since the last call
+    /// and lets go of ones that went away; call it periodically. Returns every
+    /// MIDI input port present.
+    pub fn sync_midi_inputs(&mut self) -> Vec<String> {
+        self.midi_inputs.sync()
     }
 
     /// The loudest sample (absolute, after the slot's gain) slot `slot` played
@@ -367,13 +382,14 @@ impl Engine {
         self.vst3 = Vst3Host::new(self.max_block_size, extra_dirs);
     }
 
-    /// Stops the running stream and MIDI connection, if any, and empties every slot.
+    /// Stops the running stream, if any, and empties every slot. MIDI devices stay
+    /// connected (their events are dropped until a stream runs again).
     pub fn stop(&mut self) {
         self.drop_stream_async();
         self.slots = Default::default();
     }
 
-    /// Moves any currently running stream/MIDI connection to a throwaway thread for
+    /// Moves any currently running stream to a throwaway thread for
     /// teardown, rather than dropping them in place. `cpal`'s ALSA `Stream::drop()`
     /// joins its own internal audio thread; if that thread is stuck for any reason
     /// (observed after a previous session's plugin UI wedged internally — see
@@ -382,6 +398,9 @@ impl Engine {
     /// forever. A stuck old thread is abandoned (leaked until the app exits) rather
     /// than allowed to freeze anything new.
     fn drop_stream_async(&mut self) {
+        if let Ok(mut midi_tx) = self.midi_inputs.tx.lock() {
+            *midi_tx = None;
+        }
         if let Some(running) = self.running.take() {
             std::thread::spawn(move || drop(running));
         }
@@ -833,11 +852,11 @@ impl Engine {
     }
 
     /// (Re)starts the output stream on `audio_filter` (or the default output device),
-    /// driven by `midi_filter` (or the first MIDI input port). Any plugins already
+    /// driven by the MIDI inputs (see [`Engine::set_midi_inputs`]). Any plugins already
     /// loaded are re-instantiated (at default parameter values, with new keys)
     /// against the new stream, since its sample rate may differ; one that fails to
     /// reload is left out and its error logged.
-    pub fn start(&mut self, audio_filter: Option<&str>, midi_filter: Option<&str>) -> Result<()> {
+    pub fn start(&mut self, audio_filter: Option<&str>) -> Result<()> {
         let output_device = find_output_device(&self.audio_host, audio_filter)?;
         let output_config = output_device.default_output_config()?;
         if output_config.sample_format() != cpal::SampleFormat::F32 {
@@ -850,39 +869,11 @@ impl Engine {
         let channels = output_config.channels() as usize;
         log::info!("Output device: {output_device} ({channels} ch @ {sample_rate} Hz)");
 
-        let (midi_tx, mut midi_rx) = midi_ring_buffer(MIDI_RING_CAPACITY);
-        let midi_tx = Arc::new(Mutex::new(midi_tx));
-        let midi_tx_input = midi_tx.clone();
+        let (midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(MIDI_RING_CAPACITY);
         let peaks = SlotPeaks::default();
         let (command_tx, mut command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
         let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
-
-        let midi_input = midir::MidiInput::new("live-keys")?;
-        let midi_ports = midi_input.ports();
-        let midi_port = find_midi_port(&midi_input, &midi_ports, midi_filter)?;
-        log::info!("MIDI input: {}", midi_input.port_name(midi_port)?);
-        let midi_connection = midi_input
-            .connect(
-                midi_port,
-                "live-keys-input",
-                move |_stamp, bytes, _| {
-                    // No sample-accurate timestamp is available here, so events are
-                    // applied at the start of whichever audio block consumes them.
-                    if let Some(event) = MidiEvent::from_raw(0, bytes)
-                        && let Ok(mut midi_tx) = midi_tx_input.lock()
-                        && let Err(err) = midi_tx.push(event)
-                    {
-                        // This is midir's own callback thread, not the audio thread,
-                        // so logging here is safe. A full queue means the audio
-                        // thread isn't draining it — dropped notes are worth knowing
-                        // about even though there's little to do but drop.
-                        log::warn!("dropped MIDI event, queue full: {err}");
-                    }
-                },
-                (),
-            )
-            .map_err(|err| anyhow::anyhow!("failed to connect to MIDI input: {err}"))?;
 
         let mut rack = Rack::new(
             &self.settings,
@@ -910,12 +901,13 @@ impl Engine {
         // Tear down any previously running stream/connection asynchronously — see
         // `drop_stream_async`'s docs for why this must never block here.
         self.drop_stream_async();
+        if let Ok(mut shared) = self.midi_inputs.tx.lock() {
+            *shared = Some(midi_tx);
+        }
         self.running = Some(RunningStream {
             _stream: stream,
-            _midi_connection: midi_connection,
             sample_rate,
             command_tx,
-            midi_tx,
             peaks,
             retired_rx,
             lent_rx,

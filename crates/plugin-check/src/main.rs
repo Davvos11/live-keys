@@ -6,7 +6,7 @@
 //! crashes or hangs fails its case instead of the run.
 //!
 //! `cargo run -p live-keys-plugin-check --release -- [case name filter]...`
-//! (needs an X display, an audio output and a MIDI input port; plugins that
+//! (needs an X display and an audio output; plugins that
 //! aren't installed are skipped). `--list` lists the cases, `--info <plugin id>`
 //! prints what a plugin offers, for writing a new case.
 
@@ -185,7 +185,7 @@ fn run_case(case: &Case) -> Result<()> {
         report("load", "SKIP", "not installed");
         return Ok(());
     }
-    engine.start(None, None)?;
+    engine.start(None)?;
 
     let started = Instant::now();
     let key = match load(&mut engine, case) {
@@ -532,7 +532,7 @@ fn info(id: &str) -> Result<()> {
     let mut engine = Engine::new(8192);
     let plugin = engine.list_plugins().into_iter().find(|plugin| plugin.id == id).context("not installed")?;
     println!("{} ({:?}, {:?})", plugin.name, plugin.format, plugin.kind);
-    engine.start(None, None)?;
+    engine.start(None)?;
     let key = match engine.section_for(id) {
         _ if plugin.kind == live_keys_engine::PluginKind::Instrument => engine.load_instrument(0, id)?,
         section => engine.add_effect(0, section, id)?,

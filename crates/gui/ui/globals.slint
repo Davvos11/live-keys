@@ -78,6 +78,23 @@ export struct SlotPresetRow {
     current: bool,
 }
 
+// A MIDI device as offered for one MIDI input.
+export struct MidiDeviceRow {
+    name: string,
+    // Whether it feeds this input.
+    checked: bool,
+    // Whether it's plugged in now.
+    available: bool,
+}
+
+// One of the MIDI inputs slots can listen to.
+export struct MidiInputRow {
+    // Its devices, for the button that opens the device list.
+    summary: string,
+    // Every device plugged in, then this input's devices that aren't.
+    devices: [MidiDeviceRow],
+}
+
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
 // effects.
 export struct SlotState {
@@ -89,6 +106,8 @@ export struct SlotState {
     midi-effects: [EffectRow],
     // In processing order, after the instrument.
     audio-effects: [EffectRow],
+    // Per MIDI input (as `AppState.midi-inputs`), whether this slot listens to it.
+    midi-inputs: [bool],
     // MIDI this slot responds to. Channel is 0 for omni, else 1-16; note and
     // velocity ranges are inclusive.
     midi-channel: int,
@@ -113,8 +132,8 @@ export global AppState {
     // ComboBox writes to `current-value` don't update its visual selection
     // (https://github.com/slint-ui/slint/issues/11970) — drive it by index instead.
     in property <int> selected-audio-index: -1;
-    in property <[string]> midi-ports;
-    in property <int> selected-midi-index: -1;
+    in property <[MidiInputRow]> midi-inputs;
+    in property <int> max-midi-inputs: 8;
     in property <[string]> default-plugin-folders;
     in property <[string]> extra-plugin-folders;
     // Every plugin found, as "name — kind (format)", for the Settings tab.
@@ -150,7 +169,13 @@ export global Category {
 // 1 for its audio effects.
 export global AppLogic {
     callback select-audio-device(string);
-    callback select-midi-port(string);
+    callback add-midi-input();
+    // Input 0 can't be removed.
+    callback remove-midi-input(/* input */ int);
+    // Adds the device to the input, or takes it off.
+    callback toggle-midi-device(/* input */ int, /* device name */ string);
+    // Makes the slot listen to the input, or stop listening.
+    callback toggle-slot-input(/* slot */ int, /* input */ int);
     callback add-plugin-folder();
     callback remove-plugin-folder(string);
     callback rescan-plugins();

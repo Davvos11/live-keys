@@ -9,6 +9,12 @@ crate/adapter, a changed `HostedPlugin`/core API, a new CLI flag, a roadmap phas
 new real-time constraint or simplification — update the relevant section of this file as part of
 that same piece of work, not as a follow-up. Treat a stale CLAUDE.md as a bug in the change.
 
+## No backwards compatibility (yet)
+
+Until there's a proper release, don't write compatibility code for older config files, saved
+data, CLI flags or APIs — no migrations, serde aliases, or deprecated aliases. Change the format
+and move on; the developer's own files get fixed by hand if needed.
+
 ## What this is
 
 A cross-platform audio plugin host in Rust, optimized for live performance driven by a MIDI
@@ -46,33 +52,33 @@ cargo run --release -- --list-midi             # list MIDI input port names
 cargo run --release -- --list-audio            # list logical audio output devices
 cargo run --release                            # run with defaults (Helm synth, first MIDI port, default output)
 cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr>
-# <id> as printed by --list: an LV2 URI, or `vst3:` + class ID. `--plugin-uri` is an alias.
+# <id> as printed by --list: an LV2 URI, or `vst3:` + class ID.
 cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effects → instrument → audio
                                                # effects; each --effect goes where its kind belongs
 
-# GUI (live-keys-gui) — Settings tab (IO + plugin folders) and Live tab (3 side-by-side rack
+# GUI (live-keys-gui) — Settings tab (audio output, MIDI inputs + plugin folders) and Live tab (3 side-by-side rack
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
-# reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and a MIDI
-# channel/note-range/velocity-range filter, a volume fader, and slot presets: the whole chain
+# reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and which
+# MIDI inputs it listens to, a MIDI channel/note-range/velocity-range filter, a volume fader, and slot presets: the whole chain
 # with every plugin's settings, browsed by instrument)
 cargo run -p live-keys-gui --release
-# Settings persist to ~/.config/live-keys/config.json (audio/MIDI selection, extra plugin
+# Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, and per slot: last instrument id + MIDI/audio effect ids, MIDI
-# filter, volume), loaded on startup. Slot presets live in ~/.local/share/live-keys/slot-presets/. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
+# inputs + filter, volume), loaded on startup. Slot presets live in ~/.local/share/live-keys/slot-presets/. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
 cargo run -p live-keys-lv2-ui --example test_surge   # X11UI path (needs Surge XT installed)
 cargo run -p live-keys-lv2-ui --example test_setbfree --release -- [seconds] [plugin uri]
   # a plugin's GUI through a live engine (default setBfree, whose GUI uses atom ports only;
-  # needs an audio device and a MIDI port); prints how many messages crossed each way
+  # needs an audio device); prints how many messages crossed each way
 
 # Plugin check: one representative of every class of plugin with a known quirk (see
 # crates/plugin-check/src/cases.rs), each in a child process: load, play a note (heard?),
 # set a parameter and read it back (and hear it, where one is a volume), open the GUI (drawn?),
 # resize it (does the widget follow?), close it and unload at once. ~2 minutes; windows pop up.
-# Needs an X display, audio output and MIDI port; plugins not installed are skipped.
+# Needs an X display and audio output; plugins not installed are skipped.
 cargo run -p live-keys-plugin-check --release              # all cases; exit code 1 on a failure
 cargo run -p live-keys-plugin-check --release -- vst3 lsp  # cases whose name contains a filter
 cargo run -p live-keys-plugin-check --release -- --info <plugin id>   # GUI kind + params, for a new case
@@ -90,10 +96,11 @@ cargo run -p live-keys-vst3-ui --example open_editor --release -- "surge xt" 10
 # Manual preset smoke tests (not part of the app; they create and delete a "Smoke Test" preset)
 cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # list/apply/save/delete
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
-  # the same through a live engine (needs an audio device and MIDI port), LV2 lending included
+  # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host   # the crates with unit
-  # tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset round trip)
+cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-keys-gui   # the crates
+  # with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset round trip,
+  # MIDI device names, input-mask shifting)
 ```
 
 There is no lint/format CI configured in this repo yet. Run `cargo clippy --workspace --all-targets`
@@ -159,7 +166,10 @@ behind format-agnostic cores:
     passed note-ons for, and a note-off passes iff its note-on did. So changing a filter while
     keys are held never strands a note, and a note-off meant for another slot's zone never
     cuts this slot's voice. Velocity applies only to note-ons; poly aftertouch follows held
-    notes; CCs/pitch bend/program change only check the channel. Unit-tested.
+    notes; CCs/pitch bend/program change only check the channel. The filter's `inputs` mask
+    picks which of the host's MIDI inputs the slot listens to (`accept(inputs, event)` gets the
+    mask an event arrived on; `ALL_INPUTS` = every one); note-offs follow tracking here too.
+    Unit-tested.
 
 - **`crates/lv2-host`** (`live-keys-lv2-host`) — wraps `livi` (built on `lilv`) for LV2 plugin
   discovery/hosting. `Lv2Host` owns the `livi::World` and the shared real-time `Features`
@@ -339,8 +349,18 @@ behind format-agnostic cores:
     removed transposer shifted, or an arpeggiator started, would otherwise never get their
     note-off — the router's note-off tracking only covers what enters the MIDI chain. Unit-tested
     with fake plugins whose output reveals processing order.
+  - `midi.rs` — **MIDI inputs**: up to `MAX_MIDI_INPUTS` (8) numbered inputs, each fed by a set
+    of devices remembered by `midi_device_name` (the port name minus ALSA's trailing
+    `client:port` address, which changes when a device is plugged in again). `MidiInputs`
+    (owned by the engine, independent of the stream) keeps one `midir` connection per present
+    port that's on any input; its callback tags each event with the port's inputs as a mask
+    (`RoutedMidi`, an `AtomicU32` updated in place when assignments change) and pushes it into
+    the shared MIDI producer — `None` while no stream runs, so events are dropped then.
+    `Engine::set_midi_inputs(devices per input)` sets the assignments; `Engine::sync_midi_inputs`
+    (the GUI calls it every second) connects devices that appeared and drops ones that went
+    away; both return the ports present. So a missing device never fails a plugin load.
   - `engine.rs` — the control side. `Engine::start` builds the MIDI/command/retired ring
-    buffers, connects MIDI input, and starts the `cpal` output stream whose callback is just
+    buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream whose callback is just
     "apply pending commands, then `rack.render`" (re-instantiating every already-loaded plugin
     against the new stream, since the sample rate may change — the GUI uses this when the
     device selection changes). `load_instrument`/`unload_instrument` (a slot's effects stay)
@@ -404,7 +424,7 @@ behind format-agnostic cores:
   only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
   open editor follows (an open LV2 GUI is told by the GUI crate instead, see below).
-  `send_midi(event)` plays MIDI as if from the input port (the MIDI queue's producer is shared
+  `send_midi(event)` plays MIDI as if from every MIDI input (the MIDI queue's producer is shared
   with the input callback behind a `Mutex`, neither being the audio thread);
   `take_slot_peak(slot)` is the slot's loudest sample since the last call.
   `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
@@ -413,8 +433,8 @@ behind format-agnostic cores:
   a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
   unless already there; main thread only), else `ParamInfo::format_value`.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
-  (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI and
-  the Settings tab in the GUI.
+  (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI
+  (whose one port becomes MIDI input 1) and the Settings tab in the GUI.
 
 - **`crates/lv2-ui-host`** (`live-keys-lv2-ui`) — hosts an LV2 *plugin's own* GUI (not this
   app's GUI). Deliberately isolated from audio hosting: it's X11-specific unsafe FFI that a future
@@ -473,7 +493,17 @@ behind format-agnostic cores:
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
   per the project's Slint skill guidance. `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
-  `live-keys-vst3-ui`. Plugins are added through one **plugin picker** popup
+  `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
+  removed; on a first run, every device present but Midi Through becomes input 1's devices): the Settings tab lists them
+  (`MidiInputSetting` in `settings_tab.slint`), each a button summarising its devices that opens
+  a `PopupWindow` checklist of every device present plus the input's remembered ones marked
+  "(not connected)" (`src/midi_inputs.rs`: `MidiInputsUi`, its per-input device models refilled
+  in place so an open checklist survives updates). Devices stay assigned until unticked. Every
+  `MIDI_PORT_POLL_INTERVAL` (1 s) the GUI calls `Engine::sync_midi_inputs`, which reconnects
+  assigned devices that reappeared. Each slot has a numbered toggle button per input
+  (`SlotConfig.midi_inputs` mask, default input 1; `SlotState.midi-inputs: [bool]`); a new
+  input starts off in every slot, and removing one shifts later inputs' bits down
+  (`remove_input_bit`). Changes go through `apply_midi_inputs`. Plugins are added through one **plugin picker** popup
   (`ui/plugin_picker.slint`: `PluginPicker`, a `PopupWindow` over the whole window, wrapping
   `PickerPanel`) with a tab per `PluginKind` (`Category` global: 0 instrument, 1 MIDI effect,
   2 audio effect), a search field (focused on open; Enter picks the first match) and a star per
@@ -525,7 +555,7 @@ behind format-agnostic cores:
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
   (`open-plugin-gui`, `toggle-params`, `set-param`, `save-preset`, `delete-preset`); the
   preset browser's actions act on the open browser's plugin. The engine stream is started lazily by the
-  first load (on the devices chosen in Settings) and restarted — closing all plugin GUIs first,
+  first load (on the audio device chosen in Settings) and restarted — closing all plugin GUIs first,
   since their instance handles go stale (and keys change) — when the device selection changes
   while running. Replacing/removing a plugin likewise closes its GUI and parameter window
   first (`Rack::forget`). On the Rust side, `Rack` owns the slots' `VecModel`s, every open GUI

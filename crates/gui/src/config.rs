@@ -1,17 +1,18 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_engine::MidiFilter;
+use live_keys_engine::{MidiFilter, list_midi_ports, midi_device_name};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub audio_device: Option<String>,
-    pub midi_port: Option<String>,
+    /// The MIDI inputs slots can listen to, in order; never empty after [`load`].
+    #[serde(default)]
+    pub midi_inputs: Vec<MidiInputConfig>,
     #[serde(default)]
     pub extra_plugin_dirs: Vec<PathBuf>,
-    /// Live-tab slots, indexed by slot. May be shorter than the slot count in a file
-    /// saved by an older version; callers pad it.
+    /// Live-tab slots, indexed by slot. Empty in a new config; callers pad it.
     #[serde(default)]
     pub slots: Vec<SlotConfig>,
     /// `PluginInfo::id`s pinned to the top of the plugin picker.
@@ -23,13 +24,21 @@ pub struct AppConfig {
     pub pinned_presets: Vec<String>,
 }
 
+/// One MIDI input: the devices feeding it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MidiInputConfig {
+    /// By `midi_device_name`. Devices not plugged in stay listed and are
+    /// connected when they appear.
+    pub devices: Vec<String>,
+}
+
 /// One Live-tab slot's saved setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SlotConfig {
     /// `PluginInfo::id` of the instrument last loaded into this slot. Recorded
     /// only, not auto-loaded.
-    #[serde(alias = "plugin_uri")]
     pub plugin_id: Option<String>,
     /// `PluginInfo::id`s of the MIDI effects last in front of this slot's
     /// instrument, in order. Recorded only, not auto-loaded.
@@ -37,6 +46,8 @@ pub struct SlotConfig {
     /// `PluginInfo::id`s of the audio effects last after this slot's instrument,
     /// in order. Recorded only, not auto-loaded.
     pub effect_ids: Vec<String>,
+    /// Which MIDI inputs (bit `n` = `AppConfig::midi_inputs[n]`) it listens to.
+    pub midi_inputs: u32,
     /// 0-based MIDI channel, or `None` for omni.
     pub midi_channel: Option<u8>,
     pub note_low: u8,
@@ -58,6 +69,7 @@ impl Default for SlotConfig {
             plugin_id: None,
             midi_effect_ids: Vec::new(),
             effect_ids: Vec::new(),
+            midi_inputs: 1,
             midi_channel: filter.channel,
             note_low: filter.note_low,
             note_high: filter.note_high,
@@ -71,6 +83,7 @@ impl Default for SlotConfig {
 impl SlotConfig {
     pub fn filter(&self) -> MidiFilter {
         MidiFilter {
+            inputs: self.midi_inputs,
             channel: self.midi_channel,
             note_low: self.note_low,
             note_high: self.note_high,
@@ -96,10 +109,21 @@ fn config_path() -> Option<PathBuf> {
 /// Loads the saved config, or a default (empty) one if none exists yet or it can't be
 /// read/parsed.
 pub fn load() -> AppConfig {
-    config_path()
+    let mut config: AppConfig = config_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|contents| serde_json::from_str(&contents).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if config.midi_inputs.is_empty() {
+        // First run: every device plugged in now, so a keyboard works right away.
+        let devices = list_midi_ports()
+            .unwrap_or_default()
+            .iter()
+            .filter(|port| !port.starts_with("Midi Through"))
+            .map(|port| midi_device_name(port).to_string())
+            .collect();
+        config.midi_inputs.push(MidiInputConfig { devices });
+    }
+    config
 }
 
 pub fn save(config: &AppConfig) -> Result<()> {

@@ -2,8 +2,8 @@
 //! loads setBfree into a live engine, opens its GUI and passes atoms both ways
 //! (GUI → `control` input, `notify` output → GUI) for N seconds (default 10),
 //! printing what crossed. `cargo run -p live-keys-lv2-ui --example test_setbfree
-//! --release -- [seconds] [plugin uri]` (needs an audio device and a MIDI port,
-//! like the app). Another plugin's URI runs the same through its GUI.
+//! --release -- [seconds] [plugin uri]` (needs an audio device). Another
+//! plugin's URI runs the same through its GUI.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let seconds: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(10);
     let mut engine = Engine::new(8192);
-    engine.start(None, None)?;
+    engine.start(None)?;
     let uri = std::env::args().nth(2).unwrap_or_else(|| SETBFREE_URI.to_string());
     let key = engine.load_instrument(0, &uri)?;
 

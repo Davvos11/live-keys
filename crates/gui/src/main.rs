@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod config;
+mod midi_inputs;
 mod slot_presets;
 
 use std::cell::{Cell, RefCell};
@@ -12,7 +13,7 @@ use std::time::Duration;
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
     PluginInfo, PluginKey, PluginKind, PresetInfo, SLOT_COUNT, Section, SlotChain,
-    default_plugin_search_paths, list_logical_output_devices, list_midi_ports,
+    MAX_MIDI_INPUTS, default_plugin_search_paths, list_logical_output_devices,
 };
 use live_keys_lv2_ui::{
     LaunchUiRequest, PluginUiHandle, PortMessage, UiKind, best_supported_ui, launch_ui,
@@ -24,6 +25,10 @@ const MAX_BLOCK_SIZE: usize = 8192;
 /// How often the plugin-GUI-closed check and param-change forwarding run, and VST3
 /// editors get pumped (see `Vst3Editor::idle`).
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How often MIDI devices are looked for, so one plugged in (or unplugged) while
+/// the app runs is connected and shows up in Settings. Listing opens an ALSA
+/// sequencer client, so not every UI tick.
+const MIDI_PORT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Sentinel entry always shown first in the audio device list, mapping to
 /// `AppConfig.audio_device: None` — lets the OS pick the output device (e.g.
 /// PipeWire's current default sink) instead of a specific one pinned by name.
@@ -682,8 +687,12 @@ impl Rack {
 
     /// Pushes `slot`'s MIDI filter and volume into its row. The widgets edit these
     /// directly; this keeps the row in step so a rebuilt row shows the same values.
-    fn set_routing(&self, slot: usize, config: &config::SlotConfig) {
+    /// Shows `config`'s filter and volume in slot `slot`, with a button for
+    /// each of the `input_count` MIDI inputs.
+    fn set_routing(&self, slot: usize, config: &config::SlotConfig, input_count: usize) {
         let mut row = self.slots.row_data(slot).unwrap();
+        let listening: Vec<bool> = (0..input_count).map(|input| config.midi_inputs & 1 << input != 0).collect();
+        row.midi_inputs = ModelRc::new(VecModel::from(listening));
         row.midi_channel = config.midi_channel.map_or(0, |channel| i32::from(channel) + 1);
         row.note_low = config.note_low.into();
         row.note_high = config.note_high.into();
@@ -691,6 +700,12 @@ impl Rack {
         row.velocity_high = config.velocity_high.into();
         row.volume_db = config.volume_db;
         self.slots.set_row_data(slot, row);
+    }
+
+    fn set_all_routing(&self, config: &config::AppConfig) {
+        for (slot, slot_config) in config.slots.iter().enumerate() {
+            self.set_routing(slot, slot_config, config.midi_inputs.len());
+        }
     }
 
     fn refresh_all(&self, engine: &Engine) {
@@ -823,6 +838,11 @@ fn main() -> anyhow::Result<()> {
         engine.set_slot_filter(slot, slot_config.filter());
         engine.set_slot_gain(slot, slot_config.gain());
     }
+    let midi_inputs = Rc::new(midi_inputs::MidiInputsUi::new());
+    {
+        let ports = engine.borrow_mut().set_midi_inputs(midi_input_devices(&config.borrow()));
+        midi_inputs.set_ports(&ports, &config.borrow());
+    }
     {
         let extra_dirs = config.borrow().extra_plugin_dirs.clone();
         if !extra_dirs.is_empty() {
@@ -850,9 +870,8 @@ fn main() -> anyhow::Result<()> {
     });
     state.set_audio_devices(string_model(audio_devices));
 
-    let midi_ports = list_midi_ports().unwrap_or_default();
-    state.set_selected_midi_index(index_of(&midi_ports, config.borrow().midi_port.as_deref()));
-    state.set_midi_ports(string_model(midi_ports));
+    state.set_midi_inputs(ModelRc::from(midi_inputs.rows.clone()));
+    state.set_max_midi_inputs(MAX_MIDI_INPUTS as i32);
 
     state.set_default_plugin_folders(string_model(default_plugin_search_paths()));
     state.set_slots(ModelRc::from(rack.slots.clone()));
@@ -863,9 +882,7 @@ fn main() -> anyhow::Result<()> {
     refresh_plugin_folders(&app, &config.borrow());
     refresh_plugin_list(&app, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
-    for (slot, slot_config) in config.borrow().slots.iter().enumerate() {
-        rack.set_routing(slot, slot_config);
-    }
+    rack.set_all_routing(&config.borrow());
     state.set_min_volume_db(config::MIN_VOLUME_DB);
     state.set_max_volume_db(config::MAX_VOLUME_DB);
 
@@ -890,10 +907,80 @@ fn main() -> anyhow::Result<()> {
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
-        logic.on_select_midi_port(move |value| {
-            config.borrow_mut().midi_port = Some(value.to_string());
-            log_on_err(config::save(&config.borrow()));
-            restart_engine(&engine, &config.borrow(), &rack);
+        let midi_inputs = midi_inputs.clone();
+        logic.on_add_midi_input(move || {
+            let mut config = config.borrow_mut();
+            if config.midi_inputs.len() >= MAX_MIDI_INPUTS {
+                return;
+            }
+            config.midi_inputs.push(Default::default());
+            // Nothing listens to a new input until it's switched on in a slot.
+            let bit = 1 << (config.midi_inputs.len() - 1);
+            for slot_config in &mut config.slots {
+                slot_config.midi_inputs &= !bit;
+            }
+            apply_midi_inputs(&mut engine.borrow_mut(), &config, &rack, &midi_inputs);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let midi_inputs = midi_inputs.clone();
+        logic.on_remove_midi_input(move |input| {
+            let input = input as usize;
+            let mut config = config.borrow_mut();
+            // The first input always stays.
+            if input == 0 || input >= config.midi_inputs.len() {
+                return;
+            }
+            config.midi_inputs.remove(input);
+            for slot_config in &mut config.slots {
+                slot_config.midi_inputs = midi_inputs::remove_input_bit(slot_config.midi_inputs, input);
+            }
+            midi_inputs.remove(input, &config);
+            apply_midi_inputs(&mut engine.borrow_mut(), &config, &rack, &midi_inputs);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let midi_inputs = midi_inputs.clone();
+        logic.on_toggle_midi_device(move |input, device| {
+            let mut config = config.borrow_mut();
+            let Some(input) = config.midi_inputs.get_mut(input as usize) else {
+                return;
+            };
+            match input.devices.iter().position(|name| *name == device.as_str()) {
+                Some(index) => {
+                    input.devices.remove(index);
+                }
+                None => input.devices.push(device.to_string()),
+            }
+            apply_midi_inputs(&mut engine.borrow_mut(), &config, &rack, &midi_inputs);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_toggle_slot_input(move |slot, input| {
+            let mut config = config.borrow_mut();
+            let input_count = config.midi_inputs.len();
+            let Some(slot_config) = config.slots.get_mut(slot as usize) else {
+                return;
+            };
+            if !(0..input_count as i32).contains(&input) {
+                return;
+            }
+            slot_config.midi_inputs ^= 1 << input;
+            engine.borrow_mut().set_slot_filter(slot as usize, slot_config.filter());
+            rack.set_routing(slot as usize, slot_config, input_count);
+            log_on_err(config::save(&config));
         });
     }
 
@@ -1468,7 +1555,8 @@ fn main() -> anyhow::Result<()> {
                 slot_config.velocity_low = velocity_low.clamp(0, 127) as u8;
                 slot_config.velocity_high = velocity_high.clamp(0, 127) as u8;
                 engine.borrow_mut().set_slot_filter(slot, slot_config.filter());
-                rack.set_routing(slot, slot_config);
+                let input_count = config.midi_inputs.len();
+                rack.set_routing(slot, &config.slots[slot], input_count);
                 config_dirty.set(true);
             },
         );
@@ -1485,7 +1573,8 @@ fn main() -> anyhow::Result<()> {
             let slot_config = &mut config.slots[slot];
             slot_config.volume_db = volume_db.clamp(config::MIN_VOLUME_DB, config::MAX_VOLUME_DB);
             engine.borrow_mut().set_slot_gain(slot, slot_config.gain());
-            rack.set_routing(slot, slot_config);
+            let input_count = config.midi_inputs.len();
+            rack.set_routing(slot, &config.slots[slot], input_count);
             config_dirty.set(true);
         });
     }
@@ -1528,6 +1617,16 @@ fn main() -> anyhow::Result<()> {
             if config_dirty.replace(false) {
                 log_on_err(config::save(&config.borrow()));
             }
+        });
+    }
+
+    let midi_port_timer = slint::Timer::default();
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        midi_port_timer.start(slint::TimerMode::Repeated, MIDI_PORT_POLL_INTERVAL, move || {
+            let ports = engine.borrow_mut().sync_midi_inputs();
+            midi_inputs.set_ports(&ports, &config.borrow());
         });
     }
 
@@ -1652,7 +1751,7 @@ fn with_running_engine<T>(
 ) -> anyhow::Result<T> {
     let mut engine = engine.borrow_mut();
     if !engine.is_running() {
-        engine.start(config.audio_device.as_deref(), config.midi_port.as_deref())?;
+        engine.start(config.audio_device.as_deref())?;
     }
     action(&mut engine)
 }
@@ -1669,7 +1768,7 @@ fn restart_engine(engine: &RefCell<Engine>, config: &config::AppConfig, rack: &R
     rack.forget_all();
     let result = engine
         .borrow_mut()
-        .start(config.audio_device.as_deref(), config.midi_port.as_deref());
+        .start(config.audio_device.as_deref());
     rack.refresh_all(&engine.borrow());
     if let Err(err) = result {
         log::error!("failed to restart audio with the new device selection: {err:#}");
@@ -1684,6 +1783,29 @@ fn index_of(items: &[String], value: Option<&str>) -> i32 {
     value
         .and_then(|value| items.iter().position(|item| item == value))
         .map_or(-1, |index| index as i32)
+}
+
+/// Each MIDI input's devices, as the engine takes them.
+fn midi_input_devices(config: &config::AppConfig) -> Vec<Vec<String>> {
+    config.midi_inputs.iter().map(|input| input.devices.clone()).collect()
+}
+
+/// Applies changed MIDI inputs (or their devices) everywhere: the engine's
+/// connections, each slot's filter and input buttons, Settings, the config file.
+fn apply_midi_inputs(
+    engine: &mut Engine,
+    config: &config::AppConfig,
+    rack: &Rack,
+    midi_inputs: &midi_inputs::MidiInputsUi,
+) {
+    let ports = engine.set_midi_inputs(midi_input_devices(config));
+    for (slot, slot_config) in config.slots.iter().enumerate() {
+        engine.set_slot_filter(slot, slot_config.filter());
+    }
+    rack.set_all_routing(config);
+    midi_inputs.refresh(config);
+    midi_inputs.set_ports(&ports, config);
+    log_on_err(config::save(config));
 }
 
 fn string_model(items: Vec<String>) -> ModelRc<slint::SharedString> {

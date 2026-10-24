@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let mut engine = Engine::new(8192);
-    engine.start(None, None)?;
+    engine.start(None)?;
     for id in ids {
         let key = engine.load_instrument(0, &id)?;
         let meta = engine.plugin(key).unwrap();

@@ -6,6 +6,8 @@ use crate::MidiEvent;
 /// high bound matches nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MidiFilter {
+    /// Which of the host's MIDI inputs to listen to: bit `n` for input `n`.
+    pub inputs: u32,
     /// 0-based MIDI channel to accept, or `None` to accept every channel (omni).
     pub channel: Option<u8>,
     pub note_low: u8,
@@ -18,6 +20,7 @@ impl Default for MidiFilter {
     /// Lets everything through.
     fn default() -> Self {
         Self {
+            inputs: ALL_INPUTS,
             channel: None,
             note_low: 0,
             note_high: 127,
@@ -26,6 +29,9 @@ impl Default for MidiFilter {
         }
     }
 }
+
+/// Every MIDI input, as a [`MidiFilter::inputs`] mask.
+pub const ALL_INPUTS: u32 = u32::MAX;
 
 /// Applies a [`MidiFilter`] to a stream of events for one slot, while tracking which
 /// notes it has let through.
@@ -66,13 +72,14 @@ impl MidiRouter {
         self.filter = filter;
     }
 
-    /// Whether `event` should be passed to this slot's plugin.
-    pub fn accept(&mut self, event: &MidiEvent) -> bool {
+    /// Whether `event`, which arrived on the MIDI inputs in mask `inputs`, should
+    /// be passed to this slot's plugin.
+    pub fn accept(&mut self, inputs: u32, event: &MidiEvent) -> bool {
         let bytes = event.as_slice();
         let status = bytes[0];
         if status >= 0xF0 {
             // System messages (clock, start/stop, ...) aren't channel-specific.
-            return true;
+            return self.filter.inputs & inputs != 0;
         }
         let channel = status & 0x0F;
         let kind = status & 0xF0;
@@ -89,6 +96,9 @@ impl MidiRouter {
         }
 
         let filter = &self.filter;
+        if filter.inputs & inputs == 0 {
+            return false;
+        }
         if filter.channel.is_some_and(|wanted| wanted != channel) {
             return false;
         }
@@ -134,12 +144,12 @@ mod tests {
             velocity_high: 100,
             ..split(60, 72)
         });
-        assert!(router.accept(&ev(&[0x90, 60, 10])));
-        assert!(router.accept(&ev(&[0x90, 72, 100])));
-        assert!(!router.accept(&ev(&[0x90, 59, 64])));
-        assert!(!router.accept(&ev(&[0x90, 73, 64])));
-        assert!(!router.accept(&ev(&[0x90, 65, 9])));
-        assert!(!router.accept(&ev(&[0x90, 65, 101])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x90, 60, 10])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x90, 72, 100])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 59, 64])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 73, 64])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 65, 9])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 65, 101])));
     }
 
     #[test]
@@ -148,22 +158,22 @@ mod tests {
             channel: Some(1),
             ..Default::default()
         });
-        assert!(router.accept(&ev(&[0xB1, 64, 127])));
-        assert!(!router.accept(&ev(&[0xB0, 64, 127])));
-        assert!(!router.accept(&ev(&[0x90, 60, 64])));
-        assert!(router.accept(&ev(&[0xF8])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0xB1, 64, 127])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0xB0, 64, 127])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 60, 64])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0xF8])));
     }
 
     #[test]
     fn note_off_follows_its_note_on_not_the_current_filter() {
         let mut router = MidiRouter::new(split(60, 72));
-        assert!(router.accept(&ev(&[0x90, 60, 64])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x90, 60, 64])));
         // Range moved away while the key is held: its release must still arrive.
         router.set_filter(split(0, 10));
-        assert!(router.accept(&ev(&[0x80, 60, 0])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x80, 60, 0])));
         // Only once, and never for a note this slot didn't play.
-        assert!(!router.accept(&ev(&[0x80, 60, 0])));
-        assert!(!router.accept(&ev(&[0x90, 61, 0])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x80, 60, 0])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 61, 0])));
     }
 
     #[test]
@@ -172,14 +182,32 @@ mod tests {
             channel: Some(0),
             ..Default::default()
         });
-        assert!(router.accept(&ev(&[0x90, 60, 64])));
-        assert!(!router.accept(&ev(&[0x81, 60, 0])));
-        assert!(router.accept(&ev(&[0x80, 60, 0])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x90, 60, 64])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x81, 60, 0])));
+        assert!(router.accept(ALL_INPUTS, &ev(&[0x80, 60, 0])));
     }
 
     #[test]
     fn inverted_range_matches_nothing() {
         let mut router = MidiRouter::new(split(72, 60));
-        assert!(!router.accept(&ev(&[0x90, 65, 64])));
+        assert!(!router.accept(ALL_INPUTS, &ev(&[0x90, 65, 64])));
+    }
+
+    #[test]
+    fn only_listens_to_its_inputs_but_note_offs_follow_tracking() {
+        let mut router = MidiRouter::new(MidiFilter {
+            inputs: 0b10,
+            ..Default::default()
+        });
+        assert!(!router.accept(0b01, &ev(&[0x90, 60, 100])));
+        assert!(router.accept(0b11, &ev(&[0x90, 62, 100])));
+        assert!(!router.accept(0b01, &ev(&[0xB0, 64, 127])));
+        // Turning the input off while a key is held still lets its note-off through.
+        router.set_filter(MidiFilter {
+            inputs: 0,
+            ..Default::default()
+        });
+        assert!(router.accept(0b10, &ev(&[0x80, 62, 0])));
+        assert!(!router.accept(0b10, &ev(&[0x90, 62, 100])));
     }
 }

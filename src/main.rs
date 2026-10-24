@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use live_keys_engine::{Engine, PluginKind, list_logical_output_devices, list_midi_ports};
+use live_keys_engine::{
+    Engine, PluginKind, find_midi_port, list_logical_output_devices, list_midi_ports, midi_device_name,
+};
 
 /// Upper bound on frames-per-callback we'll ever be asked to render. Real device
 /// buffer sizes are almost always far smaller than this.
@@ -32,7 +34,7 @@ struct Cli {
 
     /// Id of the instrument plugin to load, as printed by `--list`: an LV2 plugin's
     /// URI, or `vst3:` + a VST3 class ID.
-    #[arg(long, alias = "plugin-uri", default_value = DEFAULT_PLUGIN_ID)]
+    #[arg(long, default_value = DEFAULT_PLUGIN_ID)]
     plugin: String,
 
     /// Id of an effect plugin, as printed by `--list-effects`: a MIDI effect goes
@@ -90,7 +92,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    engine.start(cli.audio_device.as_deref(), cli.midi_port.as_deref())?;
+    let midi_port = find_midi_port(cli.midi_port.as_deref())?;
+    log::info!("MIDI input: {midi_port}");
+    engine.set_midi_inputs(vec![vec![midi_device_name(&midi_port).to_string()]]);
+    engine.start(cli.audio_device.as_deref())?;
     engine.load_instrument(0, &cli.plugin)?;
     for effect in &cli.effect {
         engine.add_effect(0, engine.section_for(effect), effect)?;

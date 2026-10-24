@@ -4,7 +4,7 @@ mod param;
 mod plugin;
 mod ring;
 
-pub use filter::{MidiFilter, MidiRouter};
+pub use filter::{ALL_INPUTS, MidiFilter, MidiRouter};
 pub use midi::MidiEvent;
 pub use param::ParamChange;
 pub use plugin::{
