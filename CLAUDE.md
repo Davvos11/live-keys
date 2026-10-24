@@ -844,3 +844,18 @@ structure and interop pattern, and **`crates/lv2-ui-host`**/**`crates/vst3-ui-ho
 *plugin's* own GUI (as opposed to this app's GUI) gets hosted — that part needed native window
 embedding via X11 (`x11rb`, plus `suil` for LV2), independent of Slint, exactly as anticipated
 before either was built.
+
+**Wayland (decided, keep as is):** the app's own windows are native Wayland (Slint's winit
+backend picks it when `WAYLAND_DISPLAY` is set; nothing forces X11), while every plugin GUI —
+LV2 X11 UIs with our `x11rb` host window, VST3 editors, External UIs — is an X11 window
+through Xwayland. That's forced by the formats: VST3 on Linux defines only an X11 editor
+window type (the SDK's newer optional Wayland interface is practically unadopted), LV2 has no
+established Wayland UI type, and X11 windows can't be embedded in Wayland ones — which costs
+nothing, since plugin GUIs are separate top-level windows anyway. Known costs of the mix:
+plugin windows can't be tied to the main window (transient/always-on-top/minimise together),
+can look blurry under fractional scaling (unless the compositor lets X11 apps scale
+themselves), and focus between the two can feel slightly off. Forcing the whole app onto X11
+(`WAYLAND_DISPLAY` unset) would allow tying windows together but loses crisp HiDPI for the
+main window — not worth it. Revisit if CLAP (which defines a Wayland window API) is added, or
+plugins adopt VST3's Wayland interface. (Test runs that take screenshots unset
+`WAYLAND_DISPLAY` to force X11, so the windows can be captured with X11 tools.)
