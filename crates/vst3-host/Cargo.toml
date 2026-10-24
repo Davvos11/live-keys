@@ -6,10 +6,10 @@ edition.workspace = true
 [dependencies]
 live-keys-core = { path = "../core" }
 vst3 = "0.3"
-libloading = "0.8"
+libloading = "0.9"
 anyhow = "1"
 log = "0.4"
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 env_logger = "0.11"
