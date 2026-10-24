@@ -364,10 +364,21 @@ behind format-agnostic cores:
     (the GUI calls it every second) connects devices that appeared and drops ones that went
     away; both return the ports present. So a missing device never fails a plugin load.
   - `engine.rs` — the control side. `Engine::start` builds the MIDI/command/retired ring
-    buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream whose callback is just
-    "apply pending commands, then `rack.render`" (re-instantiating every already-loaded plugin
-    against the new stream, since the sample rate may change — the GUI uses this when the
-    device selection changes). `load_instrument`/`unload_instrument` (a slot's effects stay)
+    buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream
+    (`build_stream`) whose callback is just "apply pending commands, then `rack.render`"
+    (re-instantiating every already-loaded plugin against the new stream, at default
+    settings, since the sample rate may change). The callback owns an `AudioState` (the
+    `Rack` plus its command and MIDI consumers), which **`Engine::switch_output`** moves to
+    another output device without reloading anything: it opens the device at the current
+    sample rate (`output_config_at`; `Ok(false)` if it can't, nothing changed), queues
+    `RackCommand::Detach` — on which the callback hands the boxed state over a one-slot
+    ring and plays silence from then on — waits for it (`HANDOFF_TIMEOUT`), sets the new
+    channel count and builds the new stream around it (the old one is dropped on a thread).
+    Keys, open plugin GUIs and every setting stay; the gap is tens of milliseconds. A
+    failed hand-over is an error (the state may be stuck in the old stream, or kept in
+    `Engine::orphaned` until the next teardown), after which `start` must follow. The GUI
+    tries this first when the device selection changes, falling back to `start` with the
+    session saved before and restored after. `load_instrument`/`unload_instrument` (a slot's effects stay)
     and `add_effect(slot, section, id)` (appends)/`remove_effect`/`move_effect` change the
     *running* chain without restarting it; `section_for(id)` gives a plugin's natural section
     from its kind (used by the CLI's `--effect`). The engine keeps a mirror of every chain
@@ -575,7 +586,8 @@ behind format-agnostic cores:
   `move-scene`) and the order kept in `<root>/order.json` (`scenes::move_to`; new scenes go
   last). Right-clicking a row (`ContextMenuArea`, on top of the touch area, which would
   otherwise take the right-click) offers Load, Save (overwrite: the slots' current setups,
-  keeping its modes), Edit… and Delete…; edit and delete act on `Rack::scene_target` (set by
+  keeping its modes), Edit…, Duplicate (`scenes::duplicate`: "<name> copy", "copy 2", …,
+  placed right after it) and Delete…; edit and delete act on `Rack::scene_target` (set by
   `begin-scene-edit`/`begin-scene-delete`, with -1 meaning the current scene, as the header
   buttons use). Each row shows a boxed slot number per
   restored slot and a crossed-out one per cleared slot (`SceneRow.modes`, `SlotHint`).
@@ -686,6 +698,8 @@ The audio callback must never allocate, lock, or perform blocking syscalls. This
   passed to `cpal`'s `build_output_stream`.
 - Plugins enter the callback already instantiated (boxed on the control thread) and leave it
   via the retired ring buffer, so neither construction nor teardown runs on the audio thread.
+  A new stream's callback picks its `AudioState` up with one `try_lock` (never waits; nobody
+  else holds that lock once the stream runs) and hands it back by ring on `Detach`.
 - Chains are fixed-size arrays rearranged by rotation, stage-to-stage audio is copied into
   each plugin's own pre-allocated input buffers, and stage-to-stage MIDI into a pre-allocated
   per-slot scratch buffer (capacity-bounded: overflow is dropped, never grown) — adding,
@@ -699,16 +713,17 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 
 ### Known simplifications (not bugs)
 
-- Restarting the stream (device change while running) re-instantiates every loaded plugin at
-  default parameter values — plugin state isn't carried over (presets could do this now, but
-  don't yet).
+- Changing the output device to one that can't run at the current sample rate reloads every
+  plugin (LV2 fixes the rate at instantiation); their settings are carried over through the
+  session, so only as faithfully as each plugin saves its state, and slots are silent while
+  they reload. Rescanning plugins empties the rack outright.
 - After a VST3 state load (preset or slot preset), the parameter values read back from the
   controller can be stale: Surge XT applies a loaded state on its audio thread, and its JUCE
   controller only catches up asynchronously, which doesn't happen without its editor open
   (confirmed: the component's state after loading equals the saved one byte for byte, while
   `getParamNormalized` keeps the old value). The sound is right; the parameter window and the
   recorded values may not be. Surge also calls `restartComponent(kParamValuesChanged)`, which
-  is ignored. Restarting the stream doesn't carry slot presets' state over either.
+  is ignored.
 - Settings an LV2 plugin only exchanges with its GUI as atoms (setBfree's drawbars etc.) aren't
   recorded host-side: they don't show in the parameter window or mark presets "changed" —
   though plugin and slot presets do capture them, through the plugin's state.

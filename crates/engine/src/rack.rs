@@ -85,6 +85,9 @@ pub(crate) enum RackCommand {
     Lend { slot: usize, position: ChainPosition },
     /// Puts a lent plugin back in its place.
     Return { slot: usize, position: ChainPosition, plugin: BoxedPlugin },
+    /// Hands the whole rack back to the control thread, for a new output
+    /// stream (handled by the callback, not [`Rack::apply`]).
+    Detach,
 }
 
 /// One slot as the audio callback sees it.
@@ -250,6 +253,11 @@ impl Rack {
         }
     }
 
+    /// Sets the output's channel count, for a rack moved to another stream.
+    pub fn set_channels(&mut self, channels: usize) {
+        self.channels = channels;
+    }
+
     fn retire(&mut self, plugin: Option<BoxedPlugin>) {
         // The queue being full means the control thread hasn't collected in a long
         // while; leaking the plugin then beats running its teardown here.
@@ -265,6 +273,8 @@ impl Rack {
     /// a panic here would take the audio thread down.
     pub fn apply(&mut self, command: RackCommand) {
         match command {
+            // The callback's business; never gets here.
+            RackCommand::Detach => {}
             RackCommand::SetInstrument { slot, plugin } => {
                 let Some(runtime) = self.slots.get_mut(slot) else {
                     return;

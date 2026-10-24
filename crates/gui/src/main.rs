@@ -1047,6 +1047,7 @@ fn main() -> anyhow::Result<()> {
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
+        let app_weak = app.as_weak();
         logic.on_select_audio_device(move |value| {
             config.borrow_mut().audio_device = if value == SYSTEM_DEFAULT_LABEL {
                 None
@@ -1054,7 +1055,9 @@ fn main() -> anyhow::Result<()> {
                 Some(value.to_string())
             };
             log_on_err(config::save(&config.borrow()));
-            restart_engine(&engine, &config.borrow(), &rack);
+            if let Some(app) = app_weak.upgrade() {
+                restart_engine(&engine, &config, &rack, &app.global::<AppLogic>());
+            }
         });
     }
 
@@ -1870,6 +1873,16 @@ fn main() -> anyhow::Result<()> {
 
     {
         let rack = rack.clone();
+        logic.on_duplicate_scene(move |index| {
+            if let Some(stored) = rack.scene_at(index) {
+                let result = scenes::duplicate(&stored).map(drop);
+                rack.after_scene_change("Duplicating", &stored.scene.name, result);
+            }
+        });
+    }
+
+    {
+        let rack = rack.clone();
         logic.on_move_scene(move |from, to| {
             let (Some(moved), Some(target)) = (rack.scene_at(from), rack.scene_at(to)) else {
                 return;
@@ -2257,7 +2270,8 @@ fn load_scene(
 /// Saves the session: every slot, the current scene, and which plugin windows
 /// are open. Lending LV2 plugins with state silences them meanwhile, so it's
 /// done on exit and, after a change, once the rack has been quiet for a while.
-fn save_session(engine: &RefCell<Engine>, rack: &Rack) {
+/// Returns whether it was saved.
+fn save_session(engine: &RefCell<Engine>, rack: &Rack) -> bool {
     rack.session_changed_since.set(None);
     let slots = (0..SLOT_COUNT)
         .map(|slot| {
@@ -2288,9 +2302,10 @@ fn save_session(engine: &RefCell<Engine>, rack: &Rack) {
     let result = session::save(&mut engine.borrow_mut(), slots, current_scene, |key| {
         rack.plugin_preset_state(key)
     });
-    if let Err(err) = result {
+    if let Err(err) = &result {
         log::error!("saving the session failed: {err:#}");
     }
+    result.is_ok()
 }
 
 /// Restores the session saved last time, if any: each slot's chain and
@@ -2414,24 +2429,44 @@ fn with_running_engine<T>(
     action(&mut engine)
 }
 
-/// Applies a changed audio/MIDI device selection to an already running engine.
-/// Restarting re-instantiates every loaded plugin (with new keys), so open plugin
-/// GUIs (holding the old instances' handles) are closed first. A no-op if nothing
+/// Applies a changed audio device selection to an already running engine. The
+/// running plugins are moved to the new device as they are
+/// (`Engine::switch_output`) when it can run at their sample rate. Otherwise
+/// every plugin has to be reloaded (with new keys): open plugin GUIs, holding
+/// the old instances' handles, are closed first, and everything is carried
+/// across as a session, saved before and restored after. A no-op if nothing
 /// has started the engine yet — the selection is picked up by the first load
 /// instead.
-fn restart_engine(engine: &RefCell<Engine>, config: &config::AppConfig, rack: &Rack) {
+fn restart_engine(engine: &RefCell<Engine>, config: &RefCell<config::AppConfig>, rack: &Rack, logic: &AppLogic<'_>) {
     if !engine.borrow().is_running() {
         return;
     }
+    let audio_device = config.borrow().audio_device.clone();
+    let switched = engine.borrow_mut().switch_output(audio_device.as_deref());
+    let saved = match switched {
+        Ok(true) => return,
+        // Nothing changed yet: save the plugins' settings to restore after.
+        Ok(false) => save_session(engine, rack),
+        // The plugins are out of reach; the last saved session is the best
+        // there is, if it's up to date.
+        Err(err) => {
+            log::error!("moving the plugins to the new output failed, reloading them: {err:#}");
+            rack.session_changed_since.get().is_none()
+        }
+    };
     rack.forget_all();
-    let result = engine
-        .borrow_mut()
-        .start(config.audio_device.as_deref());
+    let result = engine.borrow_mut().start(audio_device.as_deref());
     rack.refresh_all(&engine.borrow());
-    if let Err(err) = result {
-        log::error!("failed to restart audio with the new device selection: {err:#}");
-        for slot in 0..SLOT_COUNT {
-            rack.refresh_slot(&engine.borrow(), slot, Some(format!("restart failed: {err}")));
+    match result {
+        Ok(()) if saved => {
+            restore_session(engine, config, rack, logic);
+        }
+        Ok(()) => {}
+        Err(err) => {
+            log::error!("failed to restart audio with the new device selection: {err:#}");
+            for slot in 0..SLOT_COUNT {
+                rack.refresh_slot(&engine.borrow(), slot, Some(format!("restart failed: {err}")));
+            }
         }
     }
 }

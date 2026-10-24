@@ -321,6 +321,38 @@ fn write(dir: &Path, scene: &Scene) -> Result<()> {
     Ok(())
 }
 
+/// Copies `stored` as a new scene named "<name> copy" (or "copy 2", …, if
+/// that's taken), placed right after it in the list.
+pub fn duplicate(stored: &Stored) -> Result<Stored> {
+    let root = root().context("no data folder")?;
+    let (name, dir) = (1..)
+        .map(|n| match n {
+            1 => format!("{} copy", stored.scene.name),
+            n => format!("{} copy {n}", stored.scene.name),
+        })
+        .map(|name| {
+            let dir = root.join(slot_presets::file_name(&name));
+            (name, dir)
+        })
+        .find(|(_, dir)| !dir.exists())
+        .context("no free name")?;
+    let mut scene = stored.scene.clone();
+    scene.name = name;
+    slot_presets::replace_dir(&dir, |temp| {
+        copy_dir(&stored.dir, temp)?;
+        write(temp, &scene)
+    })?;
+    let mut order: Vec<String> = list()
+        .iter()
+        .map(|other| folder_name(&other.dir))
+        .filter(|other| *other != folder_name(&dir))
+        .collect();
+    let after = order.iter().position(|other| *other == folder_name(&stored.dir));
+    order.insert(after.map_or(order.len(), |index| index + 1), folder_name(&dir));
+    change_order(|stored_order| *stored_order = order)?;
+    Ok(Stored { dir, scene })
+}
+
 /// Deletes the scene in `dir`.
 pub fn delete(dir: &Path) -> Result<()> {
     let root = root().context("no data folder")?;

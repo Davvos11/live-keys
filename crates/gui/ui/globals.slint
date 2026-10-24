@@ -271,6 +271,8 @@ export global AppLogic {
     // Renames the scene being edited and gives it the form's slot modes.
     callback edit-scene(/* name */ string);
     callback delete-scene();
+    // Copies the scene as "<name> copy", right after it.
+    callback duplicate-scene(/* index */ int);
     // Moves the scene at row `from` to row `to`.
     callback move-scene(/* from */ int, /* to */ int);
 }

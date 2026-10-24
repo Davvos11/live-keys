@@ -38,6 +38,8 @@ const LENT_RING_CAPACITY: usize = 4;
 /// How long to wait for the audio thread to hand over a lent plugin: a few
 /// callbacks normally; longer means it has stalled.
 const LEND_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long [`Engine::switch_output`] waits for the old stream to hand the rack over.
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Identifies one loaded plugin instance for as long as it stays loaded, however
 /// its position in a chain changes. Never reused within a process.
@@ -162,10 +164,21 @@ impl SlotChain {
     }
 }
 
+/// What the audio callback owns: the rack and the queues it drains. Handed from
+/// one stream to the next when the output device changes, so plugins keep
+/// running (see [`Engine::switch_output`]).
+struct AudioState {
+    rack: Rack,
+    command_rx: Consumer<RackCommand>,
+    midi_rx: Consumer<RoutedMidi>,
+}
+
 /// The running output stream, and the control-thread ends of the queues
 /// into/out of its audio callback (but MIDI's, which is in [`MidiInputs`]).
 struct RunningStream {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
+    /// Where the callback hands its [`AudioState`] on [`RackCommand::Detach`].
+    handoff_rx: Consumer<Box<AudioState>>,
     sample_rate: f64,
     command_tx: Producer<RackCommand>,
     peaks: SlotPeaks,
@@ -211,6 +224,9 @@ pub struct Engine {
     // Declared (so dropped) before the hosts: the stream's callback and retired
     // queue can still hold plugins, and an LV2 plugin must not outlive its world.
     running: Option<RunningStream>,
+    /// An [`AudioState`] taken from a stream that couldn't be replaced; dropped
+    /// with the next stream teardown (never on the audio thread).
+    orphaned: Option<Box<AudioState>>,
     midi_inputs: MidiInputs,
     audio_host: cpal::Host,
     lv2: Lv2Host,
@@ -231,6 +247,7 @@ impl Engine {
             vst3: Vst3Host::new(max_block_size, &[]),
             max_block_size,
             running: None,
+            orphaned: None,
             midi_inputs: MidiInputs::new(),
             slots: Default::default(),
             settings: Default::default(),
@@ -411,8 +428,11 @@ impl Engine {
         if let Ok(mut midi_tx) = self.midi_inputs.tx.lock() {
             *midi_tx = None;
         }
+        let orphaned = self.orphaned.take();
         if let Some(running) = self.running.take() {
-            std::thread::spawn(move || drop(running));
+            std::thread::spawn(move || drop((running, orphaned)));
+        } else if orphaned.is_some() {
+            std::thread::spawn(move || drop(orphaned));
         }
     }
 
@@ -879,13 +899,13 @@ impl Engine {
         let channels = output_config.channels() as usize;
         log::info!("Output device: {output_device} ({channels} ch @ {sample_rate} Hz)");
 
-        let (midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(MIDI_RING_CAPACITY);
+        let (midi_tx, midi_rx) = ring_buffer::<RoutedMidi>(MIDI_RING_CAPACITY);
         let peaks = SlotPeaks::default();
-        let (command_tx, mut command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
+        let (command_tx, command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
         let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
 
-        let mut rack = Rack::new(
+        let rack = Rack::new(
             &self.settings,
             retired_tx,
             lent_tx,
@@ -894,19 +914,13 @@ impl Engine {
             MIDI_RING_CAPACITY,
             peaks.clone(),
         );
-        let stream_config: cpal::StreamConfig = output_config.into();
-        let stream = output_device.build_output_stream(
-            stream_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                while let Ok(command) = command_rx.pop() {
-                    rack.apply(command);
-                }
-                rack.render(&mut midi_rx, data);
-            },
-            |err| log::error!("audio stream error: {err}"),
-            None,
-        )?;
-        stream.play()?;
+        let state = Box::new(AudioState {
+            rack,
+            command_rx,
+            midi_rx,
+        });
+        let (stream, handoff_rx) = build_stream(&output_device, output_config.into(), state)
+            .map_err(|(err, _state)| err)?;
 
         // Tear down any previously running stream/connection asynchronously — see
         // `drop_stream_async`'s docs for why this must never block here.
@@ -915,7 +929,8 @@ impl Engine {
             *shared = Some(midi_tx);
         }
         self.running = Some(RunningStream {
-            _stream: stream,
+            stream,
+            handoff_rx,
             sample_rate,
             command_tx,
             peaks,
@@ -944,4 +959,139 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// Moves the running rack to output `audio_filter` (or the default output
+    /// device) without reloading any plugin: the device is opened at the
+    /// current sample rate, which the plugins were set up for, and the old
+    /// stream's callback hands its rack — plugins, queues and all — to the new
+    /// one. `Ok(false)` if the device can't run at that rate: nothing was
+    /// changed, and [`Engine::start`] (which reloads every plugin) is the way
+    /// to switch. An error means the hand-over failed midway; the plugins can't
+    /// be reached any more, and [`Engine::start`] must follow.
+    pub fn switch_output(&mut self, audio_filter: Option<&str>) -> Result<bool> {
+        let running = self.running.as_mut().context("audio stream isn't running")?;
+        let output_device = find_output_device(&self.audio_host, audio_filter)?;
+        let sample_rate = running.sample_rate as cpal::SampleRate;
+        let Some(output_config) = output_config_at(&output_device, sample_rate)? else {
+            return Ok(false);
+        };
+        log::info!(
+            "Output device: {output_device} ({} ch @ {sample_rate} Hz), plugins kept",
+            output_config.channels()
+        );
+
+        if running.command_tx.push(RackCommand::Detach).is_err() {
+            bail!("the audio command queue is full");
+        }
+        let deadline = Instant::now() + HANDOFF_TIMEOUT;
+        let mut state = loop {
+            if let Ok(state) = running.handoff_rx.pop() {
+                break state;
+            }
+            if Instant::now() >= deadline {
+                bail!("the old output stream didn't hand its plugins over");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        state.rack.set_channels(output_config.channels() as usize);
+        let (stream, handoff_rx) = match build_stream(&output_device, output_config.into(), state) {
+            Ok(built) => built,
+            Err((err, state)) => {
+                self.orphaned = state;
+                return Err(err);
+            }
+        };
+        let old = std::mem::replace(&mut running.stream, stream);
+        running.handoff_rx = handoff_rx;
+        // As in `drop_stream_async`: the old stream's teardown may block.
+        std::thread::spawn(move || drop(old));
+        Ok(true)
+    }
 }
+
+/// `device`'s F32 output config at `sample_rate`, preferring its default
+/// channel count; `None` if it can't run at that rate.
+fn output_config_at(
+    device: &cpal::Device,
+    sample_rate: cpal::SampleRate,
+) -> Result<Option<cpal::SupportedStreamConfig>> {
+    let default_channels = device.default_output_config()?.channels();
+    let mut configs: Vec<cpal::SupportedStreamConfig> = device
+        .supported_output_configs()?
+        .filter(|range| range.sample_format() == cpal::SampleFormat::F32)
+        .filter_map(|range| range.try_with_sample_rate(sample_rate))
+        .collect();
+    configs.sort_by_key(|config| config.channels() != default_channels);
+    Ok(configs.into_iter().next())
+}
+
+/// A started output stream, and where its callback hands its state over.
+type BuiltStream = (cpal::Stream, Consumer<Box<AudioState>>);
+
+/// Starts an output stream on `device` whose callback owns `state`: it applies
+/// queued commands and renders the rack, until [`RackCommand::Detach`] makes it
+/// hand `state` over on the returned queue and play silence from then on. On
+/// failure, `state` comes back with the error — unless the callback had already
+/// taken it, in which case it was dropped with the stream, on this thread.
+fn build_stream(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    state: Box<AudioState>,
+) -> Result<BuiltStream, (anyhow::Error, Option<Box<AudioState>>)> {
+    let (mut handoff_tx, handoff_rx) = ring_buffer::<Box<AudioState>>(1);
+    // The callback gets the state through this slot, so that a failed build can
+    // give it back (the closure, and anything moved into it, is dropped then).
+    let slot = Arc::new(std::sync::Mutex::new(Some(state)));
+    let mut current: Option<Box<AudioState>> = None;
+    let callback_slot = slot.clone();
+    let result = device.build_output_stream(
+        config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            if current.is_none() {
+                // Until the state is taken (the first callback, normally): a
+                // `try_lock`, which never waits, on a lock nobody else holds
+                // once the stream runs.
+                if let Ok(mut slot) = callback_slot.try_lock() {
+                    current = slot.take();
+                }
+            }
+            let Some(state) = current.as_mut() else {
+                data.fill(0.0);
+                return;
+            };
+            let mut detach = false;
+            while let Ok(command) = state.command_rx.pop() {
+                if let RackCommand::Detach = command {
+                    detach = true;
+                    break;
+                }
+                state.rack.apply(command);
+            }
+            if detach {
+                data.fill(0.0);
+                if let Some(state) = current.take()
+                    && let Err(PushError::Full(state)) = handoff_tx.push(state)
+                {
+                    // Can't happen (one detach per stream); leaking beats dropping
+                    // plugins here.
+                    std::mem::forget(state);
+                }
+                return;
+            }
+            state.rack.render(&mut state.midi_rx, data);
+        },
+        |err| log::error!("audio stream error: {err}"),
+        None,
+    );
+    let taken_back = |slot: &std::sync::Mutex<Option<Box<AudioState>>>| slot.lock().ok().and_then(|mut slot| slot.take());
+    let stream = match result {
+        Ok(stream) => stream,
+        Err(err) => return Err((err.into(), taken_back(&slot))),
+    };
+    if let Err(err) = stream.play() {
+        drop(stream);
+        return Err((err.into(), taken_back(&slot)));
+    }
+    Ok((stream, handoff_rx))
+}
+

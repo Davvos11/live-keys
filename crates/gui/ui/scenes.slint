@@ -32,7 +32,7 @@ component SlotHint inherits Rectangle {
 }
 
 // A scene row. Clicking recalls it; dragging moves it in the list; right-click
-// offers loading, saving over, editing and deleting it.
+// offers loading, saving over, editing, duplicating and deleting it.
 component SceneItem inherits Rectangle {
     in property <SceneRow> entry;
     // Where a row being dragged here would land: 0 nowhere, 1 above this row,
@@ -42,6 +42,7 @@ component SceneItem inherits Rectangle {
     callback choose();
     callback overwrite();
     callback edit();
+    callback duplicate();
     callback delete();
     // While dragging, and on letting go: how many rows down (negative: up)
     // from this one the pointer is.
@@ -111,6 +112,10 @@ component SceneItem inherits Rectangle {
             MenuItem {
                 title: "Edit…";
                 activated => { root.edit(); }
+            }
+            MenuItem {
+                title: "Duplicate";
+                activated => { root.duplicate(); }
             }
             MenuItem {
                 title: "Delete…";
@@ -385,6 +390,7 @@ export component ScenesPane inherits VerticalLayout {
                         : index < root.drag-from ? 1 : 2;
                     choose => { AppLogic.load-scene(index); }
                     overwrite => { AppLogic.overwrite-scene(index); }
+                    duplicate => { AppLogic.duplicate-scene(index); }
                     edit => {
                         AppLogic.begin-scene-edit(index);
                         root.mode = 3;
