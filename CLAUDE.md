@@ -64,6 +64,9 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # MIDI inputs it listens to, a MIDI channel/note-range/velocity-range filter, a volume fader, and slot presets: the whole chain
 # with every plugin's settings, browsed by instrument)
 cargo run -p live-keys-gui --release
+SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
+  # the app with live reload: saving a .slint file swaps the UI in place, state kept (development
+  # only; never add the feature to Cargo.toml). Changing a property/callback Rust uses needs a restart.
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, and per slot: MIDI inputs + filter, volume), saved as
 # they change. The rack itself (every slot's chain and plugin settings, current slot preset and scene, open
