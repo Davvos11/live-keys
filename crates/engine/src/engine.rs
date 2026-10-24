@@ -141,7 +141,17 @@ impl SlotChain {
             .chain(&mut self.audio_effects)
     }
 
-    fn position_of(&self, key: PluginKey) -> Option<ChainPosition> {
+    /// The plugin at `position`, if any.
+    pub fn at(&self, position: ChainPosition) -> Option<&LoadedPluginMeta> {
+        match position {
+            ChainPosition::Instrument => self.instrument.as_ref(),
+            ChainPosition::MidiEffect(index) => self.midi_effects.get(index),
+            ChainPosition::Effect(index) => self.audio_effects.get(index),
+        }
+    }
+
+    /// Where the plugin with `key` is, if it's in this chain.
+    pub fn position_of(&self, key: PluginKey) -> Option<ChainPosition> {
         if self.instrument.as_ref().is_some_and(|meta| meta.key == key) {
             return Some(ChainPosition::Instrument);
         }

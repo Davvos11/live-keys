@@ -37,15 +37,6 @@ pub struct MidiInputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SlotConfig {
-    /// `PluginInfo::id` of the instrument last loaded into this slot. Recorded
-    /// only, not auto-loaded.
-    pub plugin_id: Option<String>,
-    /// `PluginInfo::id`s of the MIDI effects last in front of this slot's
-    /// instrument, in order. Recorded only, not auto-loaded.
-    pub midi_effect_ids: Vec<String>,
-    /// `PluginInfo::id`s of the audio effects last after this slot's instrument,
-    /// in order. Recorded only, not auto-loaded.
-    pub effect_ids: Vec<String>,
     /// Which MIDI inputs (bit `n` = `AppConfig::midi_inputs[n]`) it listens to.
     pub midi_inputs: u32,
     /// 0-based MIDI channel, or `None` for omni.
@@ -66,9 +57,6 @@ impl Default for SlotConfig {
     fn default() -> Self {
         let filter = MidiFilter::default();
         Self {
-            plugin_id: None,
-            midi_effect_ids: Vec::new(),
-            effect_ids: Vec::new(),
             midi_inputs: 1,
             midi_channel: filter.channel,
             note_low: filter.note_low,

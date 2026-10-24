@@ -3,13 +3,14 @@ slint::include_modules!();
 mod config;
 mod midi_inputs;
 mod scenes;
+mod session;
 mod slot_presets;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
@@ -30,6 +31,15 @@ const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// the app runs is connected and shows up in Settings. Listing opens an ALSA
 /// sequencer client, so not every UI tick.
 const MIDI_PORT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the autosave timer checks whether to save the session.
+const AUTOSAVE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long after a change the session is saved at the earliest, so a run of
+/// edits is saved once.
+const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
+/// How long every slot must have been silent before the session is saved.
+const AUTOSAVE_QUIET: Duration = Duration::from_secs(3);
+/// A slot peak at or below this (about -80 dB) counts as silence.
+const SILENCE: f32 = 1e-4;
 /// Sentinel entry always shown first in the audio device list, mapping to
 /// `AppConfig.audio_device: None` — lets the OS pick the output device (e.g.
 /// PipeWire's current default sink) instead of a specific one pinned by name.
@@ -353,6 +363,9 @@ struct Rack {
     /// starts from (`AppState.scene-target-name`).
     scene_target: RefCell<Option<std::path::PathBuf>>,
     scene_target_name: RefCell<String>,
+    /// Since when something has changed that the saved session doesn't have
+    /// yet; `None` when it's up to date.
+    session_changed_since: Cell<Option<Instant>>,
     /// Set when the scene pane needs refreshing; the poll timer does it (most
     /// changes happen where there's no window handle).
     scenes_dirty: Cell<bool>,
@@ -399,6 +412,7 @@ impl Rack {
             scene_status: RefCell::default(),
             scene_target: RefCell::default(),
             scene_target_name: RefCell::default(),
+            session_changed_since: Cell::new(None),
             scenes_dirty: Cell::new(true),
         }
     }
@@ -515,13 +529,22 @@ impl Rack {
         self.slot_folders.borrow_mut()[slot] = folder;
     }
 
+    /// Notes that the session needs saving.
+    fn session_changed(&self) {
+        if self.session_changed_since.get().is_none() {
+            self.session_changed_since.set(Some(Instant::now()));
+        }
+    }
+
     fn set_current_slot_preset(&self, slot: usize, current: Option<CurrentSlotPreset>) {
+        self.session_changed();
         self.current_slot_presets.borrow_mut()[slot] = current;
     }
 
     /// Notes that `slot`'s chain changed, so its current slot preset (if any)
     /// shows as changed. Returns whether that's news.
     fn mark_slot_changed(&self, slot: usize) -> bool {
+        self.session_changed();
         self.mark_scene_changed(slot);
         match self.current_slot_presets.borrow_mut()[slot].as_mut() {
             Some(current) if !current.changed => {
@@ -535,6 +558,7 @@ impl Rack {
     /// Notes that `slot`'s chain, settings or routing changed, so the current
     /// scene shows as changed if it includes that slot.
     fn mark_scene_changed(&self, slot: usize) {
+        self.session_changed();
         if let Some(current) = self.current_scene.borrow_mut().as_mut()
             && !current.changed
             && current.slots.contains(&slot)
@@ -617,6 +641,7 @@ impl Rack {
         };
         *self.scene_store.borrow_mut() = scenes::list();
         self.scenes_dirty.set(true);
+        self.session_changed();
     }
 
     /// The current scene as stored.
@@ -786,6 +811,7 @@ impl Rack {
     }
 
     fn set_current_preset_changed(&self, key: PluginKey, preset: Option<PresetInfo>, changed: bool) {
+        self.session_changed();
         let mut current = self.current_presets.borrow_mut();
         match preset {
             Some(preset) => current.insert(key, CurrentPreset { preset, changed }),
@@ -948,19 +974,6 @@ impl Rack {
             }
         }
     }
-}
-
-/// Mirrors `slot`'s chain into the config, so the last setup is on record.
-fn record_chain(config: &RefCell<config::AppConfig>, engine: &Engine, slot: usize) {
-    let mut config = config.borrow_mut();
-    if let Some(chain) = engine.slot(slot) {
-        let slot_config = &mut config.slots[slot];
-        slot_config.plugin_id = chain.instrument.as_ref().map(|meta| meta.id.clone());
-        let ids = |section| chain.effects(section).iter().map(|meta| meta.id.clone()).collect();
-        slot_config.midi_effect_ids = ids(Section::Midi);
-        slot_config.effect_ids = ids(Section::Audio);
-    }
-    log_on_err(config::save(&config));
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1229,7 +1242,7 @@ fn main() -> anyhow::Result<()> {
             });
             let error = match result {
                 Ok(_) => {
-                    record_chain(&config, &engine.borrow(), slot);
+                    rack.session_changed();
                     rack.mark_slot_changed(slot);
                     None
                 }
@@ -1243,7 +1256,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     {
-        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_unload_plugin(move |slot| {
@@ -1257,14 +1269,13 @@ fn main() -> anyhow::Result<()> {
                 rack.forget(key);
             }
             engine.borrow_mut().unload_instrument(slot);
-            record_chain(&config, &engine.borrow(), slot);
+            rack.session_changed();
             rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
 
     {
-        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_remove_effect(move |slot, section, index| {
@@ -1278,14 +1289,13 @@ fn main() -> anyhow::Result<()> {
                 rack.forget(key);
             }
             engine.borrow_mut().remove_effect(slot, section, index);
-            record_chain(&config, &engine.borrow(), slot);
+            rack.session_changed();
             rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
 
     {
-        let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_move_effect(move |slot, section, from, to| {
@@ -1293,7 +1303,7 @@ fn main() -> anyhow::Result<()> {
             engine
                 .borrow_mut()
                 .move_effect(slot, section_from(section), from as usize, to as usize);
-            record_chain(&config, &engine.borrow(), slot);
+            rack.session_changed();
             rack.mark_slot_changed(slot);
             rack.refresh_slot(&engine.borrow(), slot, None);
         });
@@ -1991,7 +2001,56 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Restore the last session once the window is up, so it shows while
+    // plugins load.
+    let restored = Rc::new(Cell::new(false));
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let restored = restored.clone();
+        let app_weak = app.as_weak();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(app) = app_weak.upgrade() {
+                restored.set(restore_session(&engine, &config, &rack, &app.global::<AppLogic>()));
+            }
+        });
+    }
+
+    // Saves the session after a change, once every slot has been quiet for
+    // `AUTOSAVE_QUIET` (saving can briefly silence a plugin).
+    let autosave_timer = slint::Timer::default();
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let mut last_sound = Instant::now();
+        autosave_timer.start(slint::TimerMode::Repeated, AUTOSAVE_POLL_INTERVAL, move || {
+            let loud = (0..SLOT_COUNT).any(|slot| engine.borrow_mut().take_slot_peak(slot) > SILENCE);
+            if loud {
+                last_sound = Instant::now();
+            }
+            let Some(since) = rack.session_changed_since.get() else {
+                return;
+            };
+            if since.elapsed() >= AUTOSAVE_DELAY && last_sound.elapsed() >= AUTOSAVE_QUIET {
+                save_session(&engine, &rack);
+            }
+        });
+    }
+
+    // Closing the main window quits, even with parameter windows still open.
+    app.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
     app.run()?;
+    drop(autosave_timer);
+    // Always on a normal exit (some plugin settings change without the host
+    // seeing it), unless the last session wasn't restored and nothing has
+    // happened since, which would overwrite it with an empty rack.
+    if restored.get() || rack.session_changed_since.get().is_some() {
+        save_session(&engine, &rack);
+    }
     Ok(())
 }
 
@@ -2091,7 +2150,7 @@ fn load_slot_preset(
         }
     }
 
-    record_chain(config, &engine.borrow(), slot);
+    rack.session_changed();
     rack.set_current_slot_preset(
         slot,
         Some(CurrentSlotPreset {
@@ -2192,6 +2251,119 @@ fn load_scene(
     *rack.current_scene.borrow_mut() = Some(CurrentScene::of(stored, failed));
     *rack.scene_status.borrow_mut() = String::new();
     rack.scenes_dirty.set(true);
+    rack.session_changed();
+}
+
+/// Saves the session: every slot, the current scene, and which plugin windows
+/// are open. Lending LV2 plugins with state silences them meanwhile, so it's
+/// done on exit and, after a change, once the rack has been quiet for a while.
+fn save_session(engine: &RefCell<Engine>, rack: &Rack) {
+    rack.session_changed_since.set(None);
+    let slots = (0..SLOT_COUNT)
+        .map(|slot| {
+            let engine = engine.borrow();
+            let chain = engine.slot(slot);
+            let positions = |keys: Vec<PluginKey>| -> Vec<session::Position> {
+                keys.into_iter()
+                    .filter_map(|key| chain?.position_of(key).map(session::Position::from))
+                    .collect()
+            };
+            session::SlotToSave {
+                slot_preset: rack.current_slot_presets.borrow()[slot].as_ref().map(|current| {
+                    scenes::SlotPresetRef {
+                        dir: current.dir.clone(),
+                        name: current.name.clone(),
+                        changed: current.changed,
+                    }
+                }),
+                open_guis: positions(rack.open_uis.borrow().keys().copied().collect()),
+                open_params: positions(rack.param_windows.borrow().keys().copied().collect()),
+            }
+        })
+        .collect();
+    let current_scene = rack.current_scene.borrow().as_ref().map(|current| session::CurrentSceneRef {
+        dir: current.dir.clone(),
+        changed: current.changed,
+    });
+    let result = session::save(&mut engine.borrow_mut(), slots, current_scene, |key| {
+        rack.plugin_preset_state(key)
+    });
+    if let Err(err) = result {
+        log::error!("saving the session failed: {err:#}");
+    }
+}
+
+/// Restores the session saved last time, if any: each slot's chain and
+/// settings, its slot preset, the current scene, and the plugin windows that
+/// were open. Skipped if the last attempt never finished (a plugin crashed the
+/// app during it). Returns whether it was restored (or there was nothing to
+/// restore).
+fn restore_session(
+    engine: &RefCell<Engine>,
+    config: &RefCell<config::AppConfig>,
+    rack: &Rack,
+    logic: &AppLogic<'_>,
+) -> bool {
+    let Some((saved, chains)) = session::load() else {
+        return true;
+    };
+    if !session::begin_restore() {
+        log::error!("not restoring the last session: the app quit while restoring it last time");
+        rack.refresh_slot(
+            &engine.borrow(),
+            0,
+            Some("The last session wasn't restored: the app quit while restoring it last time.".into()),
+        );
+        session::end_restore();
+        return false;
+    }
+    let mut windows = Vec::new();
+    for (slot, chain) in chains {
+        if slot >= SLOT_COUNT {
+            continue;
+        }
+        let errors = match chain {
+            Ok(chain) => load_slot_preset(engine, config, rack, slot, &chain),
+            Err(err) => vec![format!("The last session's slot {} couldn't be read: {err:#}", slot + 1)],
+        };
+        let saved_slot = saved.slots.iter().find(|saved_slot| saved_slot.slot == slot);
+        let slot_preset = saved_slot
+            .and_then(|saved_slot| saved_slot.slot_preset.as_ref())
+            .filter(|preset| preset.dir.is_dir())
+            .map(|preset| CurrentSlotPreset {
+                dir: preset.dir.clone(),
+                name: preset.name.clone(),
+                changed: preset.changed || !errors.is_empty(),
+            });
+        rack.set_current_slot_preset(slot, slot_preset);
+        if let Some(saved_slot) = saved_slot {
+            windows.push((slot, saved_slot.open_guis.clone(), saved_slot.open_params.clone()));
+        }
+        rack.refresh_slot(&engine.borrow(), slot, (!errors.is_empty()).then(|| errors.join("\n")));
+    }
+    if let Some(scene) = saved.current_scene
+        && let Some(stored) = rack.stored_scene(&scene.dir)
+    {
+        *rack.current_scene.borrow_mut() = Some(CurrentScene::of(&stored, scene.changed));
+        rack.scenes_dirty.set(true);
+    }
+    session::end_restore();
+
+    // Reopen plugin windows once everything is loaded.
+    for (slot, guis, params) in windows {
+        let key_at = |position: session::Position| {
+            engine.borrow().slot(slot).and_then(|chain| chain.at(position.into())).map(|meta| meta.key as i32)
+        };
+        for key in guis.into_iter().filter_map(key_at) {
+            logic.invoke_open_plugin_gui(key);
+        }
+        for key in params.into_iter().filter_map(key_at) {
+            logic.invoke_toggle_params(key);
+        }
+    }
+    // Restoring isn't a change.
+    rack.session_changed_since.set(None);
+    true
 }
 
 /// Removes every plugin from `slot` and resets its MIDI routing and volume to
@@ -2224,7 +2396,7 @@ fn clear_slot(engine: &RefCell<Engine>, config: &RefCell<config::AppConfig>, rac
         engine.set_slot_gain(slot, slot_config.gain());
         rack.set_routing(slot, slot_config, config.midi_inputs.len());
     }
-    record_chain(config, &engine.borrow(), slot);
+    rack.session_changed();
     rack.set_current_slot_preset(slot, None);
 }
 

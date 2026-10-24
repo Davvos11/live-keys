@@ -65,9 +65,11 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # with every plugin's settings, browsed by instrument)
 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
-# folders, pinned plugin ids, favourite preset ids, and per slot: last instrument id + MIDI/audio effect ids, MIDI
-# inputs + filter, volume), loaded on startup. Slot presets live in ~/.local/share/live-keys/slot-presets/,
-# scenes in ~/.local/share/live-keys/scenes/. Plugin ids are only recorded, not auto-loaded on startup; filters/volumes are applied.
+# folders, pinned plugin ids, favourite preset ids, and per slot: MIDI inputs + filter, volume), saved as
+# they change. The rack itself (every slot's chain and plugin settings, current slot preset and scene, open
+# plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
+# once the rack is quiet, and restored on startup. Slot presets live in
+# ~/.local/share/live-keys/slot-presets/, scenes in ~/.local/share/live-keys/scenes/.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
@@ -586,7 +588,26 @@ behind format-agnostic cores:
   Scene state lives in `Rack` (`scene_store`, `scene_query`, `current_scene`, `scene_rows`)
   and is pushed to `AppState` by `Rack::refresh_scenes`, which the poll timer runs whenever
   `scenes_dirty` is set, since most
-  changes happen where there's no window handle. `AppLogic` actions take the slot index for structural changes
+  changes happen where there's no window handle.
+  **Session** (`src/session.rs`): the rack as last saved — per slot a complete slot preset
+  in `<data dir>/live-keys/session/slot-<n>/` (`slot_presets::write`, the folder swapped in
+  via `replace_dir`), and `session.json` with each slot's library slot preset, which plugins
+  had their GUI or parameter window open (`session::Position`, from
+  `SlotChain::position_of`), and the current scene with its changed flag. Routing, volumes,
+  devices etc. aren't in it: the config has them. `save_session` runs on exit (always — some
+  plugin settings, like setBfree's atoms, change unseen — unless the last session wasn't
+  restored and nothing changed since) and from the autosave timer: once
+  `Rack::session_changed_since` (set by `session_changed`, from the change markers, slot and
+  plugin preset changes and scene changes) is `AUTOSAVE_DELAY` old and every slot has been
+  silent (`Engine::take_slot_peak` ≤ `SILENCE`) for `AUTOSAVE_QUIET` — saving lends LV2
+  plugins with state, which silences them, so never while playing. `restore_session` runs
+  from a zero-delay timer once the window is up: each slot through `load_slot_preset`, then
+  the slot presets and scene shown, then the plugin windows reopened (`invoke_open_plugin_gui`,
+  `invoke_toggle_params`). A marker file (`session.restoring`) is written for the duration:
+  if it's there at startup, the last restore crashed or hung, so this one is skipped (with
+  a note in slot 1's status line) and the marker cleared, so the next start tries again.
+  Closing the main window quits the app (`on_close_requested` → `quit_event_loop`), even
+  with parameter windows open, so the exit save always runs. `AppLogic` actions take the slot index for structural changes
   (`pick-plugin`, `remove-effect(slot, section, index)`, `move-effect(slot, section, from,
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
   (`open-plugin-gui`, `toggle-params`, `set-param`, `save-preset`, `delete-preset`); the
@@ -626,7 +647,7 @@ behind format-agnostic cores:
   defaults. An open LV2 GUI is told host-side changes (`Rack::notify_ui`; every value on opening
   and after a preset load, in `refresh_param_rows`), and the poll timer forwards
   `Engine::drain_ui_events` to open LV2 GUIs (dropping events of plugins without one).
-  Every structural change re-records the slot's chain into the config (`record_chain`). Meant as the base for
+  Meant as the base for
   future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
   in `ui/range_slider.slint`, since std-widgets has none; note names shown using C4 = 60) and a
