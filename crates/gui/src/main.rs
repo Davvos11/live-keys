@@ -238,8 +238,20 @@ struct CurrentSlotPreset {
 struct CurrentScene {
     dir: std::path::PathBuf,
     name: String,
+    /// The slots it restores or clears.
     slots: Vec<usize>,
     changed: bool,
+}
+
+impl CurrentScene {
+    fn of(stored: &scenes::Stored, changed: bool) -> Self {
+        Self {
+            dir: stored.dir.clone(),
+            name: stored.scene.name.clone(),
+            slots: stored.scene.affected_slots(),
+            changed,
+        }
+    }
 }
 
 /// What a slot's slot-preset browser shows: every instrument's folder, or one
@@ -334,9 +346,13 @@ struct Rack {
     /// Backs `AppState.scene-rows`: the scenes matching `scene_query`.
     scene_rows: Rc<VecModel<SceneRow>>,
     current_scene: RefCell<Option<CurrentScene>>,
-    /// Backs `AppState.scene-save-slots`.
-    scene_save_slots: Rc<VecModel<bool>>,
+    /// Backs `AppState.scene-form-slots`.
+    scene_form_slots: Rc<VecModel<SceneSlotChoice>>,
     scene_status: RefCell<String>,
+    /// The scene being edited or deleted (its folder), and the name the form
+    /// starts from (`AppState.scene-target-name`).
+    scene_target: RefCell<Option<std::path::PathBuf>>,
+    scene_target_name: RefCell<String>,
     /// Set when the scene pane needs refreshing; the poll timer does it (most
     /// changes happen where there's no window handle).
     scenes_dirty: Cell<bool>,
@@ -379,8 +395,10 @@ impl Rack {
             scene_query: RefCell::default(),
             scene_rows: Rc::new(VecModel::default()),
             current_scene: RefCell::new(None),
-            scene_save_slots: Rc::new(VecModel::from(vec![false; SLOT_COUNT])),
+            scene_form_slots: Rc::new(VecModel::from(vec![SceneSlotChoice::default(); SLOT_COUNT])),
             scene_status: RefCell::default(),
+            scene_target: RefCell::default(),
+            scene_target_name: RefCell::default(),
             scenes_dirty: Cell::new(true),
         }
     }
@@ -547,9 +565,14 @@ impl Rack {
         let rows = self
             .shown_scenes()
             .into_iter()
-            .map(|index| SceneRow {
-                name: store[index].scene.name.as_str().into(),
-                current: current.as_ref().is_some_and(|c| c.dir == store[index].dir),
+            .map(|index| {
+                let scene = &store[index].scene;
+                let modes: Vec<i32> = (0..SLOT_COUNT).map(|slot| scene.mode(slot).index()).collect();
+                SceneRow {
+                    name: scene.name.as_str().into(),
+                    current: current.as_ref().is_some_and(|c| c.dir == store[index].dir),
+                    modes: ModelRc::new(VecModel::from(modes)),
+                }
             })
             .collect();
         sync_model(&self.scene_rows, rows);
@@ -557,6 +580,49 @@ impl Rack {
         state.set_current_scene(current.as_ref().map(|c| c.name.as_str()).unwrap_or_default().into());
         state.set_current_scene_changed(current.as_ref().is_some_and(|c| c.changed));
         state.set_scene_status(self.scene_status.borrow().as_str().into());
+        state.set_scene_target_name(self.scene_target_name.borrow().as_str().into());
+    }
+
+    /// The scene in row `index` of the list, or the current scene for -1.
+    fn scene_at(&self, index: i32) -> Option<scenes::Stored> {
+        if index < 0 {
+            return self.current_scene_stored();
+        }
+        let shown = self.shown_scenes();
+        let &index = shown.get(index as usize)?;
+        self.scene_store.borrow().get(index).cloned()
+    }
+
+    fn stored_scene(&self, dir: &std::path::Path) -> Option<scenes::Stored> {
+        self.scene_store.borrow().iter().find(|stored| stored.dir == dir).cloned()
+    }
+
+    /// Makes `stored` the scene to edit or delete.
+    fn target_scene(&self, stored: &scenes::Stored) {
+        *self.scene_target.borrow_mut() = Some(stored.dir.clone());
+        *self.scene_target_name.borrow_mut() = stored.scene.name.clone();
+        self.scene_status.borrow_mut().clear();
+        self.scenes_dirty.set(true);
+    }
+
+    /// Re-reads the scenes on disk, after one was saved, changed or deleted, and
+    /// shows `result`'s error, if any.
+    fn after_scene_change(&self, action: &str, name: &str, result: anyhow::Result<()>) {
+        *self.scene_status.borrow_mut() = match result {
+            Ok(()) => String::new(),
+            Err(err) => {
+                log::error!("{action} scene '{name}' failed: {err:#}");
+                format!("{action} scene \"{name}\" failed: {err:#}")
+            }
+        };
+        *self.scene_store.borrow_mut() = scenes::list();
+        self.scenes_dirty.set(true);
+    }
+
+    /// The current scene as stored.
+    fn current_scene_stored(&self) -> Option<scenes::Stored> {
+        let dir = self.current_scene.borrow().as_ref()?.dir.clone();
+        self.stored_scene(&dir)
     }
 
     /// Re-reads the slot presets on disk, after one was saved or deleted.
@@ -946,7 +1012,7 @@ fn main() -> anyhow::Result<()> {
 
     state.set_midi_inputs(ModelRc::from(midi_inputs.rows.clone()));
     state.set_scene_rows(ModelRc::from(rack.scene_rows.clone()));
-    state.set_scene_save_slots(ModelRc::from(rack.scene_save_slots.clone()));
+    state.set_scene_form_slots(ModelRc::from(rack.scene_form_slots.clone()));
     state.set_max_midi_inputs(MAX_MIDI_INPUTS as i32);
 
     state.set_default_plugin_folders(string_model(default_plugin_search_paths()));
@@ -1632,12 +1698,9 @@ fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_load_scene(move |index| {
-            let shown = rack.shown_scenes();
-            let Some(&index) = usize::try_from(index).ok().and_then(|index| shown.get(index)) else {
-                return;
-            };
-            let stored = rack.scene_store.borrow()[index].clone();
-            load_scene(&engine, &config, &rack, &stored);
+            if let Some(stored) = rack.scene_at(index) {
+                load_scene(&engine, &config, &rack, &stored);
+            }
         });
     }
 
@@ -1645,22 +1708,67 @@ fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         let rack = rack.clone();
         logic.on_begin_scene_save(move || {
-            let included: Vec<bool> = match rack.current_scene.borrow().as_ref() {
-                Some(current) => (0..SLOT_COUNT).map(|slot| current.slots.contains(&slot)).collect(),
-                None => (0..SLOT_COUNT)
-                    .map(|slot| engine.borrow().slot(slot).is_some_and(|chain| chain.plugins().next().is_some()))
-                    .collect(),
-            };
-            sync_model(&rack.scene_save_slots, included);
+            let current = rack.current_scene_stored();
+            *rack.scene_target.borrow_mut() = None;
+            rack.scene_status.borrow_mut().clear();
+            *rack.scene_target_name.borrow_mut() =
+                current.as_ref().map(|stored| stored.scene.name.clone()).unwrap_or_default();
+            rack.scenes_dirty.set(true);
+            let choices = (0..SLOT_COUNT)
+                .map(|slot| {
+                    let mode = match &current {
+                        Some(stored) => stored.scene.mode(slot),
+                        None if engine.borrow().slot(slot).is_some_and(|chain| chain.plugins().next().is_some()) => {
+                            scenes::SlotMode::Restore
+                        }
+                        None => scenes::SlotMode::Leave,
+                    };
+                    // Saving stores whatever the slot holds now.
+                    SceneSlotChoice {
+                        mode: mode.index(),
+                        can_restore: true,
+                    }
+                })
+                .collect();
+            sync_model(&rack.scene_form_slots, choices);
         });
     }
 
     {
         let rack = rack.clone();
-        logic.on_toggle_scene_save_slot(move |slot| {
+        logic.on_begin_scene_edit(move |index| {
+            let Some(stored) = rack.scene_at(index) else {
+                return;
+            };
+            rack.target_scene(&stored);
+            let choices = (0..SLOT_COUNT)
+                .map(|slot| SceneSlotChoice {
+                    mode: stored.scene.mode(slot).index(),
+                    can_restore: stored.scene.can_restore(slot),
+                })
+                .collect();
+            sync_model(&rack.scene_form_slots, choices);
+        });
+    }
+
+    {
+        let rack = rack.clone();
+        logic.on_begin_scene_delete(move |index| {
+            if let Some(stored) = rack.scene_at(index) {
+                rack.target_scene(&stored);
+            }
+        });
+    }
+
+    {
+        let rack = rack.clone();
+        logic.on_set_scene_slot_mode(move |slot, mode| {
             let slot = slot as usize;
-            if let Some(included) = rack.scene_save_slots.row_data(slot) {
-                rack.scene_save_slots.set_row_data(slot, !included);
+            if let Some(mut choice) = rack.scene_form_slots.row_data(slot)
+                && (mode != scenes::SlotMode::Restore.index() || choice.can_restore)
+            {
+                choice.mode = mode;
+                rack.scene_form_slots.set_row_data(slot, choice);
             }
         });
     }
@@ -1674,69 +1782,105 @@ fn main() -> anyhow::Result<()> {
             if name.is_empty() {
                 return;
             }
-            let slots: Vec<scenes::SlotToSave> = rack
-                .scene_save_slots
+            let modes: Vec<scenes::SlotMode> = rack
+                .scene_form_slots
                 .iter()
-                .enumerate()
-                .filter(|(_, included)| *included)
-                .map(|(slot, _)| scenes::SlotToSave {
-                    slot,
-                    routing: config.borrow().slots[slot].routing(),
-                    slot_preset: rack.current_slot_presets.borrow()[slot].as_ref().map(|current| {
-                        scenes::SlotPresetRef {
-                            dir: current.dir.clone(),
-                            name: current.name.clone(),
-                            changed: current.changed,
-                        }
-                    }),
-                })
+                .map(|choice| scenes::SlotMode::from_index(choice.mode))
                 .collect();
-            let result = scenes::save(&mut engine.borrow_mut(), name, &slots, |key| {
-                rack.plugin_preset_state(key)
-            });
-            *rack.scene_status.borrow_mut() = match result {
-                Ok(stored) => {
-                    *rack.current_scene.borrow_mut() = Some(CurrentScene {
-                        dir: stored.dir,
-                        slots: stored.scene.slots.iter().map(|included| included.slot).collect(),
-                        name: stored.scene.name,
-                        changed: false,
-                    });
-                    String::new()
-                }
-                Err(err) => {
-                    log::error!("failed to save scene '{name}': {err:#}");
-                    format!("Saving scene \"{name}\" failed: {err:#}")
-                }
+            // Saving under an existing scene's name overwrites it.
+            let folder = slot_presets::file_name(name);
+            let previous = rack
+                .scene_store
+                .borrow()
+                .iter()
+                .find(|stored| stored.dir.file_name().is_some_and(|other| other.to_string_lossy() == folder))
+                .cloned();
+            let result = save_scene(&engine, &config, &rack, name, &modes, previous.as_ref());
+            rack.after_scene_change("Saving", name, result);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_overwrite_scene(move |index| {
+            let Some(stored) = rack.scene_at(index) else {
+                return;
             };
-            *rack.scene_store.borrow_mut() = scenes::list();
-            rack.scenes_dirty.set(true);
+            let modes: Vec<scenes::SlotMode> = (0..SLOT_COUNT).map(|slot| stored.scene.mode(slot)).collect();
+            let name = stored.scene.name.clone();
+            let result = save_scene(&engine, &config, &rack, &name, &modes, Some(&stored));
+            rack.after_scene_change("Saving", &name, result);
+        });
+    }
+
+    {
+        let rack = rack.clone();
+        logic.on_edit_scene(move |name| {
+            let name = name.trim();
+            let target = rack.scene_target.borrow().clone();
+            let Some(stored) = target.and_then(|dir| rack.stored_scene(&dir)) else {
+                return;
+            };
+            if name.is_empty() {
+                return;
+            }
+            let modes: Vec<scenes::SlotMode> = rack
+                .scene_form_slots
+                .iter()
+                .map(|choice| scenes::SlotMode::from_index(choice.mode))
+                .collect();
+            let result = scenes::update(&stored, name, &modes).map(|updated| {
+                let mut current = rack.current_scene.borrow_mut();
+                if let Some(current) = current.as_mut().filter(|current| current.dir == stored.dir) {
+                    *current = CurrentScene::of(&updated, current.changed);
+                }
+            });
+            rack.after_scene_change("Changing", &stored.scene.name, result);
         });
     }
 
     {
         let rack = rack.clone();
         logic.on_delete_scene(move || {
-            let Some((dir, name)) = rack
-                .current_scene
-                .borrow()
-                .as_ref()
-                .map(|current| (current.dir.clone(), current.name.clone()))
-            else {
+            let target = rack.scene_target.borrow().clone();
+            let Some(stored) = target.and_then(|dir| rack.stored_scene(&dir)) else {
                 return;
             };
-            *rack.scene_status.borrow_mut() = match scenes::delete(&dir) {
-                Ok(()) => {
-                    *rack.current_scene.borrow_mut() = None;
-                    String::new()
+            let result = scenes::delete(&stored.dir).map(|()| {
+                let mut current = rack.current_scene.borrow_mut();
+                if current.as_ref().is_some_and(|current| current.dir == stored.dir) {
+                    *current = None;
                 }
-                Err(err) => {
-                    log::error!("failed to delete scene '{name}': {err:#}");
-                    format!("Deleting scene \"{name}\" failed: {err:#}")
-                }
+            });
+            rack.after_scene_change("Deleting", &stored.scene.name, result);
+        });
+    }
+
+    {
+        let rack = rack.clone();
+        logic.on_move_scene(move |from, to| {
+            let (Some(moved), Some(target)) = (rack.scene_at(from), rack.scene_at(to)) else {
+                return;
             };
-            *rack.scene_store.borrow_mut() = scenes::list();
-            rack.scenes_dirty.set(true);
+            let Some(position) = rack.scene_store.borrow().iter().position(|stored| stored.dir == target.dir) else {
+                return;
+            };
+            let result = scenes::move_to(&moved.dir, position);
+            rack.after_scene_change("Moving", &moved.scene.name, result);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_clear_slot(move |slot| {
+            let slot = slot as usize;
+            clear_slot(&engine, &config, &rack, slot);
+            rack.mark_slot_changed(slot);
+            rack.refresh_slot(&engine.borrow(), slot, None);
         });
     }
 
@@ -1959,10 +2103,42 @@ fn load_slot_preset(
     errors
 }
 
-/// Recalls scene `stored`: each slot it includes gets the scene's chain (as
+/// Saves the slots as scene `name`, with `modes` per slot, and makes it the
+/// current scene. `previous` is the scene being overwritten, if any.
+fn save_scene(
+    engine: &RefCell<Engine>,
+    config: &RefCell<config::AppConfig>,
+    rack: &Rack,
+    name: &str,
+    modes: &[scenes::SlotMode],
+    previous: Option<&scenes::Stored>,
+) -> anyhow::Result<()> {
+    let slots: Vec<scenes::SlotToSave> = modes
+        .iter()
+        .enumerate()
+        .map(|(slot, &mode)| scenes::SlotToSave {
+            slot,
+            mode,
+            routing: config.borrow().slots[slot].routing(),
+            slot_preset: rack.current_slot_presets.borrow()[slot].as_ref().map(|current| scenes::SlotPresetRef {
+                dir: current.dir.clone(),
+                name: current.name.clone(),
+                changed: current.changed,
+            }),
+        })
+        .collect();
+    let stored = scenes::save(&mut engine.borrow_mut(), name, &slots, previous, |key| {
+        rack.plugin_preset_state(key)
+    })?;
+    *rack.current_scene.borrow_mut() = Some(CurrentScene::of(&stored, false));
+    Ok(())
+}
+
+/// Recalls scene `stored`: each slot it restores gets the scene's chain (as
 /// [`load_slot_preset`] does, so plugins already in place are kept), its
-/// routing and volume; other slots are left alone. What goes wrong is shown in
-/// the slot's status line; the rest is recalled anyway.
+/// routing and volume; each slot it clears is emptied; the others are left
+/// alone. What goes wrong is shown in the slot's status line; the rest is
+/// recalled anyway.
 fn load_scene(
     engine: &RefCell<Engine>,
     config: &RefCell<config::AppConfig>,
@@ -1971,7 +2147,16 @@ fn load_scene(
 ) {
     let mut failed = false;
     for slot in 0..SLOT_COUNT {
-        let Some((included, chain)) = stored.slot(slot) else {
+        match stored.scene.mode(slot) {
+            scenes::SlotMode::Leave => continue,
+            scenes::SlotMode::Clear => {
+                clear_slot(engine, config, rack, slot);
+                rack.refresh_slot(&engine.borrow(), slot, None);
+                continue;
+            }
+            scenes::SlotMode::Restore => {}
+        }
+        let Some((saved, chain)) = stored.saved(slot) else {
             continue;
         };
         let errors = match chain {
@@ -1983,7 +2168,7 @@ fn load_scene(
         };
         failed |= !errors.is_empty();
         // The library slot preset it showed, if that still exists.
-        let slot_preset = included
+        let slot_preset = saved
             .slot_preset
             .as_ref()
             .filter(|preset| preset.dir.is_dir())
@@ -1995,7 +2180,7 @@ fn load_scene(
         rack.set_current_slot_preset(slot, slot_preset);
 
         let mut config = config.borrow_mut();
-        config.slots[slot].set_routing(included.routing);
+        config.slots[slot].set_routing(saved.routing);
         let slot_config = &config.slots[slot];
         let mut engine = engine.borrow_mut();
         engine.set_slot_filter(slot, slot_config.filter());
@@ -2004,14 +2189,43 @@ fn load_scene(
         rack.refresh_slot(&engine, slot, (!errors.is_empty()).then(|| errors.join("\n")));
     }
     log_on_err(config::save(&config.borrow()));
-    *rack.current_scene.borrow_mut() = Some(CurrentScene {
-        dir: stored.dir.clone(),
-        name: stored.scene.name.clone(),
-        slots: stored.scene.slots.iter().map(|included| included.slot).collect(),
-        changed: failed,
-    });
+    *rack.current_scene.borrow_mut() = Some(CurrentScene::of(stored, failed));
     *rack.scene_status.borrow_mut() = String::new();
     rack.scenes_dirty.set(true);
+}
+
+/// Removes every plugin from `slot` and resets its MIDI routing and volume to
+/// the defaults; it no longer shows a slot preset.
+fn clear_slot(engine: &RefCell<Engine>, config: &RefCell<config::AppConfig>, rack: &Rack, slot: usize) {
+    let keys: Vec<PluginKey> = engine
+        .borrow()
+        .slot(slot)
+        .map(|chain| chain.plugins().map(|meta| meta.key).collect())
+        .unwrap_or_default();
+    for key in keys {
+        rack.forget(key);
+    }
+    {
+        let mut engine = engine.borrow_mut();
+        engine.unload_instrument(slot);
+        for section in [Section::Midi, Section::Audio] {
+            let count = engine.slot(slot).map_or(0, |chain| chain.effects(section).len());
+            for _ in 0..count {
+                engine.remove_effect(slot, section, 0);
+            }
+        }
+    }
+    {
+        let mut config = config.borrow_mut();
+        config.slots[slot].set_routing(config::SlotConfig::default().routing());
+        let slot_config = &config.slots[slot];
+        let mut engine = engine.borrow_mut();
+        engine.set_slot_filter(slot, slot_config.filter());
+        engine.set_slot_gain(slot, slot_config.gain());
+        rack.set_routing(slot, slot_config, config.midi_inputs.len());
+    }
+    record_chain(config, &engine.borrow(), slot);
+    rack.set_current_slot_preset(slot, None);
 }
 
 /// Runs `action` on the engine, first starting the audio stream on the

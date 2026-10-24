@@ -1,4 +1,4 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, Palette, Slider, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, HorizontalBox, Palette, Slider, VerticalBox } from "std-widgets.slint";
 import { RangeSlider } from "range_slider.slint";
 import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
 import { PresetBar } from "preset_bar.slint";
@@ -123,13 +123,11 @@ component EffectList inherits VerticalLayout {
     }
 }
 
-component SlotPanel inherits GroupBox {
+component SlotPanel inherits VerticalLayout {
     in property <int> slot-index;
     in property <SlotState> slot;
     // Asks for the plugin picker, opened on `category`.
     callback choose-plugin(/* category */ int);
-
-    title: "Slot \{root.slot-index + 1}";
 
     // MIDI note number as a name, with middle C (60) as C4.
     function note-name(note: int) -> string {
@@ -143,6 +141,22 @@ component SlotPanel inherits GroupBox {
     // Top to bottom in signal order: which MIDI the slot takes, MIDI effects,
     // instrument, audio effects, volume; then the slot's presets.
     VerticalBox {
+        padding-top: 0px;
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: "Slot \{root.slot-index + 1}";
+                font-size: 16px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "Clear";
+                clicked => { AppLogic.clear-slot(root.slot-index); }
+            }
+        }
+
         SectionTitle { text: "MIDI in"; }
 
         HorizontalLayout {
@@ -311,7 +325,7 @@ export component LiveTab inherits HorizontalBox {
     callback choose-plugin(/* slot */ int, /* category */ int);
 
     ScenesPane {
-        width: 200px;
+        width: 240px;
     }
 
     for slot[i] in AppState.slots : SlotPanel {

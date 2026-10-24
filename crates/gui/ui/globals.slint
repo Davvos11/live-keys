@@ -100,6 +100,16 @@ export struct SceneRow {
     name: string,
     // The scene last recalled or saved.
     current: bool,
+    // Per slot, what recalling it does: 0 leave unchanged, 1 restore, 2 clear.
+    modes: [int],
+}
+
+// One slot in the scene save/edit form.
+export struct SceneSlotChoice {
+    // As in `SceneRow.modes`.
+    mode: int,
+    // Whether there's (or, when saving, will be) a setup to restore.
+    can-restore: bool,
 }
 
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
@@ -149,11 +159,15 @@ export global AppState {
     // includes changed since.
     in property <string> current-scene;
     in property <bool> current-scene-changed;
-    // Per slot, whether the scene being saved includes it (set by
-    // `AppLogic.begin-scene-save`, toggled by `toggle-scene-save-slot`).
-    in property <[bool]> scene-save-slots;
+    // Per slot, its mode in the scene being saved or edited (set by
+    // `AppLogic.begin-scene-save`/`begin-scene-edit`, changed by
+    // `set-scene-slot-mode`).
+    in property <[SceneSlotChoice]> scene-form-slots;
     // The last scene error; empty if none.
     in property <string> scene-status;
+    // The name of the scene being saved over, edited or deleted (for saving:
+    // the current scene's, "" if none).
+    in property <string> scene-target-name;
     in property <[string]> default-plugin-folders;
     in property <[string]> extra-plugin-folders;
     // Every plugin found, as "name — kind (format)", for the Settings tab.
@@ -206,6 +220,8 @@ export global AppLogic {
     // to the slot's MIDI or audio effects, depending on `category`.
     callback pick-plugin(/* slot */ int, /* category */ int, /* plugin id */ string);
     callback unload-plugin(/* slot */ int);
+    // Removes every plugin from the slot.
+    callback clear-slot(/* slot */ int);
     callback remove-effect(/* slot */ int, /* section */ int, /* index */ int);
     callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
     // Opens `key`'s parameter window, or closes it if open.
@@ -238,14 +254,23 @@ export global AppLogic {
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
-    // Scenes. `index` is into `AppState.scene-rows`.
+    // Scenes. `index` is into `AppState.scene-rows`; -1 means the current scene.
     callback filter-scenes(/* query */ string);
     callback load-scene(/* index */ int);
-    // Picks the slots a new save includes: the current scene's, else every
-    // slot with plugins.
+    // Fills the form's slot modes: the current scene's, else restore for
+    // every slot with plugins and leave unchanged for the others.
     callback begin-scene-save();
-    callback toggle-scene-save-slot(/* slot */ int);
+    // Makes the scene the one to edit, and fills the form from it.
+    callback begin-scene-edit(/* index */ int);
+    // Makes the scene the one to delete.
+    callback begin-scene-delete(/* index */ int);
+    callback set-scene-slot-mode(/* slot */ int, /* mode */ int);
     callback save-scene(/* name */ string);
-    // Deletes the current scene.
+    // Saves the slots' current setups over the scene, keeping its slot modes.
+    callback overwrite-scene(/* index */ int);
+    // Renames the scene being edited and gives it the form's slot modes.
+    callback edit-scene(/* name */ string);
     callback delete-scene();
+    // Moves the scene at row `from` to row `to`.
+    callback move-scene(/* from */ int, /* to */ int);
 }

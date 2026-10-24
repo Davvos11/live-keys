@@ -57,7 +57,7 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
                                                # effects; each --effect goes where its kind belongs
 
 # GUI (live-keys-gui) — Settings tab (audio output, MIDI inputs + plugin folders) and Live tab (a scenes pane
-# on the left — save/recall several slots at once, searchable — then 3 side-by-side rack
+# on the left — per slot restore/clear/leave unchanged, searchable, renamable — then 3 side-by-side rack (each with a Clear button)
 # slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
 # plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
 # reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and which
@@ -554,21 +554,38 @@ behind format-agnostic cores:
   (`Rack::mark_slot_changed`). Slot presets don't include the MIDI routing or volume (those
   are about the keyboard split and the mix, which scenes cover).
   **Scenes** (`src/scenes.rs`, `ui/scenes.slint`: `ScenesPane`, a fixed-width pane left of the
-  slots): several slots' full setups under a name, as snapshots — a folder
-  `<data dir>/live-keys/scenes/<name>/` with `scene.json` (per included slot: its index, its
-  `config::SlotRouting` — MIDI inputs mask, channel, note/velocity ranges, volume — the
-  library slot preset it showed, and its chain subfolder) and per included slot a subfolder
-  `slot-<n>/` that is a complete slot preset (`slot_presets::write`; saved via
-  `slot_presets::replace_dir`, the same temp-folder swap). Saving picks the slots to include
-  (`begin-scene-save` pre-ticks the current scene's slots, else every slot with plugins;
-  `Rack::scene_save_slots`); the same name overwrites. Clicking a scene recalls it
-  (`load_scene`): each included slot goes through `load_slot_preset` (plugins already in
-  place are kept) and gets its routing and volume back; other slots are left alone. A grey
-  "changed" shows once an included slot's chain, any of its plugins' parameters, a plugin or
-  slot preset, its routing or its volume changes (`Rack::mark_scene_changed`, called from
-  `mark_slot_changed` and the routing handlers). Scene state lives in `Rack` (`scene_store`,
-  `scene_query`, `current_scene`, `scene_rows`) and is pushed to `AppState` by
-  `Rack::refresh_scenes`, which the poll timer runs whenever `scenes_dirty` is set, since most
+  slots): what recalling does to each slot — `SlotMode` restore, clear (`clear_slot`: remove
+  its plugins and reset its routing and volume to the defaults) or leave unchanged — under a
+  name. A folder
+  `<data dir>/live-keys/scenes/<name>/` with `scene.json` (per slot: its index, mode, and,
+  if it was saved as restored, a `SavedSlot`: its `config::SlotRouting` — MIDI inputs mask,
+  channel, note/velocity ranges, volume — the library slot preset it showed, and its chain
+  subfolder) plus per saved slot a subfolder `slot-<n>/` that is a complete slot preset
+  (`slot_presets::write`; saved via `slot_presets::replace_dir`, the same temp-folder swap).
+  Save… and Edit share one form (`Rack::scene_form_slots`, a `SceneSlotChoice` per slot: mode
+  and whether restore is possible), a segmented Restore/Clear/Unchanged per slot. Saving
+  defaults to the current scene's modes, else restore for slots with plugins; the same name
+  overwrites. Edit (`scenes::update`) renames — refusing a name another scene has — and
+  changes modes; a slot without saved data can't be set to restore, one with data keeps it
+  whatever its mode, so it can go back to restore (overwriting a scene copies the saved data
+  of its non-restored slots into the new save). The list is in the user's order — rows are
+  dragged (`SceneItem`'s touch area: past 4 px a press becomes a drag, with a drop line;
+  `move-scene`) and the order kept in `<root>/order.json` (`scenes::move_to`; new scenes go
+  last). Right-clicking a row (`ContextMenuArea`, on top of the touch area, which would
+  otherwise take the right-click) offers Load, Save (overwrite: the slots' current setups,
+  keeping its modes), Edit… and Delete…; edit and delete act on `Rack::scene_target` (set by
+  `begin-scene-edit`/`begin-scene-delete`, with -1 meaning the current scene, as the header
+  buttons use). Each row shows a boxed slot number per
+  restored slot and a crossed-out one per cleared slot (`SceneRow.modes`, `SlotHint`).
+  Clicking a scene recalls it (`load_scene`): restored slots go through `load_slot_preset`
+  (plugins already in place are kept) and get their routing and volume back, cleared ones go
+  through `clear_slot` (also behind each slot's Clear button), the rest are left alone. A
+  grey "changed" shows once a restored or cleared slot's chain, any of its plugins'
+  parameters, a plugin or slot preset, its routing or its volume changes
+  (`Rack::mark_scene_changed`, called from `mark_slot_changed` and the routing handlers).
+  Scene state lives in `Rack` (`scene_store`, `scene_query`, `current_scene`, `scene_rows`)
+  and is pushed to `AppState` by `Rack::refresh_scenes`, which the poll timer runs whenever
+  `scenes_dirty` is set, since most
   changes happen where there's no window handle. `AppLogic` actions take the slot index for structural changes
   (`pick-plugin`, `remove-effect(slot, section, index)`, `move-effect(slot, section, from,
   to)` — `section` 0 = MIDI, 1 = audio, …) and a `PluginKey` (as `int`) for per-plugin ones
