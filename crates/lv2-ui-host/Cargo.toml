@@ -5,8 +5,8 @@ edition.workspace = true
 build = "build.rs"
 
 [dependencies]
-livi = "0.7"
-lv2_raw = "0.2"
+livi = "0.8"
+lv2_raw = "0.3"
 libloading = "0.9"
 x11rb = "0.14"
 anyhow = "1"

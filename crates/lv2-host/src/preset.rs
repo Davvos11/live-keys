@@ -48,7 +48,9 @@ impl InstanceRef {
     pub fn has_state(&self) -> bool {
         unsafe {
             let descriptor = &*self.descriptor;
-            !(descriptor.extension_data)(STATE_INTERFACE.as_ptr().cast()).is_null()
+            descriptor
+                .extension_data
+                .is_some_and(|extension_data| !extension_data(STATE_INTERFACE.as_ptr().cast()).is_null())
         }
     }
 

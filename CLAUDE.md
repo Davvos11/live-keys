@@ -463,16 +463,16 @@ behind format-agnostic cores:
     `lv2ui_descriptor` + calling `show`/`run`/`hide`/`cleanup`. No window creation needed on our
     side. Requires the `instance-access` feature (the DSP instance's raw `LV2_Handle`, from
     `Lv2Plugin::raw_handle()`) — confirmed via Helm.
-    **Gotcha:** `lv2_raw`'s binding for `LV2_External_UI_Host::ui_closed` types it as
+    **Gotcha:** `lv2_raw`'s `LV2_External_UI_Host` binding is unusable, so `external_ui.rs`
+    declares its own `#[repr(C)] ExternalUiHost`. `lv2_raw` types `ui_closed` as
     `extern "C" fn(...) -> libc::c_void` — impossible to honestly implement, since `c_void` has
     no legally constructible value. This callback fires on the plugin's *own* thread the moment
     the user closes its window (the normal path, not an edge case — confirmed via Helm's JUCE
     wrapper calling it from its own timer thread), so panicking to satisfy the type checker
-    (e.g. `unreachable!()`) aborts the whole process the instant anyone closes a plugin window.
-    The fix: implement the real function with a plain `()` return, then `transmute` the
-    *function pointer* (never a value) to the field's declared type when building the struct —
-    function pointers differing only in a `void`/`()` return are ABI-compatible on every
-    platform this project targets.
+    (e.g. `unreachable!()`) would abort the whole process the instant anyone closes a plugin
+    window. And since 0.3 it types `plugin_human_id` as `Option<*const c_char>`, which isn't
+    laid out like a C pointer (raw pointers have no null niche, so the `Option` carries a tag).
+    Check new `lv2_raw` versions for `Option<*…>` fields before using a struct from it.
   - **X11UI** (`x11_ui.rs`, `suil_sys.rs`) — a plain X11 window the host must create and embed
     the plugin's widget into. Uses hand-written bindings to `suil` (the reference LV2
     UI-wrapping library; no Rust crate exists, hence `suil_sys.rs` instead of a `suil-sys`

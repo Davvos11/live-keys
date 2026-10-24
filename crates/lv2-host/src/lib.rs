@@ -606,12 +606,12 @@ impl HostedPlugin for Lv2Plugin {
                     body[..event.data.len()].copy_from_slice(event.data);
                     let _ = ui_out.push(PortEvent {
                         port: self.atom_out_ports[index],
-                        atom_type: event.event.body.mytype,
+                        atom_type: event.event.body.type_,
                         size: event.data.len() as u32,
                         body,
                     });
                 }
-                if event.event.body.mytype != self.midi_urid {
+                if event.event.body.type_ != self.midi_urid {
                     continue;
                 }
                 if self.midi_out.len() == self.midi_out.capacity() {

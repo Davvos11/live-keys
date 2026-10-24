@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use livi::lilv::ui::UI;
 use lv2_raw::LV2Feature;
 use lv2_raw::ui::{
-    LV2UIControllerRaw, LV2UIDescriptorRaw, LV2UIExternalUIHost, LV2UIExternalUIWidget,
-    LV2UIWidget,
+    LV2UIControllerRaw, LV2UIDescriptorRaw, LV2UIExternalUIWidget, LV2UIWidget,
 };
 
 use crate::{EVENT_TRANSFER_URI, LaunchUiRequest, PluginUiHandle, PortMessage};
@@ -19,6 +18,17 @@ const EXTERNAL_UI_HOST_URI: &CStr = c"http://kxstudio.sf.net/ns/lv2ext/external-
 /// Fills the slot `livi::Features::iter_features` needs for a "worker" feature,
 /// which UIs never need. A private URI guarantees nothing will ever match it.
 const UNUSED_FEATURE_URI: &CStr = c"urn:live-keys:unused-feature";
+
+/// `LV2_External_UI_Host`, declared here because `lv2_raw`'s binding can't be
+/// used: it types `ui_closed` as returning `c_void`, which has no constructible
+/// value, so no Rust function can honestly implement it, and `plugin_human_id`
+/// as `Option<*const c_char>`, which — raw pointers having no null niche — isn't
+/// laid out like C's `const char*` (the plugin would read the `Option`'s tag).
+#[repr(C)]
+struct ExternalUiHost {
+    ui_closed: extern "C" fn(LV2UIControllerRaw),
+    plugin_human_id: *const c_char,
+}
 
 /// A raw pointer, asserted `Send` for moving into the dedicated hosting thread. Only
 /// ever handed off, never touched from more than one thread at a time.
@@ -116,19 +126,8 @@ fn run(
         uri: INSTANCE_ACCESS_URI.as_ptr(),
         data: instance_ptr.0,
     };
-    let external_ui_host = LV2UIExternalUIHost {
-        // SAFETY: `lv2_raw`'s binding types this field as `extern "C" fn(...) ->
-        // libc::c_void`, but `c_void` has no legally constructible value in Rust —
-        // it's a mistranscription of a true C `void`-returning function. Function
-        // pointers that differ only in a `void`/`()` return are ABI-compatible on
-        // every platform we target, so transmuting the *pointer* (never a value)
-        // bridges the two safely, without ever needing to "return" a `c_void`.
-        ui_closed: unsafe {
-            std::mem::transmute::<
-                extern "C" fn(LV2UIControllerRaw),
-                extern "C" fn(LV2UIControllerRaw) -> c_void,
-            >(ui_closed)
-        },
+    let external_ui_host = ExternalUiHost {
+        ui_closed,
         plugin_human_id: std::ptr::null(),
     };
     let external_ui_host_feature = LV2Feature {
