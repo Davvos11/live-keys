@@ -2,6 +2,7 @@ slint::include_modules!();
 
 mod config;
 mod midi_inputs;
+mod mock_data;
 mod scenes;
 mod session;
 mod slot_presets;
@@ -2058,6 +2059,9 @@ fn main() -> anyhow::Result<()> {
     });
     app.run()?;
     drop(autosave_timer);
+    if let Some(path) = mock_data::requested_path() {
+        write_mock_data(&app, &engine.borrow(), &rack, &path);
+    }
     // Always on a normal exit (some plugin settings change without the host
     // seeing it), unless the last session wasn't restored and nothing has
     // happened since, which would overwrite it with an empty rack.
@@ -2265,6 +2269,26 @@ fn load_scene(
     *rack.scene_status.borrow_mut() = String::new();
     rack.scenes_dirty.set(true);
     rack.session_changed();
+}
+
+/// Writes the window's state as the preview's mock data (see `mock_data`), with
+/// an open parameter window's plugin, else the first loaded plugin, for
+/// `ParamsWindow`.
+fn write_mock_data(app: &AppWindow, engine: &Engine, rack: &Rack, path: &std::path::Path) {
+    let params_window = match rack.param_windows.borrow().values().next() {
+        Some(open) => (open.window.get_plugin_name(), ModelRc::from(open.rows.clone())),
+        None => {
+            let meta = (0..SLOT_COUNT).find_map(|slot| engine.slot(slot)?.plugins().next());
+            let name = meta.map(|meta| meta.name.as_str()).unwrap_or_default().into();
+            let rows = meta.map(|meta| param_rows(engine, meta.key)).unwrap_or_default();
+            (name, ModelRc::new(VecModel::from(rows)))
+        }
+    };
+    let text = mock_data::generate(app, params_window);
+    match std::fs::write(path, text) {
+        Ok(()) => log::info!("wrote the preview's mock data to {}", path.display()),
+        Err(err) => log::error!("writing {} failed: {err}", path.display()),
+    }
 }
 
 /// Saves the session: every slot, the current scene, and which plugin windows

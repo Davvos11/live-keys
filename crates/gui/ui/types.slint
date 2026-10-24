@@ -1,0 +1,147 @@
+// The structs the host (Rust) and the UI exchange; re-exported by
+// `globals.slint`. Kept apart so `mock_data.slint` can use them.
+
+// One plugin in the plugin picker's list.
+export struct PickerRow {
+    // `PluginInfo::id`: an LV2 URI or `vst3:` + class ID.
+    id: string,
+    name: string,
+    // "LV2" or "VST3".
+    format: string,
+    pinned: bool,
+    // The first unpinned row after some pinned ones, drawn with a divider above.
+    after-pinned: bool,
+}
+
+export struct ParamRow {
+    param-id: int,
+    name: string,
+    // As `ParamKind`: 0 continuous, 1 toggle, 2 stepped, 3 choice, 4 note.
+    kind: int,
+    min-value: float,
+    max-value: float,
+    // Steps between min and max for stepped/note parameters; 0 otherwise.
+    steps: int,
+    // Continuous parameter shown on a logarithmic slider (min-value > 0).
+    logarithmic: bool,
+    // Last value sent to the plugin (from a control or the plugin's own GUI), so
+    // a rebuilt control shows where the parameter actually is, not its default.
+    value: float,
+    // `value` as the plugin or its metadata would show it ("-6 dB", "C#3").
+    text: string,
+    // A choice parameter's option labels, their values, and the current one.
+    choices: [string],
+    choice-values: [float],
+    choice-index: int,
+}
+
+// One preset in the preset browser.
+export struct PresetRow {
+    name: string,
+    // Saved by the user (and so deletable).
+    user: bool,
+    // A favourite, listed first.
+    pinned: bool,
+    // The first non-favourite row after some favourites, drawn with a divider above.
+    after-pinned: bool,
+    // The preset last loaded or saved.
+    current: bool,
+}
+
+// One plugin (an instrument or a MIDI or audio effect) in a slot's chain.
+export struct EffectRow {
+    // The engine's `PluginKey` of this instance, or -1 for no plugin.
+    key: int,
+    name: string,
+    // Whether the plugin has any GUI this host can show at all.
+    gui-supported: bool,
+    // Whether we currently believe the plugin's GUI session is open. A plugin's
+    // own UI can wedge internally (observed with some External UI plugins) and
+    // never signal back that it closed — "GUI" lets the user force this back to
+    // false so they can at least try a fresh session, independent of whatever
+    // the previous one's hosting thread is stuck doing.
+    gui-open: bool,
+    // Whether its parameter window is open.
+    params-open: bool,
+    // The preset last loaded or saved; empty if none.
+    preset-name: string,
+    // Whether that preset was saved by the user (and so can be deleted).
+    preset-user: bool,
+    // Whether a parameter changed since that preset was loaded or saved.
+    preset-changed: bool,
+}
+
+// One row of a slot's slot-preset browser: an instrument's folder, or a preset.
+export struct SlotPresetRow {
+    name: string,
+    folder: bool,
+    // A folder's number of presets.
+    count: int,
+    // The slot's current preset.
+    current: bool,
+}
+
+// A MIDI device as offered for one MIDI input.
+export struct MidiDeviceRow {
+    name: string,
+    // Whether it feeds this input.
+    checked: bool,
+    // Whether it's plugged in now.
+    available: bool,
+}
+
+// One of the MIDI inputs slots can listen to.
+export struct MidiInputRow {
+    // Its devices, for the button that opens the device list.
+    summary: string,
+    // Every device plugged in, then this input's devices that aren't.
+    devices: [MidiDeviceRow],
+}
+
+// One scene in the Live tab's scene list.
+export struct SceneRow {
+    name: string,
+    // The scene last recalled or saved.
+    current: bool,
+    // Per slot, what recalling it does: 0 leave unchanged, 1 restore, 2 clear.
+    modes: [int],
+}
+
+// One slot in the scene save/edit form.
+export struct SceneSlotChoice {
+    // As in `SceneRow.modes`.
+    mode: int,
+    // Whether there's (or, when saving, will be) a setup to restore.
+    can-restore: bool,
+}
+
+// One rack slot on the Live tab: MIDI effects, an instrument, then audio
+// effects.
+export struct SlotState {
+    // Its key is -1 when no instrument is loaded into this slot.
+    instrument: EffectRow,
+    // The last load/open/preset error; empty if none.
+    status: string,
+    // In processing order, in front of the instrument.
+    midi-effects: [EffectRow],
+    // In processing order, after the instrument.
+    audio-effects: [EffectRow],
+    // Per MIDI input (as `AppState.midi-inputs`), whether this slot listens to it.
+    midi-inputs: [bool],
+    // MIDI this slot responds to. Channel is 0 for omni, else 1-16; note and
+    // velocity ranges are inclusive.
+    midi-channel: int,
+    note-low: int,
+    note-high: int,
+    velocity-low: int,
+    velocity-high: int,
+    volume-db: float,
+    // The slot preset last loaded or saved; empty if none.
+    slot-preset-name: string,
+    // Whether the chain or a parameter changed since.
+    slot-preset-changed: bool,
+    // The instrument folder the slot-preset browser shows; empty when it lists
+    // the folders.
+    slot-preset-folder: string,
+    slot-preset-rows: [SlotPresetRow],
+}

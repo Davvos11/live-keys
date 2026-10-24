@@ -67,6 +67,10 @@ cargo run -p live-keys-gui --release
 SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
   # the app with live reload: saving a .slint file swaps the UI in place, state kept (development
   # only; never add the feature to Cargo.toml). Changing a property/callback Rust uses needs a restart.
+LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
+  # on exit, writes the UI's current state to crates/gui/ui/mock_data.slint, which the editor's
+  # preview (the Slint plugin's "Show Preview", slint-viewer) shows instead of empty lists;
+  # the preview needs a slint-lsp at least as new as our Slint (README: "Previewing the UI")
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, and per slot: MIDI inputs + filter, volume), saved as
 # they change. The rack itself (every slot's chain and plugin settings, current slot preset and scene, open
@@ -509,7 +513,14 @@ behind format-agnostic cores:
   (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
   via `TabWidget`/`Tab` from `std-widgets.slint`; `globals.slint` defines the host/UI interop
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
-  per the project's Slint skill guidance. `config.rs` handles settings persistence (`dirs` +
+  per the project's Slint skill guidance; the structs exchanged live in `types.slint`
+  (re-exported by `globals.slint`). **Preview data:** every `AppState` property the host fills,
+  and `ParamsWindow`'s, defaults to `Platform.uses-mock-data ? MockData.x : …` — true only in
+  the editor's preview/`slint-viewer`, and compiled away in the app — with `MockData` in the
+  generated `ui/mock_data.slint`: a real session's UI state, written on exit when the app runs
+  with `LIVE_KEYS_MOCK_DATA` (`src/mock_data.rs`: a `ToSlint` trait writing values as Slint
+  literals, implemented per struct by `slint_struct!` from a field list — add new struct fields
+  there, and new `AppState` properties to `generate` and to `MockData`). `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
   `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
   removed; on a first run, every device present but Midi Through becomes input 1's devices): the Settings tab lists them

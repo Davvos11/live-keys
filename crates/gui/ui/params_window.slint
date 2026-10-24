@@ -1,5 +1,6 @@
 import { ComboBox, ListView, Palette, Slider, Switch, VerticalBox } from "std-widgets.slint";
 import { ParamRow } from "globals.slint";
+import { MockData } from "mock_data.slint";
 
 // One parameter, with the control its kind calls for: a switch, a dropdown, a
 // stepped slider (numbers, notes), or a slider — linear or logarithmic. Values
@@ -78,8 +79,9 @@ component ParamControl inherits VerticalLayout {
 // button. Its own callbacks rather than `AppLogic`'s, since every
 // window has its own instance of each global.
 export component ParamsWindow inherits Window {
-    in property <string> plugin-name;
-    in property <[ParamRow]> params;
+    // In the editor's preview, a real session's plugin (see `AppState`).
+    in property <string> plugin-name: Platform.uses-mock-data ? MockData.params-window-name : "";
+    in property <[ParamRow]> params: Platform.uses-mock-data ? MockData.params-window-params : [];
     callback set-param(/* param-id */ int, float);
 
     title: "\{root.plugin-name} — Parameters";
