@@ -4,4 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rtrb = "0.3"
+rtrb = "0.4"

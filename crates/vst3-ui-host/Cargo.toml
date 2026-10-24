@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 live-keys-vst3-host = { path = "../vst3-host" }
-x11rb = "0.13"
+x11rb = "0.14"
 libc = "0.2"
 anyhow = "1"
 log = "0.4"
