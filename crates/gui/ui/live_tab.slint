@@ -3,6 +3,7 @@ import { RangeSlider } from "range_slider.slint";
 import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
 import { PresetBar } from "preset_bar.slint";
 import { SlotPresets } from "slot_presets.slint";
+import { ScenesPane } from "scenes.slint";
 
 component SectionTitle inherits Text {
     font-weight: 600;
@@ -170,6 +171,11 @@ component SlotPanel inherits GroupBox {
                 horizontal-stretch: 1;
                 model: ["Omni", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"];
                 current-index: root.slot.midi-channel;
+                // Picking (and dragging, below) sets the control's own value,
+                // replacing its binding; these keep following changes from
+                // elsewhere (a recalled scene).
+                property <int> source: root.slot.midi-channel;
+                changed source => { self.current-index = self.source; }
                 selected => { root.send-filter(); }
             }
         }
@@ -188,6 +194,10 @@ component SlotPanel inherits GroupBox {
                 maximum: 127;
                 low: root.slot.note-low;
                 high: root.slot.note-high;
+                property <int> low-source: root.slot.note-low;
+                property <int> high-source: root.slot.note-high;
+                changed low-source => { self.low = self.low-source; }
+                changed high-source => { self.high = self.high-source; }
                 changed => { root.send-filter(); }
             }
         }
@@ -206,6 +216,10 @@ component SlotPanel inherits GroupBox {
                 maximum: 127;
                 low: root.slot.velocity-low;
                 high: root.slot.velocity-high;
+                property <int> low-source: root.slot.velocity-low;
+                property <int> high-source: root.slot.velocity-high;
+                changed low-source => { self.low = self.low-source; }
+                changed high-source => { self.high = self.high-source; }
                 changed => { root.send-filter(); }
             }
         }
@@ -272,6 +286,8 @@ component SlotPanel inherits GroupBox {
                 minimum: AppState.min-volume-db;
                 maximum: AppState.max-volume-db;
                 value: root.slot.volume-db;
+                property <float> source: root.slot.volume-db;
+                changed source => { self.value = self.source; }
                 changed(value) => { AppLogic.set-slot-volume(root.slot-index, value); }
             }
         }
@@ -293,6 +309,10 @@ component SlotPanel inherits GroupBox {
 
 export component LiveTab inherits HorizontalBox {
     callback choose-plugin(/* slot */ int, /* category */ int);
+
+    ScenesPane {
+        width: 200px;
+    }
 
     for slot[i] in AppState.slots : SlotPanel {
         slot-index: i;

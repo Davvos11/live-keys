@@ -1,0 +1,182 @@
+import { Button, CheckBox, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { AppLogic, AppState, SceneRow } from "globals.slint";
+
+component SceneItem inherits Rectangle {
+    in property <SceneRow> entry;
+    callback choose();
+
+    height: 28px;
+    border-radius: 4px;
+    background: root.entry.current ? Palette.selection-background
+        : area.has-hover ? Palette.alternate-background : transparent;
+
+    area := TouchArea {
+        clicked => { root.choose(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.entry.name;
+            color: root.entry.current ? Palette.selection-foreground : Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// The Live tab's left pane: the current scene (greyed "changed" once a slot it
+// includes changed since it was recalled or saved), saving it with a choice of
+// slots, deleting it, and a searchable list of scenes. Clicking a scene
+// recalls it straight away.
+export component ScenesPane inherits VerticalLayout {
+    // 0: browsing, 1: naming a scene to save, 2: confirming a delete.
+    property <int> mode: 0;
+
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 4px;
+        max-height: self.min-height;
+        Text {
+            text: "Scenes";
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.mode == 0 : Button {
+            text: "Save…";
+            clicked => {
+                AppLogic.begin-scene-save();
+                root.mode = 1;
+            }
+        }
+        if root.mode == 0 : Button {
+            text: "Delete";
+            enabled: AppState.current-scene != "";
+            clicked => { root.mode = 2; }
+        }
+    }
+
+    if root.mode == 0 && AppState.current-scene != "" : HorizontalLayout {
+        spacing: 6px;
+        Text {
+            text: AppState.current-scene;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if AppState.current-scene-changed : Text {
+            text: "changed";
+            color: gray;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.mode == 1 : VerticalLayout {
+        spacing: 4px;
+        name := LineEdit {
+            placeholder-text: "Scene name";
+            // Saving over the current scene is the common case.
+            text: AppState.current-scene;
+            init => { self.focus(); }
+            accepted => {
+                if (self.text != "") {
+                    AppLogic.save-scene(self.text);
+                    root.mode = 0;
+                }
+            }
+        }
+        for included[slot] in AppState.scene-save-slots : CheckBox {
+            text: "Slot \{slot + 1}";
+            checked: included;
+            // Clicking sets `checked` itself, replacing the binding above.
+            property <bool> source: included;
+            changed source => { self.checked = self.source; }
+            toggled => { AppLogic.toggle-scene-save-slot(slot); }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Button {
+                text: "Save";
+                primary: true;
+                horizontal-stretch: 1;
+                enabled: name.text != "";
+                clicked => {
+                    AppLogic.save-scene(name.text);
+                    root.mode = 0;
+                }
+            }
+            Button {
+                text: "Cancel";
+                horizontal-stretch: 1;
+                clicked => { root.mode = 0; }
+            }
+        }
+    }
+
+    if root.mode == 2 : VerticalLayout {
+        spacing: 4px;
+        Text {
+            text: "Delete \"\{AppState.current-scene}\"?";
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Button {
+                text: "Delete";
+                primary: true;
+                horizontal-stretch: 1;
+                clicked => {
+                    AppLogic.delete-scene();
+                    root.mode = 0;
+                }
+            }
+            Button {
+                text: "Cancel";
+                horizontal-stretch: 1;
+                clicked => { root.mode = 0; }
+            }
+        }
+    }
+
+    if AppState.scene-status != "" : Text {
+        text: AppState.scene-status;
+        color: gray;
+        wrap: word-wrap;
+    }
+
+    LineEdit {
+        placeholder-text: "Search scenes";
+        edited(text) => { AppLogic.filter-scenes(text); }
+        accepted => { AppLogic.load-scene(0); }
+    }
+
+    Rectangle {
+        vertical-stretch: 1;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        VerticalLayout {
+            padding: 2px;
+            if AppState.scene-rows.length == 0 : VerticalLayout {
+                padding: 8px;
+                Text {
+                    text: AppState.scene-count == 0 ? "No scenes yet." : "No matching scenes.";
+                    color: gray;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+            }
+            ListView {
+                vertical-stretch: 1;
+                for row[index] in AppState.scene-rows : SceneItem {
+                    entry: row;
+                    choose => { AppLogic.load-scene(index); }
+                }
+            }
+        }
+    }
+}

@@ -129,6 +129,15 @@ fn read(file: &Path) -> Result<SlotPreset> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// Reads the slot preset in `dir`.
+pub fn read_dir(dir: &Path) -> Result<Stored> {
+    let preset = read(&dir.join(FILE_NAME))?;
+    Ok(Stored {
+        dir: dir.to_path_buf(),
+        preset,
+    })
+}
+
 /// A loaded plugin, as saving needs it.
 struct Loaded {
     key: PluginKey,
@@ -146,6 +155,25 @@ pub fn save(
     plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
 ) -> Result<Stored> {
     let chain = engine.slot(slot).context("no such slot")?;
+    anyhow::ensure!(chain.plugins().next().is_some(), "the slot is empty");
+    let instrument_name = chain.instrument.as_ref().map_or(NO_INSTRUMENT, |meta| meta.name.as_str());
+    let root = root().context("no data folder to save slot presets in")?;
+    let folder = root.join(file_name(instrument_name));
+    let dir = folder.join(file_name(name));
+    let preset = replace_dir(&dir, |temp| write(engine, slot, name, temp, plugin_preset))?;
+    Ok(Stored { dir, preset })
+}
+
+/// Writes slot `slot`'s chain into the empty folder `dir`: `slot.json` and a
+/// state file per plugin. An empty slot makes a preset without plugins.
+pub fn write(
+    engine: &mut Engine,
+    slot: usize,
+    name: &str,
+    dir: &Path,
+    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+) -> Result<SlotPreset> {
+    let chain = engine.slot(slot).context("no such slot")?;
     let loaded = |meta: &LoadedPluginMeta| Loaded {
         key: meta.key,
         id: meta.id.clone(),
@@ -154,66 +182,61 @@ pub fn save(
     let instrument = chain.instrument.as_ref().map(loaded);
     let midi_effects: Vec<Loaded> = chain.effects(Section::Midi).iter().map(loaded).collect();
     let audio_effects: Vec<Loaded> = chain.effects(Section::Audio).iter().map(loaded).collect();
-    anyhow::ensure!(
-        instrument.is_some() || !midi_effects.is_empty() || !audio_effects.is_empty(),
-        "the slot is empty"
-    );
 
-    let root = root().context("no data folder to save slot presets in")?;
-    let instrument_name = instrument.as_ref().map_or(NO_INSTRUMENT, |plugin| plugin.name.as_str());
-    let folder = root.join(file_name(instrument_name));
-    let dir = folder.join(file_name(name));
-    // Written next to the old one and swapped in at the end, so a failed save
-    // doesn't lose the preset it was replacing.
-    let temp = folder.join(format!(".{}.saving", file_name(name)));
+    let mut save_plugin = |plugin: &Loaded, stem: &str| -> Result<PluginState> {
+        let path = engine
+            .save_state_file(plugin.key, dir, stem)
+            .with_context(|| format!("saving {}'s settings failed", plugin.name))?;
+        let (preset, preset_changed) = plugin_preset(plugin.key);
+        Ok(PluginState {
+            id: plugin.id.clone(),
+            name: plugin.name.clone(),
+            state: path.strip_prefix(dir)?.display().to_string(),
+            preset: preset.as_ref().map(PresetRef::from),
+            preset_changed,
+        })
+    };
+    let instrument = instrument.as_ref().map(|plugin| save_plugin(plugin, "instrument")).transpose()?;
+    let mut effects = |plugins: &[Loaded], prefix: &str| -> Result<Vec<PluginState>> {
+        plugins
+            .iter()
+            .enumerate()
+            .map(|(index, plugin)| save_plugin(plugin, &format!("{prefix}-{}", index + 1)))
+            .collect()
+    };
+    let preset = SlotPreset {
+        name: name.to_string(),
+        instrument,
+        midi_effects: effects(&midi_effects, "midi")?,
+        audio_effects: effects(&audio_effects, "audio")?,
+    };
+    fs::write(dir.join(FILE_NAME), serde_json::to_string_pretty(&preset)?)?;
+    Ok(preset)
+}
+
+/// Fills folder `dir` anew with `fill`, which writes into the empty folder it's
+/// given. That's a temporary folder next to `dir`, swapped in at the end, so a
+/// failed save doesn't lose what it was replacing.
+pub fn replace_dir<T>(dir: &Path, fill: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    let parent = dir.parent().context("no parent folder")?;
+    let name = dir.file_name().context("no folder name")?.to_string_lossy();
+    let temp = parent.join(format!(".{name}.saving"));
     if temp.exists() {
         fs::remove_dir_all(&temp)?;
     }
     fs::create_dir_all(&temp)?;
-
-    let result = (|| {
-        let mut save_plugin = |plugin: &Loaded, stem: &str| -> Result<PluginState> {
-            let path = engine
-                .save_state_file(plugin.key, &temp, stem)
-                .with_context(|| format!("saving {}'s settings failed", plugin.name))?;
-            let (preset, preset_changed) = plugin_preset(plugin.key);
-            Ok(PluginState {
-                id: plugin.id.clone(),
-                name: plugin.name.clone(),
-                state: path.strip_prefix(&temp)?.display().to_string(),
-                preset: preset.as_ref().map(PresetRef::from),
-                preset_changed,
-            })
-        };
-        let instrument = instrument.as_ref().map(|plugin| save_plugin(plugin, "instrument")).transpose()?;
-        let mut effects = |plugins: &[Loaded], prefix: &str| -> Result<Vec<PluginState>> {
-            plugins
-                .iter()
-                .enumerate()
-                .map(|(index, plugin)| save_plugin(plugin, &format!("{prefix}-{}", index + 1)))
-                .collect()
-        };
-        let preset = SlotPreset {
-            name: name.to_string(),
-            instrument,
-            midi_effects: effects(&midi_effects, "midi")?,
-            audio_effects: effects(&audio_effects, "audio")?,
-        };
-        fs::write(temp.join(FILE_NAME), serde_json::to_string_pretty(&preset)?)?;
-        anyhow::Ok(preset)
-    })();
-    let preset = match result {
-        Ok(preset) => preset,
+    let value = match fill(&temp) {
+        Ok(value) => value,
         Err(err) => {
             let _ = fs::remove_dir_all(&temp);
             return Err(err);
         }
     };
     if dir.exists() {
-        fs::remove_dir_all(&dir)?;
+        fs::remove_dir_all(dir)?;
     }
-    fs::rename(&temp, &dir)?;
-    Ok(Stored { dir, preset })
+    fs::rename(&temp, dir)?;
+    Ok(value)
 }
 
 /// Deletes the slot preset in `dir`, and its instrument folder if that's left
@@ -235,7 +258,7 @@ pub fn delete(dir: &Path) -> Result<()> {
 
 /// `name` as a folder name: path separators and other troublesome characters
 /// replaced.
-fn file_name(name: &str) -> String {
+pub fn file_name(name: &str) -> String {
     let name: String = name
         .trim()
         .chars()

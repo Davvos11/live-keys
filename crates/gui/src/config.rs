@@ -80,7 +80,41 @@ impl Default for SlotConfig {
     }
 }
 
+/// A slot's MIDI routing and volume: what a scene recalls besides the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SlotRouting {
+    pub midi_inputs: u32,
+    pub midi_channel: Option<u8>,
+    pub note_low: u8,
+    pub note_high: u8,
+    pub velocity_low: u8,
+    pub velocity_high: u8,
+    pub volume_db: f32,
+}
+
 impl SlotConfig {
+    pub fn routing(&self) -> SlotRouting {
+        SlotRouting {
+            midi_inputs: self.midi_inputs,
+            midi_channel: self.midi_channel,
+            note_low: self.note_low,
+            note_high: self.note_high,
+            velocity_low: self.velocity_low,
+            velocity_high: self.velocity_high,
+            volume_db: self.volume_db,
+        }
+    }
+
+    pub fn set_routing(&mut self, routing: SlotRouting) {
+        self.midi_inputs = routing.midi_inputs;
+        self.midi_channel = routing.midi_channel;
+        self.note_low = routing.note_low;
+        self.note_high = routing.note_high;
+        self.velocity_low = routing.velocity_low;
+        self.velocity_high = routing.velocity_high;
+        self.volume_db = routing.volume_db;
+    }
+
     pub fn filter(&self) -> MidiFilter {
         MidiFilter {
             inputs: self.midi_inputs,

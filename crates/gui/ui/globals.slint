@@ -95,6 +95,13 @@ export struct MidiInputRow {
     devices: [MidiDeviceRow],
 }
 
+// One scene in the Live tab's scene list.
+export struct SceneRow {
+    name: string,
+    // The scene last recalled or saved.
+    current: bool,
+}
+
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
 // effects.
 export struct SlotState {
@@ -134,6 +141,19 @@ export global AppState {
     in property <int> selected-audio-index: -1;
     in property <[MidiInputRow]> midi-inputs;
     in property <int> max-midi-inputs: 8;
+    // The scene list, filtered by `AppLogic.filter-scenes`; `scene-count` is
+    // every scene, matching or not.
+    in property <[SceneRow]> scene-rows;
+    in property <int> scene-count;
+    // The scene last recalled or saved ("" if none), and whether any slot it
+    // includes changed since.
+    in property <string> current-scene;
+    in property <bool> current-scene-changed;
+    // Per slot, whether the scene being saved includes it (set by
+    // `AppLogic.begin-scene-save`, toggled by `toggle-scene-save-slot`).
+    in property <[bool]> scene-save-slots;
+    // The last scene error; empty if none.
+    in property <string> scene-status;
     in property <[string]> default-plugin-folders;
     in property <[string]> extra-plugin-folders;
     // Every plugin found, as "name — kind (format)", for the Settings tab.
@@ -218,4 +238,14 @@ export global AppLogic {
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
+    // Scenes. `index` is into `AppState.scene-rows`.
+    callback filter-scenes(/* query */ string);
+    callback load-scene(/* index */ int);
+    // Picks the slots a new save includes: the current scene's, else every
+    // slot with plugins.
+    callback begin-scene-save();
+    callback toggle-scene-save-slot(/* slot */ int);
+    callback save-scene(/* name */ string);
+    // Deletes the current scene.
+    callback delete-scene();
 }
