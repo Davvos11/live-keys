@@ -2,6 +2,8 @@
 name = "live-keys-plugin-check"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "plugin-check"

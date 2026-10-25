@@ -2,6 +2,8 @@
 name = "live-keys-vst3-ui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 live-keys-vst3-host = { path = "../vst3-host" }

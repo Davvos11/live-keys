@@ -31,3 +31,13 @@ cargo install slint-lsp --version <Slint version> --locked
 
 In RustRover, tick **Use external LSP server** in the Slint settings; the default command
 finds `slint-lsp` on the `PATH` (`~/.cargo/bin`). Reinstall it whenever Slint is upgraded.
+
+## License
+
+Live Keys is licensed under the [MIT License](LICENSE).
+
+It's built with [Slint](https://slint.dev), used under the
+[Slint Royalty-free Desktop, Mobile, and Web Applications License](https://slint.dev/terms-and-conditions#royalty-free),
+which asks for the "Made with Slint" attribution shown on the Settings tab. Dependencies'
+licences are checked with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
+(`cargo install cargo-deny`, then `cargo deny --workspace check`; see `deny.toml`).

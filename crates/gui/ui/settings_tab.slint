@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, GroupBox, Palette, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { AboutSlint, Button, CheckBox, ComboBox, GroupBox, Palette, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
 import { AppState, AppLogic, MidiInputRow } from "globals.slint";
 
 // One MIDI input: its number, a button listing its devices that opens a
@@ -118,5 +118,11 @@ export component SettingsTab inherits VerticalBox {
                 text: plugin;
             }
         }
+    }
+
+    // Slint's royalty-free licence asks for this attribution.
+    HorizontalLayout {
+        alignment: center;
+        AboutSlint {}
     }
 }

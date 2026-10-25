@@ -114,6 +114,16 @@ cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-
   # MIDI device names, input-mask shifting)
 ```
 
+## Licensing
+
+The project is MIT (`LICENSE`; `license`/`publish = false` set once in `[workspace.package]`).
+Slint is used under its royalty-free licence, whose one condition is the "Made with Slint"
+attribution — the `AboutSlint` widget at the bottom of the Settings tab; don't remove it.
+`deny.toml` makes `cargo deny --workspace check` (cargo-deny; `--workspace`, or only the CLI's
+dependencies are checked) reject any dependency licence that isn't permissive, with the Slint
+crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
+new Slint crate is a decision for the developer, not something to just add to the list.
+
 There is no lint/format CI configured in this repo yet. Run `cargo clippy --workspace --all-targets`
 once a feature/request is otherwise complete and fix what it flags — not continuously on every
 intermediate edit, which just burns time re-checking half-finished code.
