@@ -1,0 +1,56 @@
+name: release
+
+# Builds the Linux binaries when a GitHub release is published and attaches them to it.
+# Re-running the workflow replaces the assets (`--clobber`).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  # The workspace keeps debug info in release builds (for gdb); the shipped binaries don't need it.
+  CARGO_PROFILE_RELEASE_DEBUG: "false"
+  CARGO_PROFILE_RELEASE_STRIP: "true"
+
+jobs:
+  linux:
+    # Built on 24.04 rather than the newest Ubuntu, so the binaries also run there (glibc, lilv 0.24).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Libraries linked at build time (checked with `ldd` on a release build): lilv + lv2
+      # (LV2 hosting), suil (LV2 plugin GUIs), ALSA (cpal/midir), fontconfig (Slint).
+      # Wayland/X11/xkbcommon/OpenGL are loaded with dlopen at run time.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config liblilv-dev lv2-dev libsuil-dev libasound2-dev libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p live-keys -p live-keys-gui
+
+      - name: Package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          name="live-keys-${TAG}-linux-x86_64"
+          mkdir "$name"
+          cp target/release/live-keys-gui target/release/live-keys LICENSE README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber

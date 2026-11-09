@@ -124,9 +124,27 @@ dependencies are checked) reject any dependency licence that isn't permissive, w
 crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
 new Slint crate is a decision for the developer, not something to just add to the list.
 
-There is no lint/format CI configured in this repo yet. Run `cargo clippy --workspace --all-targets`
-once a feature/request is otherwise complete and fix what it flags — not continuously on every
-intermediate edit, which just burns time re-checking half-finished code.
+There is no lint/format/test CI in this repo yet (the only workflow builds releases, see below).
+Run `cargo clippy --workspace --all-targets` once a feature/request is otherwise complete and fix
+what it flags — not continuously on every intermediate edit, which just burns time re-checking
+half-finished code.
+
+## Releases and dependency updates
+
+- **Releases** (`.github/workflows/release.yml`): publishing a GitHub release (tag `vX.Y.Z`)
+  builds `live-keys-gui` and `live-keys` on `ubuntu-24.04` (stripped, without the debug info
+  the release profile keeps locally) and attaches `live-keys-<tag>-linux-x86_64.tar.gz` (both
+  binaries, `LICENSE`, `README.md`) plus its `.sha256` to the release. Linux x86_64 only. Its
+  apt list is the libraries the binaries link at build time (lilv, lv2, suil, ALSA,
+  fontconfig — checked with `ldd`; Wayland/X11/GL are dlopened): a new `-sys` dependency that
+  links a system library needs its `-dev` package added there, and to the runtime list in the
+  README.
+- **Renovate** (`renovate.json`): the Mend Renovate app with the developer's shared preset
+  (`github>Davvos11/.github`, the `dot-github` repo): weekly on Saturday morning, patch/digest
+  updates and lockfile maintenance grouped and automerged, minors grouped in one PR, majors on
+  request from the Dependency Dashboard. It covers `Cargo.toml`/`Cargo.lock` and the workflow's
+  action versions (kept as major tags, like the other repos). After a Cargo update, run
+  `cargo deny --workspace check` (see Licensing) — Renovate doesn't.
 
 ## Testing philosophy
 

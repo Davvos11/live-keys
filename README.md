@@ -13,6 +13,15 @@ sudo apt install liblilv-dev lv2-dev libsuil-dev
 
 VST3 hosting needs no extra system packages.
 
+## Release builds
+
+Each GitHub release has a Linux x86_64 tarball with `live-keys-gui` (the app) and `live-keys`
+(the headless CLI). They need these libraries at run time (Ubuntu 24.04 or newer):
+
+```shell
+sudo apt install liblilv-0-0 libsuil-0-0 libasound2t64 libfontconfig1
+```
+
 ## Previewing the UI
 
 The `.slint` files under `crates/gui/ui/` can be previewed in the editor (e.g. the Slint
