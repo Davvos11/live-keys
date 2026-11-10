@@ -1179,6 +1179,10 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Whether startup is done: the first scan installed and the last session
+    // restored (or not, see `restored`). Until then the rack is empty, and saving
+    // the session would overwrite the last one with that.
+    let started = Rc::new(Cell::new(false));
     // Whether the last session was restored, which happens once the first scan
     // is done (it needs the plugins).
     let restored = Rc::new(Cell::new(false));
@@ -1191,7 +1195,7 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         let picker = picker.clone();
         let restored = restored.clone();
-        let mut first = true;
+        let started = started.clone();
         scanner.timer.start(slint::TimerMode::Repeated, SCAN_TICK, move || {
             let (Some(scanner), Some(app)) = (scanner_weak.upgrade(), app_weak.upgrade()) else {
                 return;
@@ -1222,8 +1226,10 @@ fn main() -> anyhow::Result<()> {
             picker.refilter(&config.borrow().pinned_plugins);
             rack.refresh_all(&engine.borrow());
             app.global::<AppState>().set_scanning(false);
-            if std::mem::take(&mut first) {
+            if !started.get() {
                 restored.set(restore_session(&engine, &config, &rack, &app.global::<AppLogic>()));
+                started.set(true);
+                app.global::<AppState>().set_starting(false);
             }
         });
     }
@@ -2059,13 +2065,14 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         let rack = rack.clone();
+        let started = started.clone();
         let mut last_sound = Instant::now();
         autosave_timer.start(slint::TimerMode::Repeated, AUTOSAVE_POLL_INTERVAL, move || {
             let loud = (0..SLOT_COUNT).any(|slot| engine.borrow_mut().take_slot_peak(slot) > SILENCE);
             if loud {
                 last_sound = Instant::now();
             }
-            let Some(since) = rack.session_changed_since.get() else {
+            let Some(since) = rack.session_changed_since.get().filter(|_| started.get()) else {
                 return;
             };
             if since.elapsed() >= AUTOSAVE_DELAY && last_sound.elapsed() >= AUTOSAVE_QUIET {
@@ -2085,9 +2092,10 @@ fn main() -> anyhow::Result<()> {
         write_mock_data(&app, &engine.borrow(), &rack, &path);
     }
     // Always on a normal exit (some plugin settings change without the host
-    // seeing it), unless the last session wasn't restored and nothing has
-    // happened since, which would overwrite it with an empty rack.
-    if restored.get() || rack.session_changed_since.get().is_some() {
+    // seeing it), unless startup didn't finish, or the last session wasn't
+    // restored and nothing has happened since: either would overwrite it with
+    // an empty rack.
+    if started.get() && (restored.get() || rack.session_changed_since.get().is_some()) {
         save_session(&engine, &rack);
     }
     Ok(())

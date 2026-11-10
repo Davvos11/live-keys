@@ -1,4 +1,4 @@
-import { TabWidget } from "std-widgets.slint";
+import { Palette, Spinner, TabWidget } from "std-widgets.slint";
 import { SettingsTab } from "settings_tab.slint";
 import { LiveTab } from "live_tab.slint";
 import { PickerTarget, PluginPicker } from "plugin_picker.slint";
@@ -25,6 +25,32 @@ export component AppWindow inherits Window {
                     PickerTarget.slot = slot;
                     PickerTarget.category = category;
                     picker.show();
+                }
+            }
+            // Over the tab, rather than instead of it, so the window still sizes
+            // itself to the tab's contents.
+            if AppState.starting : Rectangle {
+                width: 100%;
+                height: 100%;
+                background: Palette.background;
+                // Takes the clicks meant for the tab underneath.
+                TouchArea { }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Spinner {
+                            indeterminate: true;
+                            width: 32px;
+                            height: 32px;
+                        }
+                    }
+                    Text {
+                        text: "Loading plugins…";
+                        color: gray;
+                        horizontal-alignment: center;
+                    }
                 }
             }
         }

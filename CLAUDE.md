@@ -589,7 +589,11 @@ behind format-agnostic cores:
   half is on this thread) and installs it once done — at startup with the configured extra
   folders, later from Rescan, which `AppState.scanning` replaces by a spinner meanwhile (the plugin
   picker shows one instead of its list, and is refiltered once the scan is installed). The
-  plugins already loaded keep playing until a rescan is installed. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
+  plugins already loaded keep playing until a rescan is installed. At startup nothing is
+  loaded until the first scan is installed and the session restored, so until then
+  `AppState.starting` lays a spinner over the Live tab (over it, not instead of it, so the
+  window still sizes itself to the tab), and the session is neither autosaved nor saved on
+  exit (`started` in `main`) — that would overwrite the last session with an empty rack. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
   `AppState.slots` entry (`SlotState`: `instrument: EffectRow` — key -1 when empty —
   `midi-effects`/`audio-effects: [EffectRow]`, status, routing; an `EffectRow` is one
   plugin's name/key, whether its GUI/parameter window is open, and its current preset),

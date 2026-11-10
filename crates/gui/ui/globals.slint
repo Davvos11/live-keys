@@ -33,6 +33,10 @@ export global AppState {
     in property <string> scene-target-name: Platform.uses-mock-data ? MockData.scene-target-name : "";
     in property <[string]> default-plugin-folders: Platform.uses-mock-data ? MockData.default-plugin-folders : [];
     in property <[string]> extra-plugin-folders: Platform.uses-mock-data ? MockData.extra-plugin-folders : [];
+    // Until the first plugin scan is installed and the last session restored:
+    // nothing is loaded or playing yet, so the Live tab shows a spinner instead.
+    // Off in the preview, which shows the tab with `MockData`.
+    in property <bool> starting: !Platform.uses-mock-data;
     // Whether a plugin scan is running (from startup, or Rescan); not in
     // `MockData`, since the app never exits mid-scan.
     in property <bool> scanning: false;
