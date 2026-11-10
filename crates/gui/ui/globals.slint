@@ -33,6 +33,9 @@ export global AppState {
     in property <string> scene-target-name: Platform.uses-mock-data ? MockData.scene-target-name : "";
     in property <[string]> default-plugin-folders: Platform.uses-mock-data ? MockData.default-plugin-folders : [];
     in property <[string]> extra-plugin-folders: Platform.uses-mock-data ? MockData.extra-plugin-folders : [];
+    // Whether a plugin scan is running (from startup, or Rescan); not in
+    // `MockData`, since the app never exits mid-scan.
+    in property <bool> scanning: false;
     // Every plugin found, as "name — kind (format)", for the Settings tab.
     in property <[string]> discovered-plugins: Platform.uses-mock-data ? MockData.discovered-plugins : [];
     // The plugin picker's list for its current category and search, pinned

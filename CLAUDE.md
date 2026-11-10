@@ -212,7 +212,9 @@ behind format-agnostic cores:
 
 - **`crates/lv2-host`** (`live-keys-lv2-host`) — wraps `livi` (built on `lilv`) for LV2 plugin
   discovery/hosting. `Lv2Host` owns the `livi::World` and the shared real-time `Features`
-  (URID map, block size bounds). `Lv2Host::instantiate` accepts plugins with audio input ports
+  (URID map, block size bounds). Building the world is the slow part (~3 s with LSP installed:
+  livi reads every plugin's ports up front), so it's split out as `Lv2Scan::run` — `Send`,
+  unlike the host — and `Lv2Host::from_scan` makes the host from it. `Lv2Host::instantiate` accepts plugins with audio input ports
   (e.g. effects, not just MIDI-only instruments) — see "Known simplifications" below for what
   feeds those inputs, since there's no real audio graph yet (see Roadmap). It also accepts
   plugins that write an atom-sequence or CV output port (e.g. an arpeggiator's MIDI-out, or a
@@ -340,7 +342,10 @@ behind format-agnostic cores:
     `Vst3Host::save_file` writes a `.vstpreset` anywhere (for slot presets; `load_preset`
     reads it back).
   `Vst3Host` (`lib.rs`) owns one scan's results, instantiates by `PluginInfo::id`, and wraps
-  presets (`presets`/`load_preset`/`save_preset`/`delete_preset`).
+  presets (`presets`/`load_preset`/`save_preset`/`delete_preset`). The scan itself is
+  `Vst3Scan`, run a step at a time (`step`: one bundle loaded or one class looked at;
+  `finish` does the rest) — it has to stay on the main thread, where the plugins' editors will
+  run, so a GUI interleaves it with drawing; `Vst3Host::new` runs it in one go.
 
 - **`crates/vst3-ui-host`** (`live-keys-vst3-ui`) — hosts a VST3 plugin's own editor
   (`IPlugView`, platform type `X11EmbedWindowID`) in an `x11rb`-created top-level window. Unlike
@@ -454,9 +459,13 @@ behind format-agnostic cores:
   outputs with a large negotiated period. All buffers involved are pre-allocated before
   `stream.play()`, never inside the callback. `Engine::list_plugins` merges both formats (LV2
   first); instantiation dispatches on the id (`vst3:` prefix → `Vst3Host`, else `Lv2Host`).
-  `Engine::rescan_plugins` rebuilds the whole `Lv2Host` with `LV2_PATH` extended by extra
-  folders (see `paths.rs`) and rescans VST3 with the same extra folders — it stops the stream and
+  Scanning is a `PluginScan`: `PluginScan::start(extra_dirs)` sets `LV2_PATH` to the default
+  folders plus the extra ones (see `paths.rs`), builds the LV2 world on a thread of its own and
+  starts a `Vst3Scan` with the same folders, which `step` advances (`true` once both are done);
+  `Engine::install_plugins(scan)` finishes it and swaps the hosts in — it stops the stream and
   empties every slot first, since an `Lv2Plugin` shouldn't outlive the `World` it came from.
+  `Engine::new` scans the default folders before returning (CLI, examples);
+  `Engine::unscanned` knows no plugins until a scan is installed (the GUI).
   `default_plugin_search_paths()` lists both formats' default folders (for display);
   `build_lv2_path` uses only the LV2 ones. `Engine::slot(slot)` returns that slot's `SlotChain`
   and `Engine::plugin(key)` one `LoadedPluginMeta` (key, id, name, format, `params` —
@@ -575,7 +584,11 @@ behind format-agnostic cores:
   `after-pinned` for a divider); pins are `AppConfig.pinned_plugins`, toggled by `toggle-pin`.
   Picking calls `pick-plugin(slot, category, id)`, which loads an instrument (replacing) or
   appends to the matching effect section. The Settings tab lists every plugin with its kind
-  and format. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
+  and format. **Plugin scans** run after the window is up, so it shows at once: `Scanner`
+  holds the `PluginScan` and a timer that runs it in `SCAN_SLICE`s every `SCAN_TICK` (the VST3
+  half is on this thread) and installs it once done — at startup with the configured extra
+  folders, later from Rescan, which `AppState.scanning` replaces by a spinner meanwhile. The
+  plugins already loaded keep playing until a rescan is installed. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
   `AppState.slots` entry (`SlotState`: `instrument: EffectRow` — key -1 when empty —
   `midi-effects`/`audio-effects: [EffectRow]`, status, routing; an `EffectRow` is one
   plugin's name/key, whether its GUI/parameter window is open, and its current preset),
@@ -658,7 +671,7 @@ behind format-agnostic cores:
   plugin preset changes and scene changes) is `AUTOSAVE_DELAY` old and every slot has been
   silent (`Engine::take_slot_peak` ≤ `SILENCE`) for `AUTOSAVE_QUIET` — saving lends LV2
   plugins with state, which silences them, so never while playing. `restore_session` runs
-  from a zero-delay timer once the window is up: each slot through `load_slot_preset`, then
+  once the first plugin scan is installed: each slot through `load_slot_preset`, then
   the slot presets and scene shown, then the plugin windows reopened (`invoke_open_plugin_gui`,
   `invoke_toggle_params`). A marker file (`session.restoring`) is written for the duration:
   if it's there at startup, the last restore crashed or hung, so this one is skipped (with

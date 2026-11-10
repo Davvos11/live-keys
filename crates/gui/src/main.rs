@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
-    PluginInfo, PluginKey, PluginKind, PresetInfo, SLOT_COUNT, Section, SlotChain,
+    PluginInfo, PluginKey, PluginKind, PluginScan, PresetInfo, SLOT_COUNT, Section, SlotChain,
     MAX_MIDI_INPUTS, default_plugin_search_paths, list_logical_output_devices,
 };
 use live_keys_lv2_ui::{
@@ -28,6 +28,10 @@ const MAX_BLOCK_SIZE: usize = 8192;
 /// How often the plugin-GUI-closed check and param-change forwarding run, and VST3
 /// editors get pumped (see `Vst3Editor::idle`).
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How often the plugin scan gets a turn, and for how long: VST3 plugins are
+/// scanned on this thread, so in slices that leave the window time to draw.
+const SCAN_TICK: Duration = Duration::from_millis(4);
+const SCAN_SLICE: Duration = Duration::from_millis(12);
 /// How often MIDI devices are looked for, so one plugged in (or unplugged) while
 /// the app runs is connected and shows up in Settings. Listing opens an ALSA
 /// sequencer client, so not every UI tick.
@@ -986,7 +990,8 @@ fn main() -> anyhow::Result<()> {
     // Set by edits that can fire continuously (a dragged fader), and saved by the
     // poll timer instead of writing the file on every step.
     let config_dirty = Rc::new(Cell::new(false));
-    let engine = Rc::new(RefCell::new(Engine::new(MAX_BLOCK_SIZE)));
+    // Plugins are scanned once the window is up (see `Scanner`), so it shows at once.
+    let engine = Rc::new(RefCell::new(Engine::unscanned(MAX_BLOCK_SIZE)));
     for (slot, slot_config) in config.borrow().slots.iter().enumerate() {
         let mut engine = engine.borrow_mut();
         engine.set_slot_filter(slot, slot_config.filter());
@@ -996,12 +1001,6 @@ fn main() -> anyhow::Result<()> {
     {
         let ports = engine.borrow_mut().set_midi_inputs(midi_input_devices(&config.borrow()));
         midi_inputs.set_ports(&ports, &config.borrow());
-    }
-    {
-        let extra_dirs = config.borrow().extra_plugin_dirs.clone();
-        if !extra_dirs.is_empty() {
-            engine.borrow_mut().rescan_plugins(&extra_dirs);
-        }
     }
     // Param changes from a plugin's own open GUI arrive as `(key, param_id, value)`
     // — on its hosting thread for LV2, on this thread for VST3; they're forwarded
@@ -1180,24 +1179,61 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Whether the last session was restored, which happens once the first scan
+    // is done (it needs the plugins).
+    let restored = Rc::new(Cell::new(false));
+    let scanner = Rc::new(Scanner::default());
     {
+        let scanner_weak = Rc::downgrade(&scanner);
         let app_weak = app.as_weak();
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
         let picker = picker.clone();
-        logic.on_rescan_plugins(move || {
-            let Some(app) = app_weak.upgrade() else {
+        let restored = restored.clone();
+        let mut first = true;
+        scanner.timer.start(slint::TimerMode::Repeated, SCAN_TICK, move || {
+            let (Some(scanner), Some(app)) = (scanner_weak.upgrade(), app_weak.upgrade()) else {
                 return;
             };
-            // Rescanning unloads every plugin, invalidating any open plugin GUI's
+            let deadline = Instant::now() + SCAN_SLICE;
+            let done = match scanner.scan.borrow_mut().as_mut() {
+                Some(scan) => loop {
+                    if scan.step() {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                },
+                None => true,
+            };
+            if !done {
+                return;
+            }
+            scanner.timer.stop();
+            let Some(scan) = scanner.scan.take() else { return };
+            // Installing unloads every plugin, invalidating any open plugin GUI's
             // instance handle.
             rack.forget_all();
-            engine
-                .borrow_mut()
-                .rescan_plugins(&config.borrow().extra_plugin_dirs);
+            engine.borrow_mut().install_plugins(scan);
             refresh_plugin_list(&app, &engine.borrow(), &picker);
             rack.refresh_all(&engine.borrow());
+            app.global::<AppState>().set_scanning(false);
+            if std::mem::take(&mut first) {
+                restored.set(restore_session(&engine, &config, &rack, &app.global::<AppLogic>()));
+            }
+        });
+    }
+    scanner.start(&app, &config.borrow().extra_plugin_dirs);
+    {
+        let app_weak = app.as_weak();
+        let config = config.clone();
+        let scanner = scanner.clone();
+        logic.on_rescan_plugins(move || {
+            if let Some(app) = app_weak.upgrade() {
+                scanner.start(&app, &config.borrow().extra_plugin_dirs);
+            }
         });
     }
 
@@ -2015,22 +2051,6 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Restore the last session once the window is up, so it shows while
-    // plugins load.
-    let restored = Rc::new(Cell::new(false));
-    {
-        let config = config.clone();
-        let engine = engine.clone();
-        let rack = rack.clone();
-        let restored = restored.clone();
-        let app_weak = app.as_weak();
-        slint::Timer::single_shot(Duration::ZERO, move || {
-            if let Some(app) = app_weak.upgrade() {
-                restored.set(restore_session(&engine, &config, &rack, &app.global::<AppLogic>()));
-            }
-        });
-    }
-
     // Saves the session after a change, once every slot has been quiet for
     // `AUTOSAVE_QUIET` (saving can briefly silence a plugin).
     let autosave_timer = slint::Timer::default();
@@ -2537,6 +2557,27 @@ fn refresh_plugin_folders(app: &AppWindow, config: &config::AppConfig) {
         .map(|dir| dir.display().to_string())
         .collect();
     app.global::<AppState>().set_extra_plugin_folders(string_model(folders));
+}
+
+/// The plugin scan in progress, if any, and the timer that runs it a slice at a
+/// time and installs it once done (set up in `main`).
+#[derive(Default)]
+struct Scanner {
+    scan: RefCell<Option<PluginScan>>,
+    timer: slint::Timer,
+}
+
+impl Scanner {
+    /// Starts a scan of the default plugin folders plus `extra_dirs`, unless one
+    /// is running. The plugins already loaded keep playing until it's installed.
+    fn start(&self, app: &AppWindow, extra_dirs: &[std::path::PathBuf]) {
+        if self.scan.borrow().is_some() {
+            return;
+        }
+        *self.scan.borrow_mut() = Some(PluginScan::start(extra_dirs));
+        app.global::<AppState>().set_scanning(true);
+        self.timer.restart();
+    }
 }
 
 /// Hands the plugin picker and the Settings tab's list the plugins found by the

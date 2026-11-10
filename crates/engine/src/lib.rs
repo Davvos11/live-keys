@@ -6,7 +6,7 @@ mod rack;
 
 pub use audio::{find_output_device, is_logical_output_device, list_logical_output_devices};
 pub use engine::{
-    Engine, LoadedPluginMeta, PluginEditor, PluginKey, SLOT_COUNT, SlotChain, SlotSettings,
+    Engine, LoadedPluginMeta, PluginEditor, PluginKey, PluginScan, SLOT_COUNT, SlotChain, SlotSettings,
 };
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
 pub use live_keys_core::{ALL_INPUTS, MidiEvent, MidiFilter};

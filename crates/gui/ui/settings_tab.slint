@@ -1,4 +1,4 @@
-import { AboutSlint, Button, CheckBox, ComboBox, GroupBox, Palette, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { AboutSlint, Button, CheckBox, ComboBox, GroupBox, Palette, VerticalBox, HorizontalBox, ListView, Spinner } from "std-widgets.slint";
 import { AppState, AppLogic, MidiInputRow } from "globals.slint";
 
 // One MIDI input: its number, a button listing its devices that opens a
@@ -103,9 +103,24 @@ export component SettingsTab inherits VerticalBox {
                     text: "Add folder...";
                     clicked => { AppLogic.add-plugin-folder(); }
                 }
-                Button {
+                if !AppState.scanning: Button {
                     text: "Rescan";
                     clicked => { AppLogic.rescan-plugins(); }
+                }
+                // Stretched like the button, so "Add folder..." keeps its width.
+                if AppState.scanning: HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+                    Spinner {
+                        indeterminate: true;
+                        width: 20px;
+                        height: 20px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: "Scanning…";
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

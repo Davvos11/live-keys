@@ -4,8 +4,8 @@ use live_keys_core::{
     ALL_INPUTS, Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
     PluginInfo, PluginKind, PresetInfo, Producer, PushError, ring_buffer,
 };
-use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, PortEvent, UiChannel, livi, lv2_raw};
-use live_keys_vst3_host::{Vst3Controller, Vst3Host};
+use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw};
+use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -220,6 +220,55 @@ impl StateSource<'_> {
 /// plugins loaded into each rack slot. Real-time wiring (ring buffers, no
 /// allocation in the audio callback — see `rack.rs`) lives here so every host
 /// (CLI, GUI) shares one implementation instead of drifting apart.
+const NOT_SCANNED: &str = "plugins haven't been scanned yet";
+
+/// Both formats' hosts, from one [`PluginScan`].
+struct Hosts {
+    lv2: Lv2Host,
+    vst3: Vst3Host,
+}
+
+/// A plugin scan in progress: LV2 on a thread of its own, VST3 a step at a time
+/// in [`PluginScan::step`] on the thread that will use the plugins (see
+/// [`Vst3Scan`]), so a GUI can keep drawing while it runs. Installed with
+/// [`Engine::install_plugins`].
+pub struct PluginScan {
+    lv2: std::thread::JoinHandle<Lv2Scan>,
+    vst3: Vst3Scan,
+}
+
+impl PluginScan {
+    /// Starts scanning the default plugin folders plus `extra_dirs`. Sets
+    /// `LV2_PATH` (for this scan and the LV2 preset world), so call it from the
+    /// control thread, with no other scan running.
+    pub fn start(extra_dirs: &[PathBuf]) -> Self {
+        // SAFETY: only ever called from the control thread; nothing else in this
+        // process reads or writes environment variables concurrently.
+        unsafe { std::env::set_var("LV2_PATH", build_lv2_path(extra_dirs)) };
+        Self {
+            lv2: std::thread::Builder::new()
+                .name("lv2-scan".into())
+                .spawn(Lv2Scan::run)
+                .expect("failed to spawn the LV2 scan thread"),
+            vst3: Vst3Scan::new(extra_dirs),
+        }
+    }
+
+    /// Does one step of the VST3 scan; `true` once the whole scan is done.
+    pub fn step(&mut self) -> bool {
+        !self.vst3.step() && self.lv2.is_finished()
+    }
+
+    fn finish(self, max_block_size: usize) -> Hosts {
+        let vst3 = self.vst3.finish(max_block_size);
+        let lv2 = match self.lv2.join() {
+            Ok(scan) => scan,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        Hosts { lv2: Lv2Host::from_scan(lv2, max_block_size), vst3 }
+    }
+}
+
 pub struct Engine {
     // Declared (so dropped) before the hosts: the stream's callback and retired
     // queue can still hold plugins, and an LV2 plugin must not outlive its world.
@@ -229,8 +278,8 @@ pub struct Engine {
     orphaned: Option<Box<AudioState>>,
     midi_inputs: MidiInputs,
     audio_host: cpal::Host,
-    lv2: Lv2Host,
-    vst3: Vst3Host,
+    /// `None` until the first [`PluginScan`] is installed.
+    hosts: Option<Hosts>,
     max_block_size: usize,
     slots: [SlotChain; SLOT_COUNT],
     settings: [SlotSettings; SLOT_COUNT],
@@ -240,11 +289,20 @@ pub struct Engine {
 impl Engine {
     /// `max_block_size` must be at least as large as the largest number of frames the
     /// audio backend will ever hand us in one callback.
+    /// Scans the default plugin folders first; see [`Engine::unscanned`] to show
+    /// something meanwhile.
     pub fn new(max_block_size: usize) -> Self {
+        let mut engine = Self::unscanned(max_block_size);
+        engine.install_plugins(PluginScan::start(&[]));
+        engine
+    }
+
+    /// An engine that knows no plugins until a [`PluginScan`] is installed
+    /// ([`Engine::install_plugins`]).
+    pub fn unscanned(max_block_size: usize) -> Self {
         Self {
             audio_host: cpal::default_host(),
-            lv2: Lv2Host::new(max_block_size),
-            vst3: Vst3Host::new(max_block_size, &[]),
+            hosts: None,
             max_block_size,
             running: None,
             orphaned: None,
@@ -257,8 +315,9 @@ impl Engine {
 
     /// Every plugin found by the last scan, LV2 first, then VST3.
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
-        let mut plugins = self.lv2.list_plugins();
-        plugins.extend(self.vst3.list_plugins());
+        let Some(hosts) = &self.hosts else { return Vec::new() };
+        let mut plugins = hosts.lv2.list_plugins();
+        plugins.extend(hosts.vst3.list_plugins());
         plugins
     }
 
@@ -270,6 +329,10 @@ impl Engine {
             .iter()
             .any(|info| info.id == plugin_id && info.kind == PluginKind::MidiEffect);
         if is_midi { Section::Midi } else { Section::Audio }
+    }
+
+    fn hosts(&self) -> Result<&Hosts> {
+        self.hosts.as_ref().context(NOT_SCANNED)
     }
 
     pub fn is_running(&self) -> bool {
@@ -396,17 +459,14 @@ impl Engine {
             .map_err(|_| anyhow::anyhow!("rack command queue full, audio thread isn't draining it"))
     }
 
-    /// Rebuilds the plugin world so it also searches `extra_dirs`, in addition to the
-    /// default search paths (see [`crate::default_plugin_search_paths`]). Stops the
-    /// stream and empties every slot first — rescanning would otherwise leave loaded
-    /// plugins depending on a `World` that's about to be dropped.
-    pub fn rescan_plugins(&mut self, extra_dirs: &[PathBuf]) {
+    /// Replaces the plugins known with what `scan` found, waiting for it to finish
+    /// if it hasn't. Stops the stream and empties every slot first: an LV2 plugin
+    /// must not outlive the world it came from.
+    pub fn install_plugins(&mut self, scan: PluginScan) {
         self.stop();
-        // SAFETY: only ever called from the control thread; nothing else in this
-        // process reads or writes environment variables concurrently.
-        unsafe { std::env::set_var("LV2_PATH", build_lv2_path(extra_dirs)) };
-        self.lv2 = Lv2Host::new(self.max_block_size);
-        self.vst3 = Vst3Host::new(self.max_block_size, extra_dirs);
+        self.collect_retired();
+        self.hosts = None;
+        self.hosts = Some(scan.finish(self.max_block_size));
     }
 
     /// Stops the running stream, if any, and empties every slot. MIDI devices stay
@@ -479,10 +539,13 @@ impl Engine {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        let result = work(&self.lv2, plugin.as_mut());
+        let result = match &self.hosts {
+            Some(hosts) => Ok(work(&hosts.lv2, plugin.as_mut())),
+            None => Err(anyhow::anyhow!(NOT_SCANNED)),
+        };
         let running = self.running.as_mut().context("audio stream isn't running")?;
         Self::return_lent(running, slot, position, plugin);
-        Ok(result)
+        result
     }
 
     fn return_lent(running: &mut RunningStream, slot: usize, position: ChainPosition, plugin: BoxedPlugin) {
@@ -592,8 +655,11 @@ impl Engine {
     /// another host) in the format's standard user folder.
     pub fn presets(&self, key: PluginKey) -> Vec<PresetInfo> {
         match self.plugin(key) {
-            Some(meta) if meta.format == PluginFormat::Lv2 => self.lv2.presets(&meta.id),
-            Some(meta) => self.vst3.presets(&meta.id),
+            Some(meta) => match (&self.hosts, meta.format) {
+                (Some(hosts), PluginFormat::Lv2) => hosts.lv2.presets(&meta.id),
+                (Some(hosts), PluginFormat::Vst3) => hosts.vst3.presets(&meta.id),
+                (None, _) => Vec::new(),
+            },
             None => Vec::new(),
         }
     }
@@ -632,7 +698,7 @@ impl Engine {
                     meta.values.extend(values);
                 } else {
                     // SAFETY: without state, restoring only reports port values.
-                    let values = unsafe { source.restore_lv2(&self.lv2, instance, &plugin_id) }?;
+                    let values = unsafe { source.restore_lv2(&self.hosts()?.lv2, instance, &plugin_id) }?;
                     for (index, value) in values {
                         self.send_param_change(key, index, value);
                     }
@@ -643,7 +709,7 @@ impl Engine {
                     StateSource::Preset(path) => path.to_string(),
                     StateSource::File(path) => path.display().to_string(),
                 };
-                self.vst3.load_preset(controller, &plugin_id, &path)?;
+                self.hosts()?.vst3.load_preset(controller, &plugin_id, &path)?;
                 // The processor has the preset's values now; only our record of
                 // them needs updating, from the controller.
                 let values: Vec<(u32, f32)> = meta
@@ -668,7 +734,7 @@ impl Engine {
                 // SAFETY: as `save_lv2` guarantees.
                 unsafe { lv2.save_preset(instance, &plugin_id, &plugin_name, name, value) }
             }),
-            PluginEditor::Vst3(controller) => self.vst3.save_preset(controller, &plugin_id, name),
+            PluginEditor::Vst3(controller) => self.hosts()?.vst3.save_preset(controller, &plugin_id, name),
         }
     }
 
@@ -689,7 +755,7 @@ impl Engine {
             }
             PluginEditor::Vst3(controller) => {
                 let path = dir.join(format!("{stem}.vstpreset"));
-                self.vst3.save_file(controller, &plugin_id, &path)?;
+                self.hosts()?.vst3.save_file(controller, &plugin_id, &path)?;
                 Ok(path)
             }
         }
@@ -721,15 +787,15 @@ impl Engine {
             self.with_lent(slot, position, |lv2, _| save(lv2, instance, &value))?
         } else {
             // Without state, saving only reads port values.
-            save(&self.lv2, instance, &value)
+            save(&self.hosts()?.lv2, instance, &value)
         }
     }
 
     /// Deletes user preset `preset_id` of the plugin with `key`.
     pub fn delete_preset(&mut self, key: PluginKey, preset_id: &str) -> Result<()> {
         match self.plugin(key).context("plugin isn't loaded")?.format {
-            PluginFormat::Lv2 => self.lv2.delete_preset(preset_id),
-            PluginFormat::Vst3 => self.vst3.delete_preset(preset_id),
+            PluginFormat::Lv2 => self.hosts()?.lv2.delete_preset(preset_id),
+            PluginFormat::Vst3 => self.hosts()?.vst3.delete_preset(preset_id),
         }
     }
 
@@ -746,6 +812,7 @@ impl Engine {
 
         if plugin_id.starts_with(live_keys_vst3_host::ID_PREFIX) {
             let (plugin, controller) = self
+                .hosts()?
                 .vst3
                 .instantiate(plugin_id, sample_rate)
                 .with_context(|| format!("failed to instantiate VST3 plugin '{plugin_id}'"))?;
@@ -761,6 +828,7 @@ impl Engine {
             Ok((Box::new(plugin), meta))
         } else {
             let mut plugin = self
+                .hosts()?
                 .lv2
                 .instantiate(plugin_id, sample_rate)
                 .with_context(|| format!("failed to instantiate LV2 plugin '{plugin_id}'"))?;

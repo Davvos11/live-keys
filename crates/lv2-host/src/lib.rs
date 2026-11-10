@@ -214,6 +214,17 @@ fn read_params(world: &livi::World, plugin: &livi::Plugin, sample_rate: f64) -> 
         .collect()
 }
 
+/// The slow part of [`Lv2Host::new`] — loading every bundle in `LV2_PATH` and
+/// reading each plugin's data (seconds, with LSP installed) — which, unlike the
+/// host itself, can be done on another thread.
+pub struct Lv2Scan(livi::World);
+
+impl Lv2Scan {
+    pub fn run() -> Self {
+        Self(livi::World::new())
+    }
+}
+
 /// Owns the LV2 plugin world and the real-time features (URID map, block size) that
 /// every plugin instantiated from it shares.
 pub struct Lv2Host {
@@ -228,7 +239,12 @@ impl Lv2Host {
     /// `max_block_size` must be at least as large as the largest number of frames
     /// that will ever be passed to `Lv2Plugin::process` in one call.
     pub fn new(max_block_size: usize) -> Self {
-        let world = livi::World::new();
+        Self::from_scan(Lv2Scan::run(), max_block_size)
+    }
+
+    /// The host for the plugins `scan` found; see [`Lv2Host::new`].
+    pub fn from_scan(scan: Lv2Scan, max_block_size: usize) -> Self {
+        let world = scan.0;
         let features = world.build_features(livi::FeaturesBuilder {
             min_block_length: 1,
             max_block_length: max_block_size,
@@ -638,3 +654,4 @@ impl HostedPlugin for Lv2Plugin {
             .set_control_input(livi::PortIndex(id as usize), value);
     }
 }
+

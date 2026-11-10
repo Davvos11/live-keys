@@ -11,6 +11,7 @@ mod plugin;
 mod preset;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use live_keys_core::{PluginFormat, PluginInfo, PluginKind, PresetInfo};
@@ -37,68 +38,116 @@ pub struct Vst3Host {
     max_block_size: usize,
 }
 
-impl Vst3Host {
-    /// Scans [`default_search_paths`] plus `extra_dirs`. Loads every bundle's
-    /// library to ask its factory what it contains — VST3 has no other way to
-    /// find out — so a plugin that crashes on load takes the scan down with it.
-    /// `max_block_size` must be at least as large as the largest number of frames
-    /// that will ever be passed to `Vst3Plugin::process` in one call.
-    pub fn new(max_block_size: usize, extra_dirs: &[PathBuf]) -> Self {
+/// A VST3 scan in progress, done a step at a time (one bundle loaded, or one class
+/// looked at) so a GUI can keep drawing in between: it has to run on the main
+/// thread, since plugins expect to be loaded and created on the thread that will
+/// later run their editors.
+pub struct Vst3Scan {
+    bundles: std::vec::IntoIter<PathBuf>,
+    current: Option<OpenBundle>,
+    classes: Vec<ScannedClass>,
+    kinds: kind_cache::KindCache,
+}
+
+struct OpenBundle {
+    module: Arc<module::Module>,
+    binary: PathBuf,
+    stamp: Option<kind_cache::BinaryStamp>,
+    classes: std::vec::IntoIter<module::ClassInfo>,
+}
+
+impl Vst3Scan {
+    /// Starts a scan of [`default_search_paths`] plus `extra_dirs`. Every bundle's
+    /// library gets loaded to ask its factory what it contains — VST3 has no other
+    /// way to find out — so a plugin that crashes on load takes the scan down with it.
+    pub fn new(extra_dirs: &[PathBuf]) -> Self {
         let mut dirs = default_search_paths();
         dirs.extend_from_slice(extra_dirs);
+        Self {
+            bundles: module::find_bundles(&dirs).into_iter(),
+            current: None,
+            classes: Vec::new(),
+            kinds: kind_cache::KindCache::load(),
+        }
+    }
 
-        let mut classes = Vec::new();
-        let mut kinds = kind_cache::KindCache::load();
-        for bundle in module::find_bundles(&dirs) {
-            let Some(binary) = module::bundle_binary(&bundle) else {
-                log::warn!("VST3 bundle {} has no binary for this platform", bundle.display());
-                continue;
-            };
-            let module = match module::load(&binary) {
-                Ok(module) => module,
-                Err(err) => {
-                    log::warn!("skipping VST3 bundle {}: {err:#}", bundle.display());
-                    continue;
-                }
-            };
-            let stamp = kind_cache::BinaryStamp::of(&binary);
-            for class in module::audio_classes(&module) {
-                let cid_hex = module::cid_to_hex(&class.cid);
-                let id = format!("{ID_PREFIX}{cid_hex}");
-                // The same plugin can be installed in more than one search folder;
-                // the first found wins.
-                if classes.iter().any(|scanned: &ScannedClass| scanned.info.id == id) {
-                    continue;
-                }
-                classes.push(ScannedClass {
-                    info: PluginInfo {
-                        id,
-                        name: class.name,
-                        format: PluginFormat::Vst3,
-                        kind: if class.is_instrument {
-                            PluginKind::Instrument
-                        } else {
-                            // Effects can't be told apart by category; MIDI ones
-                            // need a look at their buses (cached, it's slow).
-                            kinds
-                                .kind(stamp.as_ref(), &cid_hex, || {
-                                    plugin::probe_kind(&module, &class.cid)
-                                })
-                                .unwrap_or(PluginKind::AudioEffect)
-                        },
-                    },
-                    binary: binary.clone(),
-                    cid: class.cid,
-                    vendor: class.vendor,
+    /// Does one step of the scan; `false` once there's nothing left to do.
+    pub fn step(&mut self) -> bool {
+        let Self { bundles, current, classes, kinds } = self;
+        if let Some(open) = current {
+            match open.classes.next() {
+                Some(class) => add_class(classes, kinds, open, class),
+                None => *current = None,
+            }
+            return true;
+        }
+        let Some(bundle) = bundles.next() else { return false };
+        let Some(binary) = module::bundle_binary(&bundle) else {
+            log::warn!("VST3 bundle {} has no binary for this platform", bundle.display());
+            return true;
+        };
+        match module::load(&binary) {
+            Ok(module) => {
+                *current = Some(OpenBundle {
+                    classes: module::audio_classes(&module).into_iter(),
+                    stamp: kind_cache::BinaryStamp::of(&binary),
+                    module,
+                    binary,
                 });
             }
+            Err(err) => log::warn!("skipping VST3 bundle {}: {err:#}", bundle.display()),
         }
-        kinds.save();
-        log::info!("found {} VST3 plugin classes", classes.len());
-        Self {
-            classes,
+        true
+    }
+
+    /// Runs what's left of the scan. `max_block_size` must be at least as large as
+    /// the largest number of frames that will ever be passed to
+    /// `Vst3Plugin::process` in one call.
+    pub fn finish(mut self, max_block_size: usize) -> Vst3Host {
+        while self.step() {}
+        self.kinds.save();
+        log::info!("found {} VST3 plugin classes", self.classes.len());
+        Vst3Host {
+            classes: self.classes,
             max_block_size,
         }
+    }
+}
+
+fn add_class(
+    classes: &mut Vec<ScannedClass>,
+    kinds: &mut kind_cache::KindCache,
+    open: &OpenBundle,
+    class: module::ClassInfo,
+) {
+    let cid_hex = module::cid_to_hex(&class.cid);
+    let id = format!("{ID_PREFIX}{cid_hex}");
+    // The same plugin can be installed in more than one search folder; the first
+    // found wins.
+    if classes.iter().any(|scanned| scanned.info.id == id) {
+        return;
+    }
+    let kind = if class.is_instrument {
+        PluginKind::Instrument
+    } else {
+        // Effects can't be told apart by category; MIDI ones need a look at their
+        // buses (cached, it's slow).
+        kinds
+            .kind(open.stamp.as_ref(), &cid_hex, || plugin::probe_kind(&open.module, &class.cid))
+            .unwrap_or(PluginKind::AudioEffect)
+    };
+    classes.push(ScannedClass {
+        info: PluginInfo { id, name: class.name, format: PluginFormat::Vst3, kind },
+        binary: open.binary.clone(),
+        cid: class.cid,
+        vendor: class.vendor,
+    });
+}
+
+impl Vst3Host {
+    /// Scans [`default_search_paths`] plus `extra_dirs` in one go; see [`Vst3Scan`].
+    pub fn new(max_block_size: usize, extra_dirs: &[PathBuf]) -> Self {
+        Vst3Scan::new(extra_dirs).finish(max_block_size)
     }
 
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
