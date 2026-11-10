@@ -20,6 +20,9 @@ options. Started 2026-11-10.
   format's own preset mechanism, not only in live-keys.
 - **No inline displays in instrument headers** for now; inline views are for effects.
 - **Our own effects open a small in-app popup** from their FX square (see Part C).
+- **Cross-platform is a future goal** for the app. For our own instruments: **CLAP is the
+  reference format**, and **VST3 and LV2 are built too** (see "Formats for the standalone
+  instruments").
 
 ## Goals
 
@@ -147,6 +150,26 @@ LV2 + CLAP + VST3, and check
 - its state format: whether live-keys' built-in front-end can read a preset or state saved by
   the standalone plugin, and the other way round (needed for the next point).
 
+### Formats for the standalone instruments
+
+The app should be able to go cross-platform one day, which favours writing our instruments for
+formats that exist everywhere. **CLAP is the reference format; VST3 and LV2 are built as well**
+— with truce all three come from one source, so the extra formats cost little.
+
+- **CLAP** (open, MIT, plain C headers, the cleanest design: polyphonic modulation, note
+  expressions, a clear threading model). Supported by Bitwig and REAPER; FL Studio and Studio One
+  reportedly (sources disagree); Cubase has announced it without a date; **not** Ableton Live,
+  Logic or Pro Tools. Hosts only see its presets through the preset-discovery extension, which
+  few support — so CLAP alone doesn't meet "other hosts see the presets".
+- **VST3** for reach: Ableton Live (Windows/macOS), Cubase, FL Studio and most others; hosts
+  show `.vstpreset` files. The SDK is MIT now.
+- **LV2** for Linux hosts: Ardour and Carla, which show LV2 presets. (LV2 itself isn't
+  Linux-only — the spec and lilv build on Windows and macOS, and Ardour hosts it there — but
+  few LV2 plugins exist for those platforms.)
+
+The truce spike should check that each format shows the presets in at least one real host
+(CLAP: REAPER or Bitwig; VST3: REAPER or Carla; LV2: Ardour or Carla).
+
 ### Recognising each other (investigation)
 
 The built-in and standalone builds of one instrument have to be treated as the same instrument:
@@ -273,14 +296,18 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
    built-in front-end, its standalone build and shipped presets.
 6. First built-in effect (a compressor) with the effect popup and its interactive graph.
 
-Later, separately: MIDI learn for hardware controls.
+Later, separately: MIDI learn for hardware controls; **hosting CLAP** in live-keys (for
+third-party plugins once the app runs on Windows/macOS, where VST3 and CLAP are what users have
+— our own instruments don't need it, since live-keys uses their built-in front-end); a
+non-X11 backend for VST3 editors on those platforms.
 
 ## Open questions
 
 - **Toolkit**: confirm truce with the spike above (or fall back to nice-plug).
 - **Recognising each other**: the id scheme and shared presets above, once the spike shows
   truce's state and preset formats.
-- Which **formats** to build the standalone instruments as by default: LV2 + CLAP (+ VST3)?
+- Ardour's CLAP support (unconfirmed), and so whether Linux users would need the LV2 build for
+  Ardour at all.
 
 ## Sources
 
@@ -291,6 +318,9 @@ Later, separately: MIDI learn for hardware controls.
   [dropping the Cairo dependency](https://git.ardour.org/ardour/livetrax/commit/93bc9b972888f5a8c08115eccb66a35d4f3853a6)
 - Carla's host support: [Carla commit 856bbf60](https://git.kx.studio/falkTX/Carla/commit/856bbf6015720cdccbe379508b0fd80606523d27)
 - CLAP extensions: [free-audio/clap](https://github.com/free-audio/clap), [CLAP two years later (LibreArts)](https://librearts.org/2024/11/clap-api-two-years-later/)
+- CLAP host support: [CLAP vs VST3 (2026), Spectral Colors](https://spectral-colors.com/news/clap-vs-vst3-2026/),
+  [VST3 vs AU vs AAX vs CLAP (2026), Antares](https://www.antarestech.com/blog/vst3-au-aax-clap-plugin-formats-2026),
+  [CLever Audio Plug-in, Wikipedia](https://en.wikipedia.org/wiki/CLever_Audio_Plug-in)
 - Toolkits: [truce](https://github.com/truce-audio/truce), [nice-plug](https://codeberg.org/RustAudio/nice-plug),
   [nih-plug's hand-over issue](https://github.com/robbert-vdh/nih-plug/issues/265),
   [RAVET 0.1.0](https://users.rust-lang.org/t/ravet-0-1-0-audio-plug-ins-and-standalone-apps-in-rust/143550),
