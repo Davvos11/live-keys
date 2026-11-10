@@ -16,6 +16,10 @@ options. Started 2026-11-10.
   buttons — set up per plugin. Hardware control (MIDI learn) comes in a later stage, with its
   own design.
 - **No macros**: one on-screen control drives one parameter (or one MIDI CC).
+- **Presets of our instruments are visible to other hosts**: they're stored in the standalone
+  format's own preset mechanism, not only in live-keys.
+- **No inline displays in instrument headers** for now; inline views are for effects.
+- **Our own effects open a small in-app popup** from their FX square (see Part C).
 
 ## Goals
 
@@ -88,7 +92,8 @@ Profiles we ship are compiled in. Profiles the user makes (Part B) go to
 | Presets | App-level or LV2-style, our choice | LV2 presets (shared with Ardour) | `.vstpreset` / CLAP state |
 | Licence notes | Ours | Ours | VST3 SDK is MIT now; check the framework's own bindings (nih-plug has used GPL/LGPL VST3 bindings) |
 
-**Decided: A1 and A2/A3 together, around one core.** Per instrument:
+**Decided: A1 and A2/A3 together, around one core.** Per instrument (the toolkit for the
+standalone front-end is under investigation, see below):
 
 ```
 crates/instruments/<name>/        the sound engine: parameters, voices, render(); no host code
@@ -107,6 +112,53 @@ crates/instruments/<name>/        the sound engine: parameters, voices, render()
   to recognise each other (a shared id scheme).
 - Effort stays close to plain A1: the plugin ABI lives in one thin, shared front-end layer, not
   in each instrument.
+
+### Toolkit for the standalone instruments (investigation, 2026-11-11)
+
+nih-plug, the usual answer a few years ago, is **in maintenance mode**; its README points to a
+community fork, now **nice-plug**. Candidates found:
+
+| | truce | nice-plug | RAVET |
+|---|---|---|---|
+| Formats | CLAP, VST3 (default); LV2, VST2, AU v2/v3, AAX (opt-in); standalone | CLAP, VST3; standalone | CLAP, VST3, LV2, AU, AAX |
+| Presets visible to hosts | **Yes**: one TOML `.preset` per preset becomes CLAP preset-discovery, `.vstpreset`, LV2 `pset:Preset` and AU factory presets | Not mentioned (only persisted state) | Not stated |
+| GUI | Built-in widgets, egui, iced, **Slint**, vizia, raw window handle | egui, iced, Slint (work in progress), anything baseview-compatible; can build without any GUI | HTML in the platform's web view |
+| MIDI | MIDI 2.0/UMP (opt-in), per-note expression across formats, sample-accurate automation | Note expression, CCs, pressure, pitch bend, SysEx, CLAP poly modulation | MIDI 1 short messages |
+| Licence | "Truce License 1.0": Apache-2.0/MIT plus a rider that only applies to redistributing truce itself as a commercial framework or service | ISC | GPL-3.0 (or paid commercial) |
+| Maturity | v6.3; ~1,870 commits, ~250 stars; examples (gain, EQ, synth, arpeggio…) | v0.4.2 (2026-09); ~2,550 commits (incl. nih-plug's), one main maintainer; calls itself experimental | v0.1.0 (2026-11), prototype adapters |
+
+**Leaning: truce.** It's the only one that covers both parts of the brief: LV2 (the native
+Linux format, which Ardour and Carla show presets for) alongside CLAP/VST3, and **presets
+exported to every format from one source**, which is exactly "other hosts see the presets".
+Its Slint support also means a standalone GUI could reuse our components. nice-plug is the
+fallback (lineage, ISC licence, but no LV2 and presets would be ours to build per format);
+RAVET is too young and GPL. Outside Rust, DPF (C++, LV2/VST3/CLAP, ISC) would be the
+established choice, at the cost of a second language.
+
+Before committing to truce, a **spike**: build a minimal sine instrument with two presets as
+LV2 + CLAP + VST3, and check
+
+- that the presets show up in Ardour and Carla (LV2), and in live-keys itself (LV2 and VST3);
+- the licences of its per-format binding crates (`truce-lv2`, `truce-vst3`, `truce-clap`) and
+  how `cargo deny` sees the Truce License (a new licence is the developer's decision, see
+  CLAUDE.md's Licensing);
+- whether the instrument core can stay free of truce types, so the built-in front-end doesn't
+  depend on it (truce wraps the core; the core doesn't know truce);
+- its state format: whether live-keys' built-in front-end can read a preset or state saved by
+  the standalone plugin, and the other way round (needed for the next point).
+
+### Recognising each other (investigation)
+
+The built-in and standalone builds of one instrument have to be treated as the same instrument:
+
+- **Ids.** The core declares its standalone ids (LV2 URI, CLAP id, VST3 class id); the built-in
+  front-end's `PluginInfo::id` is derived from the same name. The picker then hides a scanned
+  standalone plugin whose id a built-in claims.
+- **Slot presets and sessions** that recorded the standalone id load the built-in instead (and
+  a slot preset made in live-keys stays loadable if the built-in is removed one day?).
+- **Presets.** The built-in front-end lists the standalone format's presets (the LV2 or
+  `.vstpreset` files, wherever truce installs them) and saves new ones there, so both builds
+  share one preset list. Depends on the state-format check above.
 
 Candidates for a first integrated instrument: a **drawbar organ** (the design's drawbars; nine
 sine partials plus percussion and a simple rotary is small enough to own), an **electric
@@ -177,6 +229,29 @@ The same split as for instruments:
 - **Built in (A1-style):** we draw the inline view natively in Slint from the plugin's live
   values (gain reduction, EQ bands), and it can be **interactive** — drag an EQ band, the
   compressor's threshold — which the Ardour extension can't do. No extension needed.
+
+### The effect popup (decided direction, from a sketch)
+
+Clicking a built-in effect's FX square opens a small popup over the slot (replacing today's
+generic effect popover for these effects):
+
+```
+┌ Compressor Stereo ───────────────────────────┐
+│ ┌──────────────────┐ ▐   (Attack) (Release)  │  a large, interactive graph (transfer curve
+│ │      ╱────────   │ ▐                       │  with the threshold marker); an output/gain
+│ │    ╱             │ ▐   (Ratio)  (Makeup)   │  reduction meter beside it, an input meter
+│ │  ╱               │ ▐                       │  below; the effect's main knobs (2×2) on
+│ └──────────────────┘                         │  the right
+│ ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬ in                           │
+│ [GUI] [Params]                 [‹] [›] [🗑]  │  the same footer as now: own GUI (if any),
+└──────────────────────────────────────────────┘  parameter window, move, remove
+```
+
+- The **FX square** of a built-in effect shows only its live graph — no name text (the name is
+  in the popup's title).
+- Third-party effects keep the generic popover; their square shows the Ardour inline display if
+  they have one, else the name (and, until profiles exist, the guessed curve).
+- Built-in effects may not need a "GUI" button at all; the popup *is* their GUI.
 - **Our own LV2 plugins (A2-style):** implementing the Ardour extension makes them look good in
   Ardour too, but in live-keys they'd be limited to a picture, unless we also add our own
   interactive layer.
@@ -193,25 +268,19 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
 2. **Customise panel** UI for third-party plugins, plus a few shipped profiles (setBfree drawbars
    via CC).
 3. **LV2 inline display** hosting in the FX squares.
-4. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (organ) with its
-   built-in front-end and shipped presets.
-5. The **standalone front-end** for that core, once its format is chosen.
-6. First built-in effects with interactive inline views.
+4. **The truce spike** (can run in parallel with 1–3).
+5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (organ) with its
+   built-in front-end, its standalone build and shipped presets.
+6. First built-in effect (a compressor) with the effect popup and its interactive graph.
 
 Later, separately: MIDI learn for hardware controls.
 
 ## Open questions
 
-- **The standalone format** for instrument cores: LV2 (Linux-native, presets shared with
-  Ardour/Carla, but the Rust bindings are little maintained), CLAP (MIT, simple, growing host
-  support; nih-plug exports it), VST3 (widest host support; the SDK is MIT now, but check the
-  Rust bindings' licence), or more than one through a framework.
-- **Presets** for our plugins: since the core owns its state, where do shipped presets live, and
-  in which storage do user presets go — the standalone format's (so other hosts see them) or
-  the app's own? The preset browser only needs `PresetInfo`s either way.
-- How the built-in and standalone builds **recognise each other** (shared id scheme), so
-  live-keys lists an instrument once and slot presets work with either.
-- Inline displays: also in **instrument** headers (a synth's oscilloscope), or only effects?
+- **Toolkit**: confirm truce with the spike above (or fall back to nice-plug).
+- **Recognising each other**: the id scheme and shared presets above, once the spike shows
+  truce's state and preset formats.
+- Which **formats** to build the standalone instruments as by default: LV2 + CLAP (+ VST3)?
 
 ## Sources
 
@@ -222,6 +291,11 @@ Later, separately: MIDI learn for hardware controls.
   [dropping the Cairo dependency](https://git.ardour.org/ardour/livetrax/commit/93bc9b972888f5a8c08115eccb66a35d4f3853a6)
 - Carla's host support: [Carla commit 856bbf60](https://git.kx.studio/falkTX/Carla/commit/856bbf6015720cdccbe379508b0fd80606523d27)
 - CLAP extensions: [free-audio/clap](https://github.com/free-audio/clap), [CLAP two years later (LibreArts)](https://librearts.org/2024/11/clap-api-two-years-later/)
+- Toolkits: [truce](https://github.com/truce-audio/truce), [nice-plug](https://codeberg.org/RustAudio/nice-plug),
+  [nih-plug's hand-over issue](https://github.com/robbert-vdh/nih-plug/issues/265),
+  [RAVET 0.1.0](https://users.rust-lang.org/t/ravet-0-1-0-audio-plug-ins-and-standalone-apps-in-rust/143550),
+  [DPF licensing](https://git.kx.studio/DISTRHO/DPF/src/commit/4100e47d4c13dc7e5fc6b087be442ac3c1237896/LICENSING.md),
+  [CLAP preset discovery discussion](https://github.com/free-audio/clap/discussions/308)
 - Rust plugin frameworks and licensing: [nih-plug](https://github.com/robbert-vdh/nih-plug),
   [nice-plug](https://github.com/sekwah41/nice-plug), [nih-plug issue #135](https://www.github.com/robbert-vdh/nih-plug/issues/135),
   [clap-wrapper](https://docs.rs/clap-wrapper) (cites the VST3 SDK's MIT licence),
