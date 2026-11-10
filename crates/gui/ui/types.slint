@@ -63,6 +63,9 @@ export struct EffectRow {
     gui-open: bool,
     // Whether its parameter window is open.
     params-open: bool,
+    // The curve its FX square shows: 0 none, 1 compressor, 2 filter (from its
+    // name; a placeholder until plugins can be asked).
+    graph: int,
     // The preset last loaded or saved; empty if none.
     preset-name: string,
     // Whether that preset was saved by the user (and so can be deleted).
@@ -115,9 +118,35 @@ export struct SceneSlotChoice {
     can-restore: bool,
 }
 
+// One of the instrument parameters shown as a knob on a slot's first tab.
+export struct KnobRow {
+    // The instrument's `PluginKey`.
+    key: int,
+    param-id: int,
+    name: string,
+    // The value as a knob position, 0..1 (on a log scale for logarithmic
+    // parameters), and where a reset puts it.
+    position: float,
+    default-position: float,
+    min-value: float,
+    max-value: float,
+    logarithmic: bool,
+    // The value as the plugin would show it.
+    text: string,
+}
+
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
 // effects.
 export struct SlotState {
+    // The header photo, by `Artwork`'s numbering (from the instrument's name).
+    artwork: int,
+    // Silenced by its mute button.
+    muted: bool,
+    // The instrument name of a slot that was just cleared and can still be
+    // brought back (Undo); empty otherwise.
+    closed-name: string,
+    // The instrument's first few continuous parameters, as knobs.
+    knobs: [KnobRow],
     // Its key is -1 when no instrument is loaded into this slot.
     instrument: EffectRow,
     // The last load/open/preset error; empty if none.

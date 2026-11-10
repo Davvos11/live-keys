@@ -1,0 +1,588 @@
+import { AppState, AppLogic, Category, EffectRow, KnobRow, SlotState } from "globals.slint";
+import { Theme, Icons, Icon, KButton, DropdownButton, ListItem, Select, TabBar, Stepper, FxSlot, ScrollIndicator } from "widgets.slint";
+import { Artwork } from "theme.slint";
+import { Knob, LabelledKnob } from "knob.slint";
+import { RangeSlider } from "range_slider.slint";
+import { PresetPopup } from "preset_bar.slint";
+import { SlotPresets } from "slot_presets.slint";
+
+// A popup's frame: the background, an outline and a shadow.
+component PopupFrame inherits Rectangle {
+    background: Theme.background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000060;
+}
+
+// What can be done with one effect, opened by clicking its FX square: its own
+// GUI, its parameter window, its presets, moving it and removing it.
+component EffectPopup inherits PopupWindow {
+    in property <EffectRow> plugin;
+    in property <int> slot-index;
+    // As `AppLogic`'s `section`.
+    in property <int> section;
+    in property <int> index;
+    in property <int> count;
+    callback browse-presets();
+
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    PopupFrame {
+        VerticalLayout {
+            padding: 6px;
+            spacing: 6px;
+            Text {
+                text: root.plugin.name;
+                color: Theme.text;
+                font-size: Theme.font-size;
+                overflow: elide;
+            }
+            DropdownButton {
+                text: root.plugin.preset-name;
+                placeholder: "Presets";
+                note: root.plugin.preset-changed ? "changed" : "";
+                clicked => {
+                    root.close();
+                    root.browse-presets();
+                }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                KButton {
+                    icon: Icons.window;
+                    active: root.plugin.gui-open;
+                    // A wedged plugin GUI may never report closing; the button
+                    // stays usable to force it closed.
+                    enabled: root.plugin.gui-supported || root.plugin.gui-open;
+                    clicked => {
+                        if (root.plugin.gui-open) {
+                            AppLogic.close-plugin-gui(root.plugin.key);
+                        } else {
+                            AppLogic.open-plugin-gui(root.plugin.key);
+                        }
+                    }
+                }
+                KButton {
+                    icon: Icons.sliders;
+                    active: root.plugin.params-open;
+                    clicked => { AppLogic.toggle-params(root.plugin.key); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                KButton {
+                    icon: Icons.chevron-left;
+                    enabled: root.index > 0;
+                    clicked => {
+                        AppLogic.move-effect(root.slot-index, root.section, root.index, root.index - 1);
+                        root.close();
+                    }
+                }
+                KButton {
+                    icon: Icons.chevron-right;
+                    enabled: root.index < root.count - 1;
+                    clicked => {
+                        AppLogic.move-effect(root.slot-index, root.section, root.index, root.index + 1);
+                        root.close();
+                    }
+                }
+                KButton {
+                    icon: Icons.trash;
+                    clicked => {
+                        AppLogic.remove-effect(root.slot-index, root.section, root.index);
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The instrument's menu, opened from its name: replacing, removing and its
+// parameter window.
+component InstrumentMenu inherits PopupWindow {
+    in property <EffectRow> instrument;
+    in property <int> slot-index;
+    callback replace();
+
+    PopupFrame {
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+            ListItem {
+                text: "Replace instrument…";
+                clicked => { root.replace(); }
+            }
+            ListItem {
+                text: "Parameters";
+                note: root.instrument.params-open ? "open" : "";
+                clicked => { AppLogic.toggle-params(root.instrument.key); }
+            }
+            ListItem {
+                text: "Remove instrument";
+                clicked => { AppLogic.unload-plugin(root.slot-index); }
+            }
+        }
+    }
+}
+
+// A row of FX squares, three to a line: a section's effects in order, then a +
+// to add one while there's room.
+component FxGrid inherits Rectangle {
+    in property <[EffectRow]> effects;
+    in property <bool> can-add;
+    in property <int> selected: -1;
+    callback open(/* index */ int);
+    callback add();
+
+    property <length> cell: 80px;
+    property <length> row-gap: 10px;
+    property <int> count: root.effects.length + (root.can-add ? 1 : 0);
+    property <length> gap: max(4px, (root.width - 3 * root.cell) / 4);
+
+    height: root.count == 0 ? 0px : Math.ceil(root.count / 3) * (root.cell + root.row-gap) - root.row-gap;
+
+    for effect[index] in root.effects : FxSlot {
+        x: root.gap + Math.mod(index, 3) * (root.cell + root.gap);
+        y: Math.floor(index / 3) * (root.cell + root.row-gap);
+        name: effect.name;
+        graph: effect.graph;
+        selected: index == root.selected;
+        clicked => { root.open(index); }
+    }
+    if root.can-add : FxSlot {
+        x: root.gap + Math.mod(root.effects.length, 3) * (root.cell + root.gap);
+        y: Math.floor(root.effects.length / 3) * (root.cell + root.row-gap);
+        empty: true;
+        clicked => { root.add(); }
+    }
+}
+
+// A label in a settings row of the MIDI tab.
+component RowLabel inherits Text {
+    color: Theme.text-muted;
+    font-size: Theme.small-font-size;
+    vertical-alignment: center;
+}
+
+// One Live-tab slot, after the design: a header (the instrument's photo and
+// name, its plugin window, mute and clear buttons, the volume knob and its
+// presets), then three tabs — the instrument's first parameters and the audio
+// effects, the slot presets, and its MIDI (MIDI effects and routing). A slot
+// with nothing in it is a big + that picks an instrument; one just cleared
+// offers Undo.
+export component SlotPanel inherits Rectangle {
+    in property <int> slot-index;
+    in property <SlotState> slot;
+    // Asks for the plugin picker, opened on `category`.
+    callback choose-plugin(/* category */ int);
+
+    property <bool> has-instrument: root.slot.instrument.key >= 0;
+    property <bool> is-empty: !root.has-instrument && root.slot.midi-effects.length == 0 && root.slot.audio-effects.length == 0;
+    property <int> tab: 0;
+    // The effect whose popup is open (`fx-section` as `AppLogic`'s), and whose
+    // presets the preset popup shows: -1 for the instrument.
+    property <int> fx-section: 1;
+    property <int> fx-index: -1;
+    property <int> preset-section: -1;
+    property <int> preset-index: 0;
+    property <EffectRow> fx-plugin: root.fx-section == 0 ? root.slot.midi-effects[root.fx-index] : root.slot.audio-effects[root.fx-index];
+    property <EffectRow> preset-plugin: root.preset-section < 0 ? root.slot.instrument
+        : root.preset-section == 0 ? root.slot.midi-effects[root.preset-index] : root.slot.audio-effects[root.preset-index];
+    // Placeholder: not applied to the MIDI yet.
+    property <int> transpose: 0;
+
+    // MIDI note number as a name, with middle C (60) as C4.
+    function note-name(note: int) -> string {
+        return ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][Math.mod(note, 12)] + (Math.floor(note / 12) - 1);
+    }
+    // A knob position as the parameter's value.
+    function knob-value(knob: KnobRow, position: float) -> float {
+        return knob.logarithmic ? knob.min-value * Math.pow(knob.max-value / knob.min-value, position)
+            : knob.min-value + position * (knob.max-value - knob.min-value);
+    }
+    function show-presets(section: int, index: int) {
+        root.preset-section = section;
+        root.preset-index = index;
+        AppLogic.open-preset-browser(root.preset-plugin.key);
+        preset-popup.show();
+    }
+    function open-effect(section: int, index: int) {
+        root.fx-section = section;
+        root.fx-index = index;
+        effect-popup.show();
+    }
+
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: Theme.background;
+    clip: true;
+
+    // Just cleared: what it was, and a way back.
+    if root.slot.closed-name != "" : VerticalLayout {
+        alignment: center;
+        spacing: 12px;
+        Text {
+            text: "Closed \"\{root.slot.closed-name}\"…";
+            color: Theme.text-muted;
+            font-size: Theme.font-size;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            KButton {
+                icon: Icons.undo;
+                text: "Undo";
+                clicked => { AppLogic.undo-clear(root.slot-index); }
+            }
+            KButton {
+                text: "Dismiss";
+                clicked => { AppLogic.dismiss-closed(root.slot-index); }
+            }
+        }
+    }
+
+    // Empty: a + that picks an instrument, or load a slot preset.
+    if root.slot.closed-name == "" && root.is-empty : Rectangle {
+        add-area := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.choose-plugin(Category.instrument); }
+        }
+        Path {
+            width: 90px;
+            height: 90px;
+            viewbox-width: 90;
+            viewbox-height: 90;
+            commands: "M 45 0 L 45 90 M 0 45 L 90 45";
+            stroke: add-area.has-hover ? Theme.text-faint : Theme.control-border;
+            stroke-width: 1.5px;
+        }
+        KButton {
+            y: parent.height - self.height - 12px;
+            width: self.preferred-width;
+            text: "Slot presets…";
+            clicked => { empty-presets.show(); }
+        }
+    }
+
+    if root.slot.closed-name == "" && !root.is-empty : VerticalLayout {
+        // The header: photo, name, buttons, volume and presets.
+        Rectangle {
+            height: 154px;
+            clip: true;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: Artwork.photos[root.slot.artwork];
+                image-fit: cover;
+            }
+            // The instrument's colour fading in from the left, as in the design;
+            // it keeps the white name readable on any photo.
+            Rectangle {
+                property <color> tint: Artwork.tints[root.slot.artwork];
+                background: @linear-gradient(90deg, self.tint 0%, self.tint.transparentize(0.2) 50%, self.tint.transparentize(1) 100%);
+            }
+            VerticalLayout {
+                padding: 5px;
+                spacing: 2px;
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 4px;
+                    KButton {
+                        icon: Icons.settings;
+                        active: root.slot.instrument.gui-open;
+                        enabled: root.has-instrument && (root.slot.instrument.gui-supported || root.slot.instrument.gui-open);
+                        clicked => {
+                            if (root.slot.instrument.gui-open) {
+                                AppLogic.close-plugin-gui(root.slot.instrument.key);
+                            } else {
+                                AppLogic.open-plugin-gui(root.slot.instrument.key);
+                            }
+                        }
+                    }
+                    KButton {
+                        icon: root.slot.muted ? Icons.muted : Icons.volume;
+                        active: root.slot.muted;
+                        clicked => { AppLogic.toggle-slot-mute(root.slot-index); }
+                    }
+                    KButton {
+                        icon: Icons.close;
+                        clicked => { AppLogic.clear-slot(root.slot-index); }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        title-area := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (root.has-instrument) {
+                                    instrument-menu.show();
+                                } else {
+                                    root.choose-plugin(Category.instrument);
+                                }
+                            }
+                        }
+                        Text {
+                            width: 100%;
+                            text: root.has-instrument ? root.slot.instrument.name : "+ Instrument";
+                            color: #ffffff;
+                            opacity: title-area.has-hover ? 0.85 : 1;
+                            font-size: 36px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        if volume.has-hover || volume.pressed : Text {
+                            text: volume.value <= AppState.min-volume-db ? "muted" : "\{Math.round(volume.value * 10) / 10} dB";
+                            color: #ffffff;
+                            font-size: Theme.small-font-size;
+                        }
+                    }
+                    volume := Knob {
+                        width: 48px;
+                        height: 48px;
+                        minimum: AppState.min-volume-db;
+                        maximum: AppState.max-volume-db;
+                        default-value: 0;
+                        origin: AppState.min-volume-db;
+                        value: root.slot.volume-db;
+                        // Turning sets the knob's own value, replacing its
+                        // binding; this keeps following changes from elsewhere
+                        // (a recalled scene).
+                        property <float> source: root.slot.volume-db;
+                        changed source => { self.value = self.source; }
+                        changed(value) => { AppLogic.set-slot-volume(root.slot-index, value); }
+                    }
+                }
+                DropdownButton {
+                    text: root.slot.instrument.preset-name;
+                    placeholder: root.has-instrument ? "No preset" : "";
+                    note: root.slot.instrument.preset-changed ? "changed" : "";
+                    enabled: root.has-instrument;
+                    open: preset-popup.is-open && root.preset-section < 0;
+                    clicked => { root.show-presets(-1, 0); }
+                }
+            }
+        }
+
+        TabBar {
+            icons: [Icons.gauge, Icons.layers, Icons.keyboard];
+            current <=> root.tab;
+        }
+
+        // The current tab, scrolling when it doesn't fit.
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            flick := Flickable {
+                mouse-drag-pan-enabled: false;
+                content-height: content.preferred-height;
+                content := VerticalLayout {
+                    width: flick.width;
+                    height: self.preferred-height;
+                    padding: 10px;
+                    padding-right: 14px;
+                    spacing: 12px;
+
+                    if root.slot.status != "" : Text {
+                        text: root.slot.status;
+                        color: Theme.text-muted;
+                        font-size: Theme.small-font-size;
+                        wrap: word-wrap;
+                    }
+
+                    // The instrument's first parameters, and the audio effects.
+                    if root.tab == 0 && root.has-instrument && root.slot.knobs.length > 0 : HorizontalLayout {
+                        alignment: space-around;
+                        for knob in root.slot.knobs : LabelledKnob {
+                            label: knob.name;
+                            value-text: knob.text;
+                            minimum: 0;
+                            maximum: 1;
+                            default-value: knob.default-position;
+                            value: knob.position;
+                            property <float> source: knob.position;
+                            changed source => { self.value = self.source; }
+                            changed(position) => { AppLogic.set-param(knob.key, knob.param-id, root.knob-value(knob, position)); }
+                        }
+                    }
+                    if root.tab == 0 && root.has-instrument && root.slot.knobs.length == 0 : Text {
+                        text: "This instrument has no parameters to show here.";
+                        color: Theme.text-faint;
+                        font-size: Theme.small-font-size;
+                        wrap: word-wrap;
+                    }
+                    if root.tab == 0 : FxGrid {
+                        effects: root.slot.audio-effects;
+                        can-add: root.slot.audio-effects.length < AppState.max-effects;
+                        selected: effect-popup.is-open && root.fx-section == 1 ? root.fx-index : -1;
+                        open(index) => { root.open-effect(1, index); }
+                        add => { root.choose-plugin(Category.audio-effect); }
+                    }
+
+                    if root.tab == 1 : SlotPresets {
+                        slot-index: root.slot-index;
+                        slot: root.slot;
+                    }
+
+                    // MIDI: its effects and which MIDI the slot takes.
+                    if root.tab == 2 : RowLabel { text: "MIDI effects"; }
+                    if root.tab == 2 : FxGrid {
+                        effects: root.slot.midi-effects;
+                        can-add: root.slot.midi-effects.length < AppState.max-midi-effects;
+                        selected: effect-popup.is-open && root.fx-section == 0 ? root.fx-index : -1;
+                        open(index) => { root.open-effect(0, index); }
+                        add => { root.choose-plugin(Category.midi-effect); }
+                    }
+                    if root.tab == 2 : HorizontalLayout {
+                        spacing: 4px;
+                        RowLabel {
+                            text: "Inputs";
+                            horizontal-stretch: 1;
+                        }
+                        for listening[input] in root.slot.midi-inputs : KButton {
+                            width: Theme.control-height;
+                            text: input + 1;
+                            active: listening;
+                            clicked => { AppLogic.toggle-slot-input(root.slot-index, input); }
+                        }
+                    }
+                    if root.tab == 2 : HorizontalLayout {
+                        spacing: 8px;
+                        RowLabel {
+                            text: "Channel";
+                            horizontal-stretch: 1;
+                        }
+                        Select {
+                            width: 140px;
+                            model: ["Omni", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"];
+                            current-index: root.slot.midi-channel;
+                            property <int> source: root.slot.midi-channel;
+                            changed source => { self.current-index = self.source; }
+                            selected(channel) => {
+                                AppLogic.set-slot-filter(root.slot-index, channel, root.slot.note-low, root.slot.note-high, root.slot.velocity-low, root.slot.velocity-high);
+                            }
+                        }
+                    }
+                    if root.tab == 2 : VerticalLayout {
+                        HorizontalLayout {
+                            RowLabel {
+                                text: "Notes";
+                                horizontal-stretch: 1;
+                            }
+                            RowLabel { text: "\{root.note-name(notes.low)} – \{root.note-name(notes.high)}"; }
+                        }
+                        notes := RangeSlider {
+                            minimum: 0;
+                            maximum: 127;
+                            low: root.slot.note-low;
+                            high: root.slot.note-high;
+                            property <int> low-source: root.slot.note-low;
+                            property <int> high-source: root.slot.note-high;
+                            changed low-source => { self.low = self.low-source; }
+                            changed high-source => { self.high = self.high-source; }
+                            changed(low, high) => {
+                                AppLogic.set-slot-filter(root.slot-index, root.slot.midi-channel, low, high, root.slot.velocity-low, root.slot.velocity-high);
+                            }
+                        }
+                    }
+                    if root.tab == 2 : VerticalLayout {
+                        HorizontalLayout {
+                            RowLabel {
+                                text: "Velocity";
+                                horizontal-stretch: 1;
+                            }
+                            RowLabel { text: "\{velocities.low} – \{velocities.high}"; }
+                        }
+                        velocities := RangeSlider {
+                            minimum: 1;
+                            maximum: 127;
+                            low: root.slot.velocity-low;
+                            high: root.slot.velocity-high;
+                            property <int> low-source: root.slot.velocity-low;
+                            property <int> high-source: root.slot.velocity-high;
+                            changed low-source => { self.low = self.low-source; }
+                            changed high-source => { self.high = self.high-source; }
+                            changed(low, high) => {
+                                AppLogic.set-slot-filter(root.slot-index, root.slot.midi-channel, root.slot.note-low, root.slot.note-high, low, high);
+                            }
+                        }
+                    }
+                    if root.tab == 2 : HorizontalLayout {
+                        spacing: 8px;
+                        RowLabel {
+                            text: "Transpose";
+                            horizontal-stretch: 1;
+                        }
+                        Stepper {
+                            value <=> root.transpose;
+                        }
+                    }
+                }
+            }
+            ScrollIndicator {
+                x: parent.width - 7px;
+                height: parent.height;
+                view-height: parent.height;
+                content-height: flick.content-height;
+                content-y: flick.content-y;
+            }
+        }
+    }
+
+    // Under the instrument's name.
+    instrument-menu := InstrumentMenu {
+        x: 5px;
+        y: 118px;
+        width: min(240px, root.width - 10px);
+        instrument: root.slot.instrument;
+        slot-index: root.slot-index;
+        replace => { root.choose-plugin(Category.instrument); }
+    }
+
+    // An empty slot's slot presets.
+    empty-presets := PopupWindow {
+        x: 5px;
+        y: 5px;
+        width: root.width - 10px;
+        height: root.height - 10px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        PopupFrame {
+            VerticalLayout {
+                padding: 8px;
+                SlotPresets {
+                    slot-index: root.slot-index;
+                    slot: root.slot;
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+
+    preset-popup := PresetPopup {
+        x: 5px;
+        y: 150px;
+        width: root.width - 10px;
+        height: min(380px, max(200px, root.height - 160px));
+        plugin: root.preset-plugin;
+    }
+
+    effect-popup := EffectPopup {
+        x: 5px;
+        y: 194px;
+        width: root.width - 10px;
+        plugin: root.fx-plugin;
+        slot-index: root.slot-index;
+        section: root.fx-section;
+        index: root.fx-index;
+        count: root.fx-section == 0 ? root.slot.midi-effects.length : root.slot.audio-effects.length;
+        browse-presets => { root.show-presets(root.fx-section, root.fx-index); }
+    }
+}

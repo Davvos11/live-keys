@@ -46,4 +46,8 @@ assets = [
     ["target/release/live-keys", "usr/bin/", "755"],
     ["live-keys.desktop", "usr/share/applications/", "644"],
     ["../../README.md", "usr/share/doc/live-keys/", "644"],
+    # Licences of the assets compiled into live-keys-gui.
+    ["ui/assets/fonts/OFL.txt", "usr/share/doc/live-keys/SourceSans3-OFL.txt", "644"],
+    ["ui/assets/icons/LICENSE", "usr/share/doc/live-keys/Lucide-LICENSE.txt", "644"],
+    ["ui/assets/photos/CREDITS.md", "usr/share/doc/live-keys/photo-credits.md", "644"],
 ]

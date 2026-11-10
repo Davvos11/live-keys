@@ -1,0 +1,444 @@
+// The Live tab's building blocks, after the components in the Penpot design.
+import { Theme, Icons } from "theme.slint";
+
+export { Theme, Icons }
+
+// A Lucide icon, in the colour of the text around it.
+export component Icon inherits Image {
+    in property <brush> tint: Theme.text-muted;
+    width: 24px;
+    height: 24px;
+    colorize: root.tint;
+}
+
+// The design's Button: an icon, a label or both, 32px high. `active` shows it
+// in the primary colour (a toggle that's on, the selected one of several).
+export component KButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    property <brush> foreground: root.active ? Theme.on-accent : Theme.text-muted;
+    property <bool> has-icon: root.icon.width > 0;
+
+    min-width: Theme.control-height;
+    height: Theme.control-height;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: root.active ? (area.pressed ? Theme.accent.darker(0.15) : area.has-hover ? Theme.accent.brighter(0.1) : Theme.accent)
+        : !root.enabled ? Theme.control
+        : area.pressed ? Theme.control-pressed : area.has-hover ? Theme.control-hover : Theme.control;
+    opacity: root.enabled ? 1 : 0.5;
+
+    area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: root.text == "" ? 3px : 7px;
+        padding-right: root.text == "" ? 3px : 7px;
+        spacing: 6px;
+        alignment: center;
+        if root.has-icon : VerticalLayout {
+            alignment: center;
+            Icon {
+                source: root.icon;
+                tint: root.foreground;
+            }
+        }
+        if root.text != "" : Text {
+            text: root.text;
+            color: root.foreground;
+            font-size: Theme.font-size;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A single-line text field (the design's Search field, without the icon unless
+// given one).
+export component TextField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <image> icon;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(/* text */ string);
+    callback accepted(/* text */ string);
+
+    public function grab-focus() {
+        input.focus();
+    }
+
+    height: Theme.control-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.control-border;
+    background: Theme.control;
+
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 5px;
+        spacing: 6px;
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            if input.text == "" : Text {
+                width: 100%;
+                height: 100%;
+                text: root.placeholder;
+                color: Theme.text-muted;
+                font-size: Theme.font-size;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            input := TextInput {
+                width: 100%;
+                height: 100%;
+                single-line: true;
+                color: Theme.text;
+                font-size: Theme.font-size;
+                vertical-alignment: center;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.on-accent;
+                edited => { root.edited(self.text); }
+                accepted => { root.accepted(self.text); }
+            }
+        }
+        if root.icon.width > 0 : VerticalLayout {
+            alignment: center;
+            Icon { source: root.icon; }
+        }
+    }
+}
+
+// The design's Dropdown, as a button: a value (or a grey placeholder), an
+// optional grey note after it ("changed"), and a chevron.
+export component DropdownButton inherits Rectangle {
+    in property <string> text;
+    in property <string> placeholder;
+    in property <string> note;
+    in property <bool> open;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: Theme.control-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.open ? Theme.accent : Theme.control-border;
+    background: area.has-hover && root.enabled ? Theme.control-hover : Theme.control;
+    opacity: root.enabled ? 1 : 0.5;
+
+    area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 5px;
+        spacing: 6px;
+        Text {
+            text: root.text != "" ? root.text : root.placeholder;
+            color: root.text != "" ? Theme.text : Theme.text-muted;
+            font-size: Theme.font-size;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.note != "" : Text {
+            text: root.note;
+            color: Theme.text-faint;
+            font-size: Theme.small-font-size;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon { source: root.open ? Icons.chevron-up : Icons.chevron-down; }
+        }
+    }
+}
+
+// One row of a list (scenes, presets, a select's options): the design's List
+// item. `action` is the darker kind ("+ New scene"); `selected` is the
+// current one, in the primary colour.
+export component ListItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <bool> action;
+    // Grey text after the name ("changed", a count).
+    in property <string> note;
+    out property <bool> has-hover: area.has-hover;
+    callback clicked();
+
+    height: Theme.control-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: root.selected ? Theme.accent
+        : area.has-hover ? Theme.control-hover
+        : root.action ? Theme.background : Theme.control;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        spacing: 6px;
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.on-accent : root.action ? Theme.text-muted : Theme.text;
+            font-size: Theme.font-size;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.note != "" : Text {
+            text: root.note;
+            color: root.selected ? Theme.on-accent : Theme.text-faint;
+            font-size: Theme.small-font-size;
+            vertical-alignment: center;
+        }
+        @children
+    }
+}
+
+// A dropdown that picks one of `model`, like a ComboBox.
+export component Select inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    callback selected(/* index */ int);
+
+    height: Theme.control-height;
+
+    DropdownButton {
+        width: 100%;
+        height: 100%;
+        text: root.model[root.current-index];
+        open: popup.is-open;
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: root.width;
+        height: min(root.model.length * 30px + 8px, 300px);
+        Rectangle {
+            background: Theme.background;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.control-border;
+            clip: true;
+            Flickable {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                content-height: root.model.length * 30px;
+                mouse-drag-pan-enabled: false;
+                for option[index] in root.model : ListItem {
+                    y: index * 30px;
+                    height: 28px;
+                    text: option;
+                    selected: index == root.current-index;
+                    clicked => {
+                        root.current-index = index;
+                        root.selected(index);
+                        popup.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The design's Tab bar: icon-only tabs sharing the width, the current one
+// underlined in the primary colour.
+export component TabBar inherits Rectangle {
+    in property <[image]> icons;
+    in-out property <int> current;
+
+    height: 36px;
+    background: Theme.background;
+
+    HorizontalLayout {
+        for icon[index] in root.icons : Rectangle {
+            horizontal-stretch: 1;
+            background: index == root.current ? Theme.control : transparent;
+            tab-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.current = index; }
+            }
+            Icon {
+                source: icon;
+                opacity: index == root.current ? 1 : tab-area.has-hover ? 0.8 : 0.55;
+            }
+            if index == root.current : Rectangle {
+                y: parent.height - 2px;
+                height: 2px;
+                background: Theme.accent;
+            }
+        }
+    }
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.divider;
+    }
+}
+
+// The design's Stepper: − and + around a number that can also be typed
+// (Enter applies it; Escape or leaving the field puts the old one back).
+export component Stepper inherits HorizontalLayout {
+    in-out property <int> value;
+    in property <int> minimum: -48;
+    in property <int> maximum: 48;
+    callback changed(/* value */ int);
+
+    function shown(value: int) -> string {
+        return value > 0 ? "+\{value}" : "\{value}";
+    }
+    function set(value: int) {
+        root.value = Math.clamp(value, root.minimum, root.maximum);
+        input.text = input.has-focus ? "\{root.value}" : root.shown(root.value);
+        root.changed(root.value);
+    }
+
+    spacing: 4px;
+    alignment: end;
+
+    KButton {
+        icon: Icons.minus;
+        enabled: root.value > root.minimum;
+        clicked => { root.set(root.value - 1); }
+    }
+    Rectangle {
+        width: 56px;
+        height: Theme.control-height;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.control-border;
+        background: Theme.control;
+        input := TextInput {
+            width: 100%;
+            height: 100%;
+            single-line: true;
+            text: root.shown(root.value);
+            color: Theme.text;
+            font-size: Theme.font-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            // Editing starts from the plain number; leaving shows it signed.
+            changed has-focus => { self.text = self.has-focus ? "\{root.value}" : root.shown(root.value); }
+            accepted => {
+                if (self.text.is-float()) {
+                    root.set(Math.round(self.text.to-float()));
+                } else {
+                    self.text = "\{root.value}";
+                }
+            }
+            key-pressed(event) => {
+                if (event.text == Key.UpArrow) {
+                    root.set(root.value + 1);
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.set(root.value - 1);
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    self.text = "\{root.value}";
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+    KButton {
+        icon: Icons.plus;
+        enabled: root.value < root.maximum;
+        clicked => { root.set(root.value + 1); }
+    }
+}
+
+// The design's FX slot: an 80px square showing an effect (its name, over a
+// curve for effects that have one: 1 compressor, 2 filter), or a faint + to
+// add one.
+export component FxSlot inherits Rectangle {
+    in property <string> name;
+    in property <int> graph;
+    in property <bool> empty;
+    in property <bool> selected;
+    callback clicked();
+
+    width: 80px;
+    height: 80px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : Theme.control-border;
+    background: area.has-hover ? Theme.control : transparent;
+    clip: true;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    if root.empty : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 80;
+        viewbox-height: 80;
+        commands: "M 40 26 L 40 54 M 26 40 L 54 40";
+        stroke: area.has-hover ? Theme.text-faint : Theme.control-border;
+        stroke-width: 1.5px;
+        stroke-line-cap: round;
+    }
+    if !root.empty && root.graph > 0 : Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 80;
+        viewbox-height: 80;
+        commands: root.graph == 1 ? "M 1 79 L 48.8 40.05 Q 55 35 62.4 31.9 L 79 25"
+            : "M 7 79 C 7.25 78.52 8 77.84 8.5 76.11 C 9 74.37 9.5 71.54 10 68.6 C 10.5 65.67 11 61.96 11.5 58.48 C 12 54.99 12.5 51.12 13 47.71 C 13.5 44.3 14 40.87 14.5 38.02 C 15 35.17 15.5 32.59 16 30.62 C 16.5 28.64 17 27.14 17.5 26.16 C 18 25.17 18.5 24.76 19 24.73 C 19.5 24.7 20 25.23 20.5 25.97 C 21 26.71 21.5 27.92 22 29.18 C 22.5 30.44 23 32.03 23.5 33.52 C 24 35.01 24.5 36.67 25 38.13 C 25.5 39.59 26 41.06 26.5 42.28 C 27 43.5 27.5 44.6 28 45.45 C 28.5 46.29 29 46.94 29.5 47.36 C 30 47.78 30.5 47.95 31 47.97 C 31.5 47.98 32 47.75 32.5 47.44 C 33 47.12 33.5 46.6 34 46.06 C 34.5 45.52 35 44.84 35.5 44.2 C 36 43.57 36.5 42.86 37 42.23 C 37.5 41.61 38 40.98 38.5 40.45 C 39 39.93 39.5 39.46 40 39.1 C 40.5 38.73 41 38.46 41.5 38.28 C 42 38.1 42.5 38.02 43 38.02 C 43.5 38.01 44 38.11 44.5 38.24 C 45 38.38 45.5 38.6 46 38.83 C 46.5 39.06 47 39.35 47.5 39.63 C 48 39.9 48.5 40.21 49 40.47 C 49.5 40.74 50 41.01 50.5 41.23 C 51 41.46 51.5 41.66 52 41.82 C 52.5 41.97 53 42.09 53.5 42.17 C 54 42.24 54.5 42.27 55 42.28 C 55.5 42.28 56 42.24 56.5 42.18 C 57 42.12 57.5 42.03 58 41.93 C 58.5 41.83 59 41.7 59.5 41.59 C 60 41.47 60.5 41.34 61 41.23 C 61.5 41.11 62 41 62.5 40.9 C 63 40.8 63.5 40.72 64 40.65 C 64.5 40.58 65 40.53 65.5 40.5 C 66 40.47 66.5 40.45 67 40.45 C 67.5 40.45 68 40.47 68.5 40.49 C 69 40.52 69.5 40.56 70 40.6 C 70.5 40.65 71 40.7 71.5 40.75 C 72 40.8 72.5 40.85 73 40.9 C 73.5 40.95 74 41 74.5 41.04 C 75 41.08 75.5 41.12 76 41.15 C 76.5 41.18 77 41.2 77.5 41.21 C 78 41.23 78.75 41.23 79 41.23";
+        stroke: Theme.text-muted;
+        stroke-width: 1.5px;
+        stroke-line-cap: round;
+        opacity: 0.6;
+    }
+    if !root.empty : Text {
+        x: 6px;
+        y: 4px;
+        width: parent.width - 12px;
+        text: root.name;
+        color: Theme.text;
+        font-size: Theme.small-font-size;
+        wrap: word-wrap;
+        overflow: elide;
+        max-height: parent.height - 8px;
+    }
+}
+
+// A thin scrollbar thumb for a Flickable (the design's scrolling tab), drawn
+// over its right edge; nothing when it doesn't scroll.
+export component ScrollIndicator inherits Rectangle {
+    in property <length> view-height;
+    in property <length> content-height;
+    in property <length> content-y;
+
+    width: 4px;
+    property <float> ratio: root.content-height > 0 ? root.view-height / root.content-height : 1;
+    visible: root.ratio < 1;
+    Rectangle {
+        y: -root.content-y * root.ratio + 4px;
+        height: max(16px, root.view-height * root.ratio - 8px);
+        border-radius: 2px;
+        background: Theme.control-border;
+    }
+}

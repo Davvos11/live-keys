@@ -56,13 +56,15 @@ cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr
 cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effects → instrument → audio
                                                # effects; each --effect goes where its kind belongs
 
-# GUI (live-keys-gui) — Settings tab (audio output, MIDI inputs + plugin folders) and Live tab (a scenes pane
-# on the left — per slot restore/clear/leave unchanged, searchable, renamable — then 3 side-by-side rack (each with a Clear button)
-# slots, each: up to 8 MIDI effects → an instrument → up to 8 audio effects — added through a
-# plugin picker popup (tabs per kind, search, pinned favourites), removable, effects
-# reorderable, any plugin's GUI and its parameter window openable, presets per plugin — and which
-# MIDI inputs it listens to, a MIDI channel/note-range/velocity-range filter, a volume fader, and slot presets: the whole chain
-# with every plugin's settings, browsed by instrument)
+# GUI (live-keys-gui) — Settings tab (audio output, MIDI inputs + plugin folders) and Live tab, after
+# the Penpot design: a scenes pane on the left — per slot restore/clear/leave unchanged, searchable,
+# renamable — then 6 rack slots in a 3×2 grid, each: a header (instrument photo and name, its GUI,
+# mute and ✕-clear-with-undo buttons, a volume knob, its presets), then three tabs — the instrument's
+# first parameters as knobs and the audio effects as squares; the slot presets (the whole chain with
+# every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
+# channel/note-range/velocity-range filter and a transpose placeholder. Up to 8 MIDI effects → an
+# instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
+# pinned favourites); an effect's square opens its GUI/params/presets/move/remove)
 cargo run -p live-keys-gui --release
 SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
   # the app with live reload: saving a .slint file swaps the UI in place, state kept (development
@@ -124,6 +126,13 @@ dependencies are checked) reject any dependency licence that isn't permissive, w
 crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
 new Slint crate is a decision for the developer, not something to just add to the list.
 
+Assets compiled into the GUI (`crates/gui/ui/assets/`, embedded by Slint) carry their own
+licences next to them: Source Sans 3 under the SIL OFL (`fonts/OFL.txt`), Lucide icons under ISC
+(`icons/LICENSE`), and photos that are CC0 or public domain only, each listed with its source
+page in `photos/CREDITS.md` — checked on the file's own page, not a search filter; no CC BY(-SA),
+Unsplash/Pexels/Pixabay-licence images. A new asset gets the same treatment. Those three files ship with the release tarball
+(`licenses/`) and the `.deb` (`usr/share/doc/live-keys/`); a new kind of asset adds its own.
+
 There is no lint/format/test CI in this repo yet (the only workflow builds releases, see below).
 Run `cargo clippy --workspace --all-targets` once a feature/request is otherwise complete and fix
 what it flags — not continuously on every intermediate edit, which just burns time re-checking
@@ -134,7 +143,8 @@ half-finished code.
 - **Releases** (`.github/workflows/release.yml`): publishing a GitHub release (tag `vX.Y.Z`)
   builds `live-keys-gui` and `live-keys` on `ubuntu-24.04` (stripped, without the debug info
   the release profile keeps locally) and attaches `live-keys-<tag>-linux-x86_64.tar.gz` (both
-  binaries, `LICENSE`, `README.md`) plus its `.sha256`, and a `.deb`, to the release. Linux
+  binaries, `LICENSE`, `README.md`, the bundled assets' licences in `licenses/`) plus its
+  `.sha256`, and a `.deb`, to the release. Linux
   x86_64 only. Its apt list is the libraries the binaries link at build time (lilv, lv2, suil,
   ALSA, fontconfig — checked with `ldd`; Wayland/X11/GL are dlopened): a new `-sys` dependency
   that links a system library needs its `-dev` package added there, and to the runtime list in
@@ -389,7 +399,7 @@ behind format-agnostic cores:
 
 - **`crates/engine`** (`live-keys-engine`) — the real-time wiring (`cpal` + `midir` + an
   `Lv2Host` + a `Vst3Host`) shared by both the CLI and the GUI, so there's exactly one implementation instead of
-  two drifting copies. It's a fixed rack of `SLOT_COUNT` (3) slots sharing one output stream;
+  two drifting copies. It's a fixed rack of `SLOT_COUNT` (6) slots sharing one output stream;
   each slot is a serial **chain** in two `Section`s around an instrument: up to
   `MAX_MIDI_EFFECTS` (8) MIDI effects in front of it, each fed the previous one's MIDI, and up
   to `MAX_EFFECTS` (8) audio effects after it, each fed the previous plugin's audio. Split in
@@ -574,7 +584,21 @@ behind format-agnostic cores:
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
-  via `TabWidget`/`Tab` from `std-widgets.slint`; `globals.slint` defines the host/UI interop
+  via `TabWidget`/`Tab` from `std-widgets.slint`. **Look:** the Live tab follows the Penpot
+  design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
+  greys in dark mode, a derived light variant otherwise — following `Palette.color-scheme` —
+  with `Palette.accent-background`/`-foreground` as the primary colour, so the style's accent
+  theming keeps working; sizes; the font), `Icons` (Lucide SVGs, recoloured with `colorize`)
+  and `Artwork` (header photos). Bundled assets live in `ui/assets/`: Source Sans 3
+  (`fonts/`, imported in `theme.slint`, the window's `default-font-family`), Lucide icons
+  (`icons/`, lucide-static 0.460.0 — add new ones from the same version) and CC0/public-domain
+  photos (`photos/`, 600×300, with `CREDITS.md`). `ui/widgets.slint` has the design's
+  components: `KButton` (icon and/or label; `active` = the primary colour), `TextField`,
+  `DropdownButton`, `Select` (a ComboBox look-alike on a `PopupWindow`), `ListItem`, `TabBar`,
+  `Stepper`, `FxSlot` (an 80px square: name over a compressor/filter curve — `EffectRow.graph`,
+  guessed from the name by `slot_view::graph` — or a faint +) and `ScrollIndicator`; `Knob`/
+  `LabelledKnob` in `knob.slint`. The Settings tab, plugin picker and parameter window still use
+  std-widgets (with the new default font). `globals.slint` defines the host/UI interop
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
   per the project's Slint skill guidance; the structs exchanged live in `types.slint`
   (re-exported by `globals.slint`). **Preview data:** every `AppState` property the host fills,
@@ -616,18 +640,41 @@ behind format-agnostic cores:
   loaded until the first scan is installed and the session restored, so until then
   `AppState.starting` lays a spinner over the Live tab (over it, not instead of it, so the
   window still sizes itself to the tab), and the session is neither autosaved nor saved on
-  exit (`started` in `main`) — that would overwrite the last session with an empty rack. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
-  `AppState.slots` entry (`SlotState`: `instrument: EffectRow` — key -1 when empty —
-  `midi-effects`/`audio-effects: [EffectRow]`, status, routing; an `EffectRow` is one
-  plugin's name/key, whether its GUI/parameter window is open, and its current preset),
-  laid out top to bottom in signal order: MIDI filter, MIDI effects,
-  instrument, audio effects, volume. The instrument and each effect render as a `ChainRow`:
-  the name, a GUI toggle and a Params toggle (highlighted while open), ↑/↓
-  (effects only), ✕ to remove — and below it a `PresetBar` (`ui/preset_bar.slint`): the
-  current preset (with a grey "changed" once a parameter moved since it was loaded or saved
+  exit (`started` in `main`) — that would overwrite the last session with an empty rack. The Live tab (`live_tab.slint`) is the scenes pane, then
+  one `SlotPanel` (`ui/slot_panel.slint`) per `AppState.slots` entry in a grid of
+  `SlotGrid.columns` (3) equal cells (`SlotState`: `instrument: EffectRow` — key -1 when empty —
+  `midi-effects`/`audio-effects: [EffectRow]`, `knobs: [KnobRow]`, `artwork`, `muted`,
+  `closed-name`, status, routing; an `EffectRow` is one plugin's name/key, whether its
+  GUI/parameter window is open, its FX-square curve and its current preset). A slot with
+  nothing in it is a big + (picks an instrument) with a "Slot presets…" popup; one just cleared
+  by ✕ shows 'Closed "<name>"…' with Undo and Dismiss. Otherwise: a **header** — the photo
+  (`Artwork.photos[artwork]`, `slot_view::artwork` matching words in the instrument's name)
+  under a dark gradient, buttons for the instrument's own GUI (gear), mute (`toggle-slot-mute`:
+  `SlotConfig.muted`, silencing the slot whatever its volume; part of `SlotRouting`, so
+  scenes recall it; ✕ unmutes) and ✕ (`clear-slot`), the instrument's name (click: a menu
+  to replace or remove it or open its parameter window; "+ Instrument" without one), a volume
+  `Knob` (dB, value shown while hovered), and the instrument's preset `DropdownButton`. Then a
+  `TabBar` (the selected tab is per slot, in the UI only) over a scrolling area
+  (`Flickable` + `ScrollIndicator`): tab 1 the instrument's first `slot_view::KNOB_COUNT` (5)
+  continuous parameters as `LabelledKnob`s (`KnobRow`: position 0..1, on a log scale for
+  logarithmic ones, mapped back to a value by `knob-value` before `set-param`; updated by
+  `Rack::show_knob_value` with every value change and refilled on preset loads) and the audio
+  effects as an `FxGrid` of `FxSlot`s (3 a row; + appends one); tab 2 `SlotPresets`; tab 3 the
+  MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
+  `RangeSlider`s, and a transpose `Stepper` — a **placeholder**: its value isn't stored or
+  applied (needs note shifting on the audio thread with note-offs following their note-on's
+  shift). Clicking an effect's square opens `EffectPopup` (its GUI, parameter window, presets,
+  move left/right, remove). **Clear with undo:** `clear-slot` first saves the chain as a slot
+  preset in `<data dir>/live-keys/undo/slot-<n>/` (`slot_view::snapshot`) and keeps it with the
+  routing and the slot preset shown in `Rack::closed`; `undo-clear` loads it back through
+  `load_slot_preset` and restores those; `dismiss-closed`, or anything loading into the slot
+  (`refresh_slot` sees plugins), forgets it. Scene recalls that clear a slot don't keep one.
+  Each plugin's presets (instrument from its dropdown, an effect's from its popup) open
+  `PresetPopup` (`ui/preset_bar.slint`, a `PopupWindow` closing itself when the browser closes
+  in Rust): the current preset (with a grey "changed" once a parameter moved since it was loaded or saved
   — `Rack::mark_changed`, on host-side edits and on plugin-GUI edits that actually change a
   value, so GUIs echoing values back don't count; LV2 plugin state changed outside its ports
-  isn't seen), which opens an inline browser — a search field (every word must appear in the
+  isn't seen), and the browser — a search field (every word must appear in the
   name; Enter loads the first match) over a list with a star per row to make it a favourite
   (`AppConfig.pinned_presets`, by `PresetInfo::id`, listed first) — plus "Save…" (an inline
   name field, prefilled with the current user preset's name — saving the same name
@@ -636,8 +683,8 @@ behind format-agnostic cores:
   `preset-rows`, `preset-count`, `preset-query`) and in Rust as `Rack::browser`
   (`PresetBrowser`: the plugin's presets, read when it opens, the query and the shown ones),
   filtered in Rust like the plugin picker. Preset errors go to the slot's status line.
-  **Slot presets** (`src/slot_presets.rs`, `ui/slot_presets.slint`, at the bottom of each
-  slot, filling the rest of it): a slot's whole chain under a name — a folder
+  **Slot presets** (`src/slot_presets.rs`, `ui/slot_presets.slint`, a slot's second tab): a
+  slot's whole chain under a name — a folder
   `<data dir>/live-keys/slot-presets/<instrument name>/<name>/` with `slot.json` (each
   plugin's id, name, state file, and its plugin preset + changed flag, so its preset bar shows
   them again) and one state file per plugin from `Engine::save_state_file` (saved into a
@@ -653,12 +700,13 @@ behind format-agnostic cores:
   (`Rack::mark_slot_changed`). Slot presets don't include the MIDI routing or volume (those
   are about the keyboard split and the mix, which scenes cover).
   **Scenes** (`src/scenes.rs`, `ui/scenes.slint`: `ScenesPane`, a fixed-width pane left of the
-  slots): what recalling does to each slot — `SlotMode` restore, clear (`clear_slot`: remove
+  slots — a search field, then a list starting with "+ New scene", which opens the save form):
+  what recalling does to each slot — `SlotMode` restore, clear (`clear_slot`: remove
   its plugins and reset its routing and volume to the defaults) or leave unchanged — under a
   name. A folder
   `<data dir>/live-keys/scenes/<name>/` with `scene.json` (per slot: its index, mode, and,
   if it was saved as restored, a `SavedSlot`: its `config::SlotRouting` — MIDI inputs mask,
-  channel, note/velocity ranges, volume — the library slot preset it showed, and its chain
+  channel, note/velocity ranges, volume, mute — the library slot preset it showed, and its chain
   subfolder) plus per saved slot a subfolder `slot-<n>/` that is a complete slot preset
   (`slot_presets::write`; saved via `slot_presets::replace_dir`, the same temp-folder swap).
   Save… and Edit share one form (`Rack::scene_form_slots`, a `SceneSlotChoice` per slot: mode
@@ -674,12 +722,11 @@ behind format-agnostic cores:
   otherwise take the right-click) offers Load, Save (overwrite: the slots' current setups,
   keeping its modes), Edit…, Duplicate (`scenes::duplicate`: "<name> copy", "copy 2", …,
   placed right after it) and Delete…; edit and delete act on `Rack::scene_target` (set by
-  `begin-scene-edit`/`begin-scene-delete`, with -1 meaning the current scene, as the header
-  buttons use). Each row shows a boxed slot number per
+  `begin-scene-edit`/`begin-scene-delete`; -1 would mean the current scene). Each row shows a boxed slot number per
   restored slot and a crossed-out one per cleared slot (`SceneRow.modes`, `SlotHint`).
   Clicking a scene recalls it (`load_scene`): restored slots go through `load_slot_preset`
   (plugins already in place are kept) and get their routing and volume back, cleared ones go
-  through `clear_slot` (also behind each slot's Clear button), the rest are left alone. A
+  through `clear_slot` (also behind each slot's ✕), the rest are left alone. A
   grey "changed" shows once a restored or cleared slot's chain, any of its plugins'
   parameters, a plugin or slot preset, its routing or its volume changes
   (`Rack::mark_scene_changed`, called from `mark_slot_changed` and the routing handlers).
@@ -746,16 +793,16 @@ behind format-agnostic cores:
   and after a preset load, in `refresh_param_rows`), and the poll timer forwards
   `Engine::drain_ui_events` to open LV2 GUIs (dropping events of plugins without one).
   Meant as the base for
-  future macro knobs/MIDI-bound parameters. Each slot also has channel (`ComboBox`, index 0 =
+  future macro knobs/MIDI-bound parameters. Each slot also has channel (`Select`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
   in `ui/range_slider.slint`, since std-widgets has none; note names shown using C4 = 60) and a
-  volume fader in dB (`MIN_VOLUME_DB` = -60 means muted,
+  volume knob in dB (`MIN_VOLUME_DB` = -60 means muted,
   up to +6; converted to linear gain in `config::SlotConfig::gain`). These live in
   `AppConfig.slots` (`SlotConfig`) as the GUI's source of truth and are pushed to the engine on
   startup and on every edit; `Rack::refresh_slot` only touches a row's plugin/GUI fields,
   `Rack::set_routing` its filter/volume fields. Since a recalled scene changes them from Rust,
-  the channel `ComboBox`, both `RangeSlider`s and the volume `Slider` follow their values
-  through `changed source =>` helpers (dragging replaces their bindings). Edits that fire continuously (fader drags)
+  the channel `Select`, both `RangeSlider`s, the volume `Knob` and the parameter knobs follow
+  their values through `changed source =>` helpers (dragging replaces their bindings). Edits that fire continuously (knob drags)
   mark the config dirty and the poll timer saves it, rather than writing the file per step.
 
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
@@ -828,7 +875,7 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   several same-named entries per sound card (e.g. `front`, `dmix`, `surround51`, `sysdefault` all
   share the card's display name) — these are genuinely different logical PCM configs, not a
   filter bug; cpal's `Display` just doesn't expose the distinguishing driver id.
-- The rack is a fixed `SLOT_COUNT` (3) parallel slots, each a serial MIDI effects → instrument
+- The rack is a fixed `SLOT_COUNT` (6) parallel slots, each a serial MIDI effects → instrument
   → audio effects chain (max 8 of each kind of effect) with its own MIDI filter and volume,
   summed into one output.
   Not a general audio graph: no routing between slots, no sends/parallel branches, no

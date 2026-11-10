@@ -6,6 +6,7 @@ mod mock_data;
 mod scenes;
 mod session;
 mod slot_presets;
+mod slot_view;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -339,6 +340,11 @@ struct Rack {
     /// rebuild that slot's rows).
     midi_effects: Vec<Rc<VecModel<EffectRow>>>,
     audio_effects: Vec<Rc<VecModel<EffectRow>>>,
+    /// Per slot, like the effect models: the instrument parameters shown as knobs.
+    knobs: Vec<Rc<VecModel<KnobRow>>>,
+    /// Per slot: what it was before its ✕ cleared it, until Undo, Dismiss or
+    /// anything else loaded into it.
+    closed: RefCell<Vec<Option<slot_view::Closed>>>,
     open_uis: RefCell<HashMap<PluginKey, OpenEditor>>,
     param_windows: RefCell<HashMap<PluginKey, ParamWindow>>,
     /// The preset last loaded or saved per plugin.
@@ -383,8 +389,10 @@ impl Rack {
         }
         let (midi_effects, audio_effects) = (models(), models());
         let slot_preset_rows = models();
+        let knobs = models();
         let slots = (0..SLOT_COUNT)
             .map(|slot| SlotState {
+                knobs: ModelRc::from(knobs[slot].clone()),
                 midi_effects: ModelRc::from(midi_effects[slot].clone()),
                 audio_effects: ModelRc::from(audio_effects[slot].clone()),
                 slot_preset_rows: ModelRc::from(slot_preset_rows[slot].clone()),
@@ -399,6 +407,8 @@ impl Rack {
             slots: Rc::new(VecModel::from(slots)),
             midi_effects,
             audio_effects,
+            knobs,
+            closed: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
             open_uis: RefCell::new(HashMap::new()),
             param_windows: RefCell::new(HashMap::new()),
             current_presets: RefCell::new(HashMap::new()),
@@ -443,6 +453,16 @@ impl Rack {
             |meta| self.plugin_row(meta),
         );
         row.status = error.unwrap_or_default().into();
+        row.artwork = slot_view::artwork(chain.instrument.as_ref().map(|meta| meta.name.as_str()));
+        sync_model(
+            &self.knobs[slot],
+            chain.instrument.as_ref().map(|meta| slot_view::knob_rows(engine, meta)).unwrap_or_default(),
+        );
+        // Anything loaded into a cleared slot replaces what Undo would bring back.
+        if chain.plugins().next().is_some() {
+            self.closed.borrow_mut()[slot] = None;
+        }
+        row.closed_name = self.closed.borrow()[slot].as_ref().map(|c| c.name.as_str()).unwrap_or_default().into();
 
         // A newly loaded instrument opens its folder of slot presets; without
         // one, all folders show.
@@ -679,6 +699,7 @@ impl Rack {
             gui_supported: gui_supported(meta),
             gui_open: self.open_uis.borrow().contains_key(&meta.key),
             params_open: self.param_windows.borrow().contains_key(&meta.key),
+            graph: slot_view::graph(&meta.name),
             preset_name: current.map(|c| c.preset.name.as_str()).unwrap_or_default().into(),
             preset_user: current.is_some_and(|c| c.preset.user),
             preset_changed: current.is_some_and(|c| c.changed),
@@ -832,6 +853,12 @@ impl Rack {
         if let Some(open) = self.param_windows.borrow().get(&key) {
             open.rows.set_vec(param_rows(engine, key));
         }
+        if let Some(slot) = slot_of(engine, key)
+            && let Some(instrument) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref())
+            && instrument.key == key
+        {
+            sync_model(&self.knobs[slot], slot_view::knob_rows(engine, instrument));
+        }
         if let (Some(OpenEditor::Lv2(handle)), Some(meta)) = (self.open_uis.borrow().get(&key), engine.plugin(key)) {
             for param in &meta.params {
                 let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
@@ -870,6 +897,7 @@ impl Rack {
         row.velocity_low = config.velocity_low.into();
         row.velocity_high = config.velocity_high.into();
         row.volume_db = config.volume_db;
+        row.muted = config.muted;
         self.slots.set_row_data(slot, row);
     }
 
@@ -888,6 +916,7 @@ impl Rack {
     /// Shows a param value that was just sent to the engine in the plugin's
     /// parameter window, if open.
     fn show_param_value(&self, engine: &Engine, key: PluginKey, param_id: u32, value: f32) {
+        self.show_knob_value(engine, key, param_id);
         let param_windows = self.param_windows.borrow();
         let Some(rows) = param_windows.get(&key).map(|open| &open.rows) else {
             return;
@@ -900,6 +929,21 @@ impl Rack {
         };
         if let Some(row) = rows.iter().position(|param| param.param_id as u32 == param_id) {
             rows.set_row_data(row, param_row(engine, key, info, value));
+        }
+    }
+
+    /// Updates the knob showing `key`'s parameter `param_id`, if there is one.
+    fn show_knob_value(&self, engine: &Engine, key: PluginKey, param_id: u32) {
+        let Some(slot) = slot_of(engine, key) else {
+            return;
+        };
+        let knobs = &self.knobs[slot];
+        let Some(index) = knobs.iter().position(|knob| knob.key == key as i32 && knob.param_id as u32 == param_id)
+        else {
+            return;
+        };
+        if let Some(param) = engine.plugin(key).and_then(|meta| meta.params.iter().find(|p| p.id == param_id)) {
+            knobs.set_row_data(index, slot_view::knob_row(engine, key, param));
         }
     }
 
@@ -1946,9 +1990,95 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         logic.on_clear_slot(move |slot| {
             let slot = slot as usize;
+            // Keep what's there, so Undo can bring it back.
+            let name = engine.borrow().slot(slot).and_then(|chain| {
+                let instrument = chain.instrument.as_ref().map(|meta| meta.name.clone());
+                instrument.or_else(|| chain.plugins().next().map(|meta| meta.name.clone()))
+            });
+            let closed = name.and_then(|name| {
+                let dir = slot_view::snapshot(&mut engine.borrow_mut(), slot, |key| rack.plugin_preset_state(key));
+                match dir {
+                    Ok(dir) => Some(slot_view::Closed {
+                        name,
+                        dir,
+                        routing: config.borrow().slots[slot].routing(),
+                        slot_preset: rack.current_slot_presets.borrow()[slot]
+                            .as_ref()
+                            .map(|current| (current.dir.clone(), current.name.clone(), current.changed)),
+                    }),
+                    Err(err) => {
+                        log::error!("keeping slot {} for undo failed: {err:#}", slot + 1);
+                        None
+                    }
+                }
+            });
             clear_slot(&engine, &config, &rack, slot);
             rack.mark_slot_changed(slot);
+            rack.closed.borrow_mut()[slot] = closed;
             rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_undo_clear(move |slot| {
+            let slot = slot as usize;
+            let Some(closed) = rack.closed.borrow_mut()[slot].take() else {
+                return;
+            };
+            let errors = match slot_presets::read_dir(&closed.dir) {
+                Ok(stored) => load_slot_preset(&engine, &config, &rack, slot, &stored),
+                Err(err) => vec![format!("The cleared slot couldn't be read back: {err:#}")],
+            };
+            {
+                let mut config = config.borrow_mut();
+                config.slots[slot].set_routing(closed.routing);
+                let slot_config = &config.slots[slot];
+                let mut engine = engine.borrow_mut();
+                engine.set_slot_filter(slot, slot_config.filter());
+                engine.set_slot_gain(slot, slot_config.gain());
+                rack.set_routing(slot, slot_config, config.midi_inputs.len());
+                log_on_err(config::save(&config));
+            }
+            rack.set_current_slot_preset(
+                slot,
+                closed.slot_preset.map(|(dir, name, changed)| CurrentSlotPreset {
+                    dir,
+                    name,
+                    changed: changed || !errors.is_empty(),
+                }),
+            );
+            rack.mark_scene_changed(slot);
+            rack.refresh_slot(&engine.borrow(), slot, (!errors.is_empty()).then(|| errors.join("\n")));
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_dismiss_closed(move |slot| {
+            let slot = slot as usize;
+            rack.closed.borrow_mut()[slot] = None;
+            rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_toggle_slot_mute(move |slot| {
+            let slot = slot as usize;
+            let mut config = config.borrow_mut();
+            let slot_config = &mut config.slots[slot];
+            slot_config.muted = !slot_config.muted;
+            engine.borrow_mut().set_slot_gain(slot, slot_config.gain());
+            rack.mark_scene_changed(slot);
+            let input_count = config.midi_inputs.len();
+            rack.set_routing(slot, &config.slots[slot], input_count);
+            log_on_err(config::save(&config));
         });
     }
 

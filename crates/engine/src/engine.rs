@@ -25,7 +25,7 @@ use crate::rack::{
 /// [`MAX_MIDI_EFFECTS`] MIDI effects, an instrument, then up to [`MAX_EFFECTS`]
 /// audio effects), and the slots' outputs are summed, each at its own gain, into
 /// the one output stream.
-pub const SLOT_COUNT: usize = 3;
+pub const SLOT_COUNT: usize = 6;
 
 const MIDI_RING_CAPACITY: usize = 1024;
 const COMMAND_RING_CAPACITY: usize = 256;

@@ -1,0 +1,214 @@
+import { Theme } from "theme.slint";
+
+// A rotary knob that behaves like the ones in music software:
+// - drag up/down to turn it (the pointer stays where it is; a vertical drag of
+//   `drag-range` covers the whole range), Shift while dragging for fine control;
+// - scroll the wheel or touchpad over it, Shift for fine control;
+// - double-click or Ctrl+click to reset it to `default-value`.
+// `step` > 0 snaps to multiples of it from `minimum`; small movements still add
+// up, so a slow drag or a touchpad scroll gets there eventually.
+export component Knob inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in-out property <float> value: root.minimum;
+    // What a double-click or Ctrl+click resets to.
+    in property <float> default-value: root.minimum;
+    // Where the value arc starts: `minimum` for a normal knob, the middle for a
+    // bipolar one (pan, detune).
+    in property <float> origin: root.minimum;
+    // 0 = continuous.
+    in property <float> step: 0;
+    in property <bool> enabled: true;
+    // Vertical drag distance that covers the whole range.
+    in property <length> drag-range: 200px;
+    // Shift divides movement by this.
+    in property <float> fine-factor: 10;
+    out property <bool> pressed: touch.pressed;
+    out property <bool> has-hover: touch.has-hover;
+    // Fired on every change made by the user, after `value` is updated.
+    callback changed(/* value */ float);
+
+    private property <float> span: max(root.maximum - root.minimum, 0.000000001);
+    private property <float> fraction: Math.clamp((root.value - root.minimum) / root.span, 0, 1);
+    // The unsnapped value a drag or scroll accumulates into, so that movements
+    // smaller than a step aren't lost.
+    private property <float> raw;
+    private property <length> last-y;
+    private property <length> size: min(root.width, root.height);
+    // Angles are measured clockwise from straight up; the knob turns through 270°.
+    private property <angle> start-angle: -135deg;
+    private property <angle> sweep: 270deg;
+
+    function snap(v: float) -> float {
+        let clamped = Math.clamp(v, root.minimum, root.maximum);
+        if (root.step <= 0) {
+            return clamped;
+        }
+        return Math.clamp(root.minimum + Math.round((clamped - root.minimum) / root.step) * root.step, root.minimum, root.maximum);
+    }
+
+    // Moves the accumulated value by `delta` and applies it.
+    function nudge(delta: float) {
+        // Someone else changed the value since the last movement: start from it.
+        if (root.snap(root.raw) != root.value) {
+            root.raw = root.value;
+        }
+        root.raw = Math.clamp(root.raw + delta, root.minimum, root.maximum);
+        root.set-value(root.snap(root.raw));
+    }
+
+    function set-value(v: float) {
+        if (v != root.value) {
+            root.value = v;
+            root.changed(v);
+        }
+    }
+
+    function reset() {
+        root.raw = root.default-value;
+        root.set-value(root.snap(root.default-value));
+    }
+
+    function angle-at(fraction: float) -> angle {
+        return root.start-angle + root.sweep * fraction;
+    }
+
+    // An SVG arc on a circle of radius 40 around (50, 50), clockwise from `from` to `to`.
+    function arc(from: angle, to: angle) -> string {
+        let a = min(from, to);
+        let b = max(from, to);
+        let large = b - a > 180deg ? 1 : 0;
+        return "M \{50 + 40 * Math.sin(a)} \{50 - 40 * Math.cos(a)} A 40 40 0 \{large} 1 \{50 + 40 * Math.sin(b)} \{50 - 40 * Math.cos(b)}";
+    }
+
+    min-width: 24px;
+    min-height: 24px;
+    preferred-width: 48px;
+    preferred-height: 48px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    opacity: root.enabled ? 1 : 0.5;
+
+    Rectangle {
+        width: root.size;
+        height: root.size;
+
+        // Track
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: root.arc(root.angle-at(0), root.angle-at(1));
+            stroke: Theme.control-border;
+            stroke-width: max(2px, root.size / 14);
+            stroke-line-cap: round;
+        }
+
+        // Value
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            visible: root.value != root.origin;
+            commands: root.arc(root.angle-at((root.origin - root.minimum) / root.span), root.angle-at(root.fraction));
+            stroke: Theme.accent;
+            stroke-width: max(2px, root.size / 14);
+            stroke-line-cap: round;
+        }
+
+        // Body
+        Rectangle {
+            width: parent.width * 0.62;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: touch.has-hover && root.enabled ? Theme.control-hover : Theme.control;
+            border-width: 1px;
+            border-color: Theme.control-border;
+        }
+
+        // Pointer, from near the centre to the body's edge (radius 31)
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: "M \{50 + 8 * Math.sin(root.angle-at(root.fraction))} \{50 - 8 * Math.cos(root.angle-at(root.fraction))} L \{50 + 26 * Math.sin(root.angle-at(root.fraction))} \{50 - 26 * Math.cos(root.angle-at(root.fraction))}";
+            stroke: Theme.text-muted;
+            stroke-width: max(2px, root.size / 20);
+            stroke-line-cap: round;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.ns-resize;
+
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                if (event.modifiers.control) {
+                    root.reset();
+                }
+                root.last-y = self.mouse-y;
+                root.raw = root.value;
+            } else if (event.kind == PointerEventKind.move && self.pressed) {
+                // Applied per movement, so pressing or releasing Shift mid-drag
+                // changes the speed from there on without a jump.
+                let factor = event.modifiers.shift ? 1 / root.fine-factor : 1;
+                root.nudge((root.last-y - self.mouse-y) / root.drag-range * root.span * factor);
+                root.last-y = self.mouse-y;
+            }
+        }
+        double-clicked => {
+            root.reset();
+        }
+        scroll-event(event) => {
+            // Some platforms turn Shift+wheel into horizontal scrolling.
+            let delta = event.delta-y != 0 ? event.delta-y : event.delta-x;
+            if (delta == 0) {
+                return reject;
+            }
+            let factor = event.modifiers.shift ? 1 / root.fine-factor : 1;
+            // One wheel notch (about 60px here) moves 1/50 of the range, or one
+            // step if that's larger.
+            let per-notch = max(root.span / 50, root.step);
+            root.nudge(delta / 60px * per-notch * factor);
+            accept
+        }
+    }
+}
+
+// The design's Knob with label: a knob over its name, which shows the value
+// instead while the knob is hovered or turned.
+export component LabelledKnob inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value-text;
+    in-out property <float> value <=> knob.value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> default-value: 0;
+    callback changed(/* value */ float);
+
+    width: 56px;
+    spacing: 2px;
+    alignment: start;
+    HorizontalLayout {
+        alignment: center;
+        knob := Knob {
+            width: 48px;
+            height: 48px;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            default-value: root.default-value;
+            changed(value) => { root.changed(value); }
+        }
+    }
+    Text {
+        text: knob.has-hover || knob.pressed ? root.value-text : root.label;
+        color: Theme.text-muted;
+        font-size: Theme.small-font-size;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+}

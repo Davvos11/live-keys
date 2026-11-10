@@ -57,6 +57,11 @@ jobs:
           name="live-keys-${TAG}-linux-x86_64"
           mkdir "$name"
           cp target/release/live-keys-gui target/release/live-keys LICENSE README.md "$name/"
+          # Licences of the assets compiled into live-keys-gui.
+          mkdir "$name/licenses"
+          cp crates/gui/ui/assets/fonts/OFL.txt "$name/licenses/SourceSans3-OFL.txt"
+          cp crates/gui/ui/assets/icons/LICENSE "$name/licenses/Lucide-LICENSE.txt"
+          cp crates/gui/ui/assets/photos/CREDITS.md "$name/licenses/photo-credits.md"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"

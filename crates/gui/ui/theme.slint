@@ -1,0 +1,86 @@
+// The look of the Live tab, after the Penpot design: its greys in dark mode, a
+// light variant of them otherwise (following the system, like the std
+// widgets), and the style's accent colour as the primary colour.
+import { Palette } from "std-widgets.slint";
+
+import "assets/fonts/SourceSans3-Regular.ttf";
+import "assets/fonts/SourceSans3-Semibold.ttf";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // The window and the panes ("Background").
+    out property <brush> background: root.dark ? #1c1c1c : #f3f3f3;
+    // Lines between panes ("Border").
+    out property <brush> divider: root.dark ? #2e2e2e : #dcdcdc;
+    // Buttons, fields, list items ("Element background", "Element border").
+    out property <brush> control: root.dark ? #292929 : #ffffff;
+    out property <brush> control-hover: root.dark ? #333333 : #ececec;
+    out property <brush> control-pressed: root.dark ? #3a3a3a : #e2e2e2;
+    out property <brush> control-border: root.dark ? #3a3a3a : #cdcdcd;
+    // Text: values and names, labels and placeholders ("Placeholder text"),
+    // and hints.
+    out property <brush> text: root.dark ? #ffffff : #1c1c1c;
+    out property <brush> text-muted: root.dark ? #d2d2d2 : #4f4f4f;
+    out property <brush> text-faint: root.dark ? #8c8c8c : #8a8a8a;
+    // The primary colour ("Primary background") and text on it.
+    out property <brush> accent: Palette.accent-background;
+    out property <brush> on-accent: Palette.accent-foreground;
+
+    out property <length> radius: 3px;
+    out property <length> control-height: 32px;
+    out property <length> font-size: 18px;
+    out property <length> small-font-size: 14px;
+    out property <length> tiny-font-size: 11px;
+    out property <string> font-family: "Source Sans 3";
+}
+
+// Lucide icons (ISC licence, `assets/icons/LICENSE`). They're black line
+// drawings, recoloured with `colorize`.
+export global Icons {
+    out property <image> settings: @image-url("assets/icons/settings.svg");
+    out property <image> volume: @image-url("assets/icons/volume-2.svg");
+    out property <image> muted: @image-url("assets/icons/volume-x.svg");
+    out property <image> close: @image-url("assets/icons/x.svg");
+    out property <image> chevron-down: @image-url("assets/icons/chevron-down.svg");
+    out property <image> chevron-up: @image-url("assets/icons/chevron-up.svg");
+    out property <image> chevron-left: @image-url("assets/icons/chevron-left.svg");
+    out property <image> chevron-right: @image-url("assets/icons/chevron-right.svg");
+    out property <image> search: @image-url("assets/icons/search.svg");
+    out property <image> gauge: @image-url("assets/icons/gauge.svg");
+    out property <image> layers: @image-url("assets/icons/layers.svg");
+    out property <image> keyboard: @image-url("assets/icons/keyboard-music.svg");
+    out property <image> plus: @image-url("assets/icons/plus.svg");
+    out property <image> minus: @image-url("assets/icons/minus.svg");
+    out property <image> window: @image-url("assets/icons/app-window.svg");
+    out property <image> sliders: @image-url("assets/icons/sliders-vertical.svg");
+    out property <image> star: @image-url("assets/icons/star.svg");
+    out property <image> undo: @image-url("assets/icons/undo-2.svg");
+    out property <image> save: @image-url("assets/icons/save.svg");
+    out property <image> trash: @image-url("assets/icons/trash-2.svg");
+    out property <image> edit: @image-url("assets/icons/pencil.svg");
+}
+
+// Slot header photos (CC0/public domain, `assets/photos/CREDITS.md`), indexed
+// by `SlotState.artwork`, and the colour each fades in from the left (piano's
+// and organ's from the design; the others in the same depth).
+export global Artwork {
+    out property <[color]> tints: [
+        #2f3d5c, // generic
+        #931a00, // piano
+        #6a2a6e, // electric piano
+        #936700, // organ
+        #0f5c66, // synth
+        #6e3a12, // strings
+        #2b3a8c, // pad
+    ];
+    out property <[image]> photos: [
+        @image-url("assets/photos/default.jpg"),
+        @image-url("assets/photos/piano.jpg"),
+        @image-url("assets/photos/electric-piano.jpg"),
+        @image-url("assets/photos/organ.jpg"),
+        @image-url("assets/photos/synth.jpg"),
+        @image-url("assets/photos/strings.jpg"),
+        @image-url("assets/photos/pad.jpg"),
+    ];
+}

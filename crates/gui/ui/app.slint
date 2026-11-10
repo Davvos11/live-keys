@@ -4,13 +4,16 @@ import { LiveTab } from "live_tab.slint";
 import { PickerTarget, PluginPicker } from "plugin_picker.slint";
 import { AppState, AppLogic } from "globals.slint";
 import { ParamsWindow } from "params_window.slint";
+import { Theme } from "theme.slint";
 
 export { AppState, AppLogic, ParamsWindow }
 
 export component AppWindow inherits Window {
     title: "Live Keys";
-    preferred-width: 900px;
-    preferred-height: 760px;
+    preferred-width: 1200px;
+    preferred-height: 860px;
+    default-font-family: Theme.font-family;
+    default-font-size: 16px;
 
     TabWidget {
         Tab {

@@ -180,3 +180,5 @@ pcbs/**/.history
 
 # Ik ook notitieblokje
 notes.txt
+
+tmp/

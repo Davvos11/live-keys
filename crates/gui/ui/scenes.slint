@@ -1,5 +1,6 @@
-import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { AppLogic, AppState, SceneRow } from "globals.slint";
+import { Theme, Icons, KButton, ListItem, TextField } from "widgets.slint";
 
 // A slot number in a box: the slot is restored, or — crossed out — cleared.
 component SlotHint inherits Rectangle {
@@ -15,7 +16,7 @@ component SlotHint inherits Rectangle {
 
     Text {
         text: root.slot + 1;
-        font-size: 11px;
+        font-size: Theme.tiny-font-size;
         color: root.tint;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -53,13 +54,19 @@ component SceneItem inherits Rectangle {
     property <bool> dragging;
 
     function rows-moved() -> int {
-        return Math.round((area.mouse-y - area.pressed-y) / root.height);
+        // Rows are spaced 5px apart in the list.
+        return Math.round((area.mouse-y - area.pressed-y) / (root.height + 5px));
     }
 
-    height: 28px;
-    border-radius: 4px;
-    background: root.entry.current ? Palette.selection-background
-        : area.has-hover ? Palette.alternate-background : transparent;
+    // Shown on the current scene once a slot it includes changed since.
+    in property <bool> changed;
+
+    height: Theme.control-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: root.entry.current ? Theme.accent
+        : area.has-hover ? Theme.control-hover : Theme.control;
     opacity: root.dragged ? 0.5 : 1;
 
     area := TouchArea {
@@ -127,15 +134,22 @@ component SceneItem inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 8px;
+        padding-left: 7px;
         padding-right: 6px;
         spacing: 3px;
         Text {
             text: root.entry.name;
-            color: root.entry.current ? Palette.selection-foreground : Palette.foreground;
+            color: root.entry.current ? Theme.on-accent : Theme.text;
+            font-size: Theme.font-size;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
+        }
+        if root.entry.current && root.changed : Text {
+            text: "changed";
+            color: Theme.on-accent;
+            font-size: Theme.small-font-size;
+            vertical-alignment: center;
         }
         // What recalling it does to each slot; nothing for slots it leaves alone.
         for mode[slot] in root.entry.modes : VerticalLayout {
@@ -145,7 +159,7 @@ component SceneItem inherits Rectangle {
             if mode != 0 : SlotHint {
                 slot: slot;
                 clear: mode == 2;
-                tint: root.entry.current ? Palette.selection-foreground : gray;
+                tint: root.entry.current ? Theme.on-accent : Theme.text-faint;
             }
         }
     }
@@ -153,7 +167,7 @@ component SceneItem inherits Rectangle {
     if root.drop-line != 0 : Rectangle {
         y: root.drop-line == 1 ? -1px : root.height - 1px;
         height: 2px;
-        background: Palette.accent-background;
+        background: Theme.accent;
     }
 }
 
@@ -164,9 +178,9 @@ component ModeOption inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    border-radius: 3px;
-    background: root.active ? Palette.accent-background
-        : area.has-hover && root.enabled ? Palette.alternate-background : transparent;
+    border-radius: Theme.radius;
+    background: root.active ? Theme.accent
+        : area.has-hover && root.enabled ? Theme.control-hover : transparent;
 
     area := TouchArea {
         enabled: root.enabled;
@@ -174,8 +188,8 @@ component ModeOption inherits Rectangle {
     }
     Text {
         text: root.text;
-        font-size: 12px;
-        color: root.active ? Palette.accent-foreground : root.enabled ? Palette.foreground : gray;
+        font-size: Theme.small-font-size;
+        color: root.active ? Theme.on-accent : root.enabled ? Theme.text : Theme.text-faint;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -190,13 +204,15 @@ component ModeSelect inherits VerticalLayout {
     spacing: 2px;
     Text {
         text: "Slot \{root.slot + 1}";
-        font-size: 12px;
+        color: Theme.text-muted;
+        font-size: Theme.small-font-size;
     }
     Rectangle {
-        height: 24px;
-        border-radius: 4px;
+        height: 26px;
+        border-radius: Theme.radius;
         border-width: 1px;
-        border-color: Palette.border;
+        border-color: Theme.control-border;
+        background: Theme.control;
         HorizontalLayout {
             padding: 1px;
             spacing: 1px;
@@ -220,11 +236,12 @@ component ModeSelect inherits VerticalLayout {
     }
 }
 
-// The Live tab's left pane: the current scene (greyed "changed" once a slot it
-// restores or clears changed since it was recalled or saved), saving, editing
-// (renaming, and what it does to each slot) and deleting it, and a searchable
-// list of scenes, each with what it does to which slot. Clicking a scene
-// recalls it straight away.
+// The Live tab's left pane: a search over the scenes, then the list — "+ New
+// scene" (saving the slots as a scene, with what it does to each slot), and the
+// scenes, each with what it does to which slot; the current one (greyed
+// "changed" once a slot it restores or clears changed since it was recalled or
+// saved) in the primary colour. Clicking a scene recalls it straight away;
+// right-clicking one offers saving over, editing and deleting it.
 export component ScenesPane inherits VerticalLayout {
     // 0: browsing, 1: saving, 2: confirming a delete, 3: editing.
     property <int> mode: 0;
@@ -244,173 +261,142 @@ export component ScenesPane inherits VerticalLayout {
         root.mode = 0;
     }
 
-    spacing: 4px;
+    padding: 10px;
+    spacing: 6px;
 
-    HorizontalLayout {
-        spacing: 4px;
-        max-height: self.min-height;
-        Text {
-            text: "Scenes";
-            font-weight: 600;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-        if root.mode == 0 : Button {
-            text: "Save…";
-            clicked => {
-                AppLogic.begin-scene-save();
-                root.mode = 1;
-            }
-        }
-        if root.mode == 0 : Button {
-            text: "Edit";
-            enabled: AppState.current-scene != "";
-            clicked => {
-                AppLogic.begin-scene-edit(-1);
-                root.mode = 3;
-            }
-        }
-        if root.mode == 0 : Button {
-            text: "Delete";
-            enabled: AppState.current-scene != "";
-            clicked => {
-                AppLogic.begin-scene-delete(-1);
-                root.mode = 2;
-            }
-        }
-    }
-
-    if root.mode == 0 && AppState.current-scene != "" : HorizontalLayout {
-        spacing: 6px;
-        Text {
-            text: AppState.current-scene;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-        if AppState.current-scene-changed : Text {
-            text: "changed";
-            color: gray;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
-    }
-
-    if root.mode == 1 || root.mode == 3 : VerticalLayout {
-        spacing: 6px;
-        name := LineEdit {
-            placeholder-text: "Scene name";
-            // Saving over the current scene is the common case; editing
-            // starts from the scene's own name.
-            text: AppState.scene-target-name;
-            init => { self.focus(); }
-            accepted => { root.submit(self.text); }
-        }
-        for choice[slot] in AppState.scene-form-slots : ModeSelect {
-            slot: slot;
-            mode: choice.mode;
-            can-restore: choice.can-restore;
-        }
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: root.mode == 1 ? "Save" : "Apply";
-                primary: true;
-                horizontal-stretch: 1;
-                enabled: name.text != "";
-                clicked => { root.submit(name.text); }
-            }
-            Button {
-                text: "Cancel";
-                horizontal-stretch: 1;
-                clicked => { root.mode = 0; }
-            }
-        }
-    }
-
-    if root.mode == 2 : VerticalLayout {
-        spacing: 4px;
-        Text {
-            text: "Delete \"\{AppState.scene-target-name}\"?";
-            wrap: word-wrap;
-        }
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: "Delete";
-                primary: true;
-                horizontal-stretch: 1;
-                clicked => {
-                    AppLogic.delete-scene();
-                    root.mode = 0;
-                }
-            }
-            Button {
-                text: "Cancel";
-                horizontal-stretch: 1;
-                clicked => { root.mode = 0; }
-            }
-        }
-    }
-
-    if AppState.scene-status != "" : Text {
-        text: AppState.scene-status;
-        color: gray;
-        wrap: word-wrap;
-    }
-
-    LineEdit {
-        placeholder-text: "Search scenes";
+    TextField {
+        placeholder: "Search scenes...";
+        icon: Icons.search;
         edited(text) => { AppLogic.filter-scenes(text); }
         accepted => { AppLogic.load-scene(0); }
     }
 
     Rectangle {
         vertical-stretch: 1;
-        border-radius: 4px;
+        border-radius: Theme.radius;
         border-width: 1px;
-        border-color: Palette.border;
+        border-color: Theme.control-border;
 
         VerticalLayout {
-            padding: 2px;
-            if AppState.scene-rows.length == 0 : VerticalLayout {
-                padding: 8px;
-                Text {
-                    text: AppState.scene-count == 0 ? "No scenes yet." : "No matching scenes.";
-                    color: gray;
-                    wrap: word-wrap;
-                    horizontal-alignment: center;
+            padding: 6px;
+            spacing: 5px;
+
+            if root.mode == 0 : ListItem {
+                text: "+ New scene";
+                action: true;
+                clicked => {
+                    AppLogic.begin-scene-save();
+                    root.mode = 1;
                 }
+            }
+
+            if root.mode == 1 || root.mode == 3 : VerticalLayout {
+                spacing: 6px;
+                name := TextField {
+                    placeholder: "Scene name";
+                    // Saving over the current scene is the common case; editing
+                    // starts from the scene's own name.
+                    text: AppState.scene-target-name;
+                    init => { self.grab-focus(); }
+                    accepted(text) => { root.submit(text); }
+                }
+                for choice[slot] in AppState.scene-form-slots : ModeSelect {
+                    slot: slot;
+                    mode: choice.mode;
+                    can-restore: choice.can-restore;
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    KButton {
+                        text: root.mode == 1 ? "Save" : "Apply";
+                        active: true;
+                        horizontal-stretch: 1;
+                        enabled: name.text != "";
+                        clicked => { root.submit(name.text); }
+                    }
+                    KButton {
+                        text: "Cancel";
+                        horizontal-stretch: 1;
+                        clicked => { root.mode = 0; }
+                    }
+                }
+            }
+
+            if root.mode == 2 : VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Delete \"\{AppState.scene-target-name}\"?";
+                    color: Theme.text;
+                    font-size: Theme.font-size;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    KButton {
+                        text: "Delete";
+                        active: true;
+                        horizontal-stretch: 1;
+                        clicked => {
+                            AppLogic.delete-scene();
+                            root.mode = 0;
+                        }
+                    }
+                    KButton {
+                        text: "Cancel";
+                        horizontal-stretch: 1;
+                        clicked => { root.mode = 0; }
+                    }
+                }
+            }
+
+            if AppState.scene-status != "" : Text {
+                text: AppState.scene-status;
+                color: Theme.text-muted;
+                font-size: Theme.small-font-size;
+                wrap: word-wrap;
+            }
+
+            if AppState.scene-rows.length == 0 : Text {
+                text: AppState.scene-count == 0 ? "No scenes yet." : "No matching scenes.";
+                color: Theme.text-faint;
+                font-size: Theme.small-font-size;
+                wrap: word-wrap;
+                horizontal-alignment: center;
             }
             ListView {
                 vertical-stretch: 1;
-                for row[index] in AppState.scene-rows : SceneItem {
-                    entry: row;
-                    dragged: index == root.drag-from;
-                    drop-line: root.drag-from < 0 || index != root.drag-to || index == root.drag-from ? 0
-                        : index < root.drag-from ? 1 : 2;
-                    choose => { AppLogic.load-scene(index); }
-                    overwrite => { AppLogic.overwrite-scene(index); }
-                    duplicate => { AppLogic.duplicate-scene(index); }
-                    edit => {
-                        AppLogic.begin-scene-edit(index);
-                        root.mode = 3;
-                    }
-                    delete => {
-                        AppLogic.begin-scene-delete(index);
-                        root.mode = 2;
-                    }
-                    drag(rows) => {
-                        root.drag-from = index;
-                        root.drag-to = Math.clamp(index + rows, 0, AppState.scene-rows.length - 1);
-                    }
-                    drag-cancelled => {
-                        root.drag-from = -1;
-                        root.drag-to = -1;
-                    }
-                    drop(rows) => {
-                        AppLogic.move-scene(index, Math.clamp(index + rows, 0, AppState.scene-rows.length - 1));
-                        root.drag-from = -1;
-                        root.drag-to = -1;
+                for row[index] in AppState.scene-rows : VerticalLayout {
+                    padding-bottom: 5px;
+                    SceneItem {
+                        entry: row;
+                        changed: AppState.current-scene-changed;
+                        dragged: index == root.drag-from;
+                        drop-line: root.drag-from < 0 || index != root.drag-to || index == root.drag-from ? 0
+                            : index < root.drag-from ? 1 : 2;
+                        choose => { AppLogic.load-scene(index); }
+                        overwrite => { AppLogic.overwrite-scene(index); }
+                        duplicate => { AppLogic.duplicate-scene(index); }
+                        edit => {
+                            AppLogic.begin-scene-edit(index);
+                            root.mode = 3;
+                        }
+                        delete => {
+                            AppLogic.begin-scene-delete(index);
+                            root.mode = 2;
+                        }
+                        drag(rows) => {
+                            root.drag-from = index;
+                            root.drag-to = Math.clamp(index + rows, 0, AppState.scene-rows.length - 1);
+                        }
+                        drag-cancelled => {
+                            root.drag-from = -1;
+                            root.drag-to = -1;
+                        }
+                        drop(rows) => {
+                            AppLogic.move-scene(index, Math.clamp(index + rows, 0, AppState.scene-rows.length - 1));
+                            root.drag-from = -1;
+                            root.drag-to = -1;
+                        }
                     }
                 }
             }

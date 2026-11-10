@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, KnobRow } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, KnobRow } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -90,8 +90,15 @@ export global AppLogic {
     // to the slot's MIDI or audio effects, depending on `category`.
     callback pick-plugin(/* slot */ int, /* category */ int, /* plugin id */ string);
     callback unload-plugin(/* slot */ int);
-    // Removes every plugin from the slot.
+    // Removes every plugin from the slot, keeping what was there for
+    // `undo-clear` (shown through `SlotState.closed-name`).
     callback clear-slot(/* slot */ int);
+    // Puts back what `clear-slot` removed: the chain, its settings, routing and
+    // volume.
+    callback undo-clear(/* slot */ int);
+    // Forgets what `clear-slot` removed, leaving the slot empty.
+    callback dismiss-closed(/* slot */ int);
+    callback toggle-slot-mute(/* slot */ int);
     callback remove-effect(/* slot */ int, /* section */ int, /* index */ int);
     callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
     // Opens `key`'s parameter window, or closes it if open.

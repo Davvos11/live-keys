@@ -11,7 +11,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
     AppState, AppWindow, EffectRow, MidiDeviceRow, MidiInputRow, ParamRow, PickerRow, PresetRow,
-    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState,
+    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, KnobRow,
 };
 
 /// Where to write the mock data, if asked to.
@@ -114,15 +114,18 @@ slint_struct!(ParamRow {
 });
 slint_struct!(PresetRow { name, user, pinned, after_pinned, current });
 slint_struct!(EffectRow {
-    key, name, gui_supported, gui_open, params_open, preset_name, preset_user, preset_changed,
+    key, name, gui_supported, gui_open, params_open, graph, preset_name, preset_user, preset_changed,
 });
 slint_struct!(SlotPresetRow { name, folder, count, current });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
+slint_struct!(KnobRow {
+    key, param_id, name, position, default_position, min_value, max_value, logarithmic, text,
+});
 slint_struct!(SlotState {
-    instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
+    artwork, muted, closed_name, knobs, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
     note_high, velocity_low, velocity_high, volume_db, slot_preset_name, slot_preset_changed,
     slot_preset_folder, slot_preset_rows,
 });
@@ -143,7 +146,7 @@ pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
          import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SceneSlotChoice, SlotState } from \"types.slint\";\n\n\
+         SceneRow, SceneSlotChoice, SlotState, KnobRow } from \"types.slint\";\n\n\
          export global MockData {\n",
     );
     property(&mut out, "[string]", "audio-devices", &state.get_audio_devices());

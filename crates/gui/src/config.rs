@@ -47,6 +47,8 @@ pub struct SlotConfig {
     pub velocity_high: u8,
     /// Output volume in dB; at or below [`MIN_VOLUME_DB`] the slot is muted.
     pub volume_db: f32,
+    /// Silenced by its mute button, whatever its volume.
+    pub muted: bool,
 }
 
 /// Bottom of the volume fader's range, treated as silence.
@@ -64,11 +66,12 @@ impl Default for SlotConfig {
             velocity_low: filter.velocity_low,
             velocity_high: filter.velocity_high,
             volume_db: 0.0,
+            muted: false,
         }
     }
 }
 
-/// A slot's MIDI routing and volume: what a scene recalls besides the chain.
+/// A slot's MIDI routing, volume and mute: what a scene recalls besides the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SlotRouting {
     pub midi_inputs: u32,
@@ -78,6 +81,7 @@ pub struct SlotRouting {
     pub velocity_low: u8,
     pub velocity_high: u8,
     pub volume_db: f32,
+    pub muted: bool,
 }
 
 impl SlotConfig {
@@ -90,6 +94,7 @@ impl SlotConfig {
             velocity_low: self.velocity_low,
             velocity_high: self.velocity_high,
             volume_db: self.volume_db,
+            muted: self.muted,
         }
     }
 
@@ -101,6 +106,7 @@ impl SlotConfig {
         self.velocity_low = routing.velocity_low;
         self.velocity_high = routing.velocity_high;
         self.volume_db = routing.volume_db;
+        self.muted = routing.muted;
     }
 
     pub fn filter(&self) -> MidiFilter {
@@ -114,9 +120,9 @@ impl SlotConfig {
         }
     }
 
-    /// Linear gain for [`SlotConfig::volume_db`].
+    /// Linear gain for [`SlotConfig::volume_db`], or silence while muted.
     pub fn gain(&self) -> f32 {
-        if self.volume_db <= MIN_VOLUME_DB {
+        if self.muted || self.volume_db <= MIN_VOLUME_DB {
             0.0
         } else {
             10f32.powf(self.volume_db / 20.0)

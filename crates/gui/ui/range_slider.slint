@@ -1,4 +1,4 @@
-import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
 
 component Handle inherits Rectangle {
     in property <bool> active;
@@ -6,15 +6,15 @@ component Handle inherits Rectangle {
     width: 18px;
     height: self.width;
     border-radius: self.width / 2;
-    background: Palette.background;
+    background: Theme.background;
     border-width: 1px;
-    border-color: Palette.border;
+    border-color: Theme.control-border;
 
     Rectangle {
         width: root.active ? 12px : 10px;
         height: self.width;
         border-radius: self.width / 2;
-        background: Palette.accent-background;
+        background: Theme.accent;
         animate width { duration: 100ms; }
     }
 }
@@ -71,7 +71,7 @@ export component RangeSlider inherits Rectangle {
         width: root.track-width;
         height: 4px;
         border-radius: 2px;
-        background: Palette.border;
+        background: Theme.control-border;
     }
 
     // Selected range
@@ -81,7 +81,7 @@ export component RangeSlider inherits Rectangle {
         width: root.x-for(root.high) - root.x-for(root.low);
         height: 4px;
         border-radius: 2px;
-        background: Palette.accent-background;
+        background: Theme.accent;
     }
 
     Handle {
