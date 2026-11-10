@@ -286,7 +286,10 @@ behind format-agnostic cores:
     `PClassInfo2::subCategories` contains `Instrument`). Sub-categories can't identify a MIDI
     effect (JUCE ones claim `Fx|…`), so every non-instrument class is briefly created and
     initialized at scan time (`plugin::probe_kind`) to look at its buses: MIDI out and no
-    audio in = MIDI effect. **Modules are loaded once per process
+    audio in = MIDI effect. That's slow (~45 ms a class; LSP has ~190, which made startup
+    ~11 s), so results are cached (`kind_cache.rs`: `~/.cache/live-keys/vst3-kinds.tsv`,
+    keyed by binary path + size + mtime + class ID, rewritten after each scan) and only new
+    or changed binaries are probed. **Modules are loaded once per process
     and never unloaded** (`ModuleExit` is never called; a global cache keyed by path) — JUCE and
     similar frameworks keep process-wide state that doesn't survive unload/reload, and every
     rescan would otherwise do exactly that. Scanning has to load every module (VST3 has no

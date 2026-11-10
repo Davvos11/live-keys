@@ -5,6 +5,7 @@
 //! [`HostedPlugin`]: live_keys_core::HostedPlugin
 
 mod com;
+mod kind_cache;
 mod module;
 mod plugin;
 mod preset;
@@ -47,6 +48,7 @@ impl Vst3Host {
         dirs.extend_from_slice(extra_dirs);
 
         let mut classes = Vec::new();
+        let mut kinds = kind_cache::KindCache::load();
         for bundle in module::find_bundles(&dirs) {
             let Some(binary) = module::bundle_binary(&bundle) else {
                 log::warn!("VST3 bundle {} has no binary for this platform", bundle.display());
@@ -59,8 +61,10 @@ impl Vst3Host {
                     continue;
                 }
             };
+            let stamp = kind_cache::BinaryStamp::of(&binary);
             for class in module::audio_classes(&module) {
-                let id = format!("{ID_PREFIX}{}", module::cid_to_hex(&class.cid));
+                let cid_hex = module::cid_to_hex(&class.cid);
+                let id = format!("{ID_PREFIX}{cid_hex}");
                 // The same plugin can be installed in more than one search folder;
                 // the first found wins.
                 if classes.iter().any(|scanned: &ScannedClass| scanned.info.id == id) {
@@ -75,8 +79,11 @@ impl Vst3Host {
                             PluginKind::Instrument
                         } else {
                             // Effects can't be told apart by category; MIDI ones
-                            // need a look at their buses.
-                            plugin::probe_kind(&module, &class.cid)
+                            // need a look at their buses (cached, it's slow).
+                            kinds
+                                .kind(stamp.as_ref(), &cid_hex, || {
+                                    plugin::probe_kind(&module, &class.cid)
+                                })
                                 .unwrap_or(PluginKind::AudioEffect)
                         },
                     },
@@ -86,6 +93,7 @@ impl Vst3Host {
                 });
             }
         }
+        kinds.save();
         log::info!("found {} VST3 plugin classes", classes.len());
         Self {
             classes,
