@@ -970,6 +970,11 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 Each format gets its own adapter crate implementing `HostedPlugin`, keeping per-format unsafe/FFI
 code isolated from the core audio graph and MIDI routing.
 
+Plans beyond the formats — integrated first-party plugins, per-plugin panel profiles, user
+mapping of third-party plugins, and inline effect views (Ardour's LV2 inline-display
+extension) — are in `docs/design/plugins.md` (a draft; check it before working on any of these,
+and keep it in step with what's decided).
+
 ## GUI
 
 Slint (declarative `.slint` markup + Rust logic) — chosen over egui for a more native-feeling UI
