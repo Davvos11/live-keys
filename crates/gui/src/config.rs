@@ -49,11 +49,15 @@ pub struct SlotConfig {
     pub volume_db: f32,
     /// Silenced by its mute button, whatever its volume.
     pub muted: bool,
+    /// Semitones added to the notes it plays.
+    pub transpose: i8,
 }
 
 /// Bottom of the volume fader's range, treated as silence.
 pub const MIN_VOLUME_DB: f32 = -60.0;
 pub const MAX_VOLUME_DB: f32 = 6.0;
+/// The transposition range, in semitones either way.
+pub const MAX_TRANSPOSE: i32 = 48;
 
 impl Default for SlotConfig {
     fn default() -> Self {
@@ -67,11 +71,13 @@ impl Default for SlotConfig {
             velocity_high: filter.velocity_high,
             volume_db: 0.0,
             muted: false,
+            transpose: filter.transpose,
         }
     }
 }
 
-/// A slot's MIDI routing, volume and mute: what a scene recalls besides the chain.
+/// A slot's MIDI routing (transposition included), volume and mute: what a scene
+/// recalls besides the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SlotRouting {
     pub midi_inputs: u32,
@@ -82,6 +88,7 @@ pub struct SlotRouting {
     pub velocity_high: u8,
     pub volume_db: f32,
     pub muted: bool,
+    pub transpose: i8,
 }
 
 impl SlotConfig {
@@ -95,6 +102,7 @@ impl SlotConfig {
             velocity_high: self.velocity_high,
             volume_db: self.volume_db,
             muted: self.muted,
+            transpose: self.transpose,
         }
     }
 
@@ -107,6 +115,7 @@ impl SlotConfig {
         self.velocity_high = routing.velocity_high;
         self.volume_db = routing.volume_db;
         self.muted = routing.muted;
+        self.transpose = routing.transpose;
     }
 
     pub fn filter(&self) -> MidiFilter {
@@ -117,6 +126,7 @@ impl SlotConfig {
             note_high: self.note_high,
             velocity_low: self.velocity_low,
             velocity_high: self.velocity_high,
+            transpose: self.transpose,
         }
     }
 

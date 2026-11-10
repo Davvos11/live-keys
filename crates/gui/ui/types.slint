@@ -142,6 +142,8 @@ export struct SlotState {
     artwork: int,
     // Silenced by its mute button.
     muted: bool,
+    // Semitones added to the notes it plays.
+    transpose: int,
     // The instrument name of a slot that was just cleared and can still be
     // brought back (Undo); empty otherwise.
     closed-name: string,

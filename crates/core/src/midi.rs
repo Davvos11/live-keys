@@ -29,4 +29,12 @@ impl MidiEvent {
     pub fn as_slice(&self) -> &[u8] {
         &self.data[..self.len as usize]
     }
+
+    /// The same message with its first data byte (a note's number) replaced.
+    pub fn with_data1(mut self, value: u8) -> Self {
+        if self.len >= 2 {
+            self.data[1] = value & 0x7F;
+        }
+        self
+    }
 }

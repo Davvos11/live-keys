@@ -51,6 +51,8 @@ export global AppState {
     // Volume fader range; the minimum means muted.
     in property <float> min-volume-db: -60;
     in property <float> max-volume-db: 6;
+    // Transposition range, in semitones either way.
+    in property <int> max-transpose: 48;
     // The plugin whose preset browser is open, or -1; one at a time.
     in property <int> preset-browser-key: Platform.uses-mock-data ? MockData.preset-browser-key : -1;
     // Its presets matching `preset-query`, favourites first, and how many
@@ -99,6 +101,7 @@ export global AppLogic {
     // Forgets what `clear-slot` removed, leaving the slot empty.
     callback dismiss-closed(/* slot */ int);
     callback toggle-slot-mute(/* slot */ int);
+    callback set-slot-transpose(/* slot */ int, /* semitones */ int);
     callback remove-effect(/* slot */ int, /* section */ int, /* index */ int);
     callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
     // Opens `key`'s parameter window, or closes it if open.

@@ -189,8 +189,6 @@ export component SlotPanel inherits Rectangle {
     property <EffectRow> fx-plugin: root.fx-section == 0 ? root.slot.midi-effects[root.fx-index] : root.slot.audio-effects[root.fx-index];
     property <EffectRow> preset-plugin: root.preset-section < 0 ? root.slot.instrument
         : root.preset-section == 0 ? root.slot.midi-effects[root.preset-index] : root.slot.audio-effects[root.preset-index];
-    // Placeholder: not applied to the MIDI yet.
-    property <int> transpose: 0;
 
     // MIDI note number as a name, with middle C (60) as C4.
     function note-name(note: int) -> string {
@@ -522,7 +520,15 @@ export component SlotPanel inherits Rectangle {
                             horizontal-stretch: 1;
                         }
                         Stepper {
-                            value <=> root.transpose;
+                            minimum: -AppState.max-transpose;
+                            maximum: AppState.max-transpose;
+                            value: root.slot.transpose;
+                            // Stepping sets its own value, replacing the binding;
+                            // this keeps following changes from elsewhere (a
+                            // recalled scene).
+                            property <int> source: root.slot.transpose;
+                            changed source => { self.value = self.source; }
+                            changed(value) => { AppLogic.set-slot-transpose(root.slot-index, value); }
                         }
                     }
                 }

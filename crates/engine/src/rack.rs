@@ -401,8 +401,8 @@ impl Rack {
         for runtime in &mut self.slots {
             runtime.midi.clear();
             for routed in &self.midi_batch {
-                if runtime.router.accept(routed.inputs, &routed.event) {
-                    runtime.midi.push(routed.event);
+                if let Some(event) = runtime.router.route(routed.inputs, &routed.event) {
+                    runtime.midi.push(event);
                 }
             }
         }

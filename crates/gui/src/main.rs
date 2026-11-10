@@ -898,6 +898,7 @@ impl Rack {
         row.velocity_high = config.velocity_high.into();
         row.volume_db = config.volume_db;
         row.muted = config.muted;
+        row.transpose = config.transpose.into();
         self.slots.set_row_data(slot, row);
     }
 
@@ -1084,6 +1085,7 @@ fn main() -> anyhow::Result<()> {
     rack.set_all_routing(&config.borrow());
     state.set_min_volume_db(config::MIN_VOLUME_DB);
     state.set_max_volume_db(config::MAX_VOLUME_DB);
+    state.set_max_transpose(config::MAX_TRANSPOSE);
 
     let logic = app.global::<AppLogic>();
 
@@ -2062,6 +2064,28 @@ fn main() -> anyhow::Result<()> {
             let slot = slot as usize;
             rack.closed.borrow_mut()[slot] = None;
             rack.refresh_slot(&engine.borrow(), slot, None);
+        });
+    }
+
+    {
+        let config = config.clone();
+        let config_dirty = config_dirty.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_set_slot_transpose(move |slot, semitones| {
+            let slot = slot as usize;
+            let mut config = config.borrow_mut();
+            let slot_config = &mut config.slots[slot];
+            let transpose = semitones.clamp(-config::MAX_TRANSPOSE, config::MAX_TRANSPOSE) as i8;
+            if slot_config.transpose == transpose {
+                return;
+            }
+            slot_config.transpose = transpose;
+            engine.borrow_mut().set_slot_filter(slot, slot_config.filter());
+            rack.mark_scene_changed(slot);
+            let input_count = config.midi_inputs.len();
+            rack.set_routing(slot, &config.slots[slot], input_count);
+            config_dirty.set(true);
         });
     }
 

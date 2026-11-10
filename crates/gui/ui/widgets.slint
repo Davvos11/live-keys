@@ -311,6 +311,13 @@ export component Stepper inherits HorizontalLayout {
         root.changed(root.value);
     }
 
+    // Set from outside (a recalled scene): show it, unless it's being typed.
+    changed value => {
+        if (!input.has-focus) {
+            input.text = root.shown(root.value);
+        }
+    }
+
     spacing: 4px;
     alignment: end;
 

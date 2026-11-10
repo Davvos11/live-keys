@@ -62,7 +62,7 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # mute and ✕-clear-with-undo buttons, a volume knob, its presets), then three tabs — the instrument's
 # first parameters as knobs and the audio effects as squares; the slot presets (the whole chain with
 # every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
-# channel/note-range/velocity-range filter and a transpose placeholder. Up to 8 MIDI effects → an
+# channel/note-range/velocity-range filter and a transposition. Up to 8 MIDI effects → an
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
 # pinned favourites); an effect's square opens its GUI/params/presets/move/remove)
 cargo run -p live-keys-gui --release
@@ -232,16 +232,20 @@ behind format-agnostic cores:
     lock-free); `midi_ring_buffer()`/`param_ring_buffer()` are the `MidiEvent`/`ParamChange`
     instantiations actually used.
   - `MidiFilter`/`MidiRouter` (`src/filter.rs`) — a slot's keyboard zone (channel or omni,
-    inclusive note range, inclusive velocity range) and the fixed-size, allocation-free router
-    that applies it on the audio thread. **Invariant:** note-offs are routed by tracking, not
-    by the filter — the router keeps a `[u128; 16]` bitset of the (channel, note) pairs it
-    passed note-ons for, and a note-off passes iff its note-on did. So changing a filter while
-    keys are held never strands a note, and a note-off meant for another slot's zone never
-    cuts this slot's voice. Velocity applies only to note-ons; poly aftertouch follows held
-    notes; CCs/pitch bend/program change only check the channel. The filter's `inputs` mask
-    picks which of the host's MIDI inputs the slot listens to (`accept(inputs, event)` gets the
-    mask an event arrived on; `ALL_INPUTS` = every one); note-offs follow tracking here too.
-    Unit-tested.
+    inclusive note range, inclusive velocity range, transposition in semitones) and the
+    fixed-size, allocation-free router that applies it on the audio thread:
+    `route(inputs, event)` returns the event to pass on (a note transposed) or `None`.
+    **Invariant:** note-offs are routed by tracking, not by the filter — the router keeps a
+    `[u128; 16]` bitset of the (channel, note) pairs it passed note-ons for, as played, plus
+    the transposition each got (`[[i8; 128]; 16]`), and a note-off passes iff its note-on did,
+    shifted as its note-on was. So changing a filter (or the transposition) while keys are
+    held never strands a note, and a note-off meant for another slot's zone never cuts this
+    slot's voice. The note range is about the key played, before transposing; a note-on
+    transposed outside 0..=127 is dropped (and so is its note-off). Velocity applies only to
+    note-ons; poly aftertouch follows held notes and their shift; CCs/pitch bend/program
+    change only check the channel. The filter's `inputs` mask picks which of the host's MIDI
+    inputs the slot listens to (`route` gets the mask an event arrived on; `ALL_INPUTS` =
+    every one); note-offs follow tracking here too. Unit-tested.
 
 - **`crates/lv2-host`** (`live-keys-lv2-host`) — wraps `livi` (built on `lilv`) for LV2 plugin
   discovery/hosting. `Lv2Host` owns the `livi::World` and the shared real-time `Features`
@@ -661,9 +665,9 @@ behind format-agnostic cores:
   `Rack::show_knob_value` with every value change and refilled on preset loads) and the audio
   effects as an `FxGrid` of `FxSlot`s (3 a row; + appends one); tab 2 `SlotPresets`; tab 3 the
   MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
-  `RangeSlider`s, and a transpose `Stepper` — a **placeholder**: its value isn't stored or
-  applied (needs note shifting on the audio thread with note-offs following their note-on's
-  shift). Clicking an effect's square opens `EffectPopup` (its GUI, parameter window, presets,
+  `RangeSlider`s, and a transpose `Stepper` (`set-slot-transpose`: `SlotConfig.transpose`,
+  ±`MAX_TRANSPOSE` (48) semitones, into the slot's `MidiFilter`; part of `SlotRouting`, so
+  scenes recall it). Clicking an effect's square opens `EffectPopup` (its GUI, parameter window, presets,
   move left/right, remove). **Clear with undo:** `clear-slot` first saves the chain as a slot
   preset in `<data dir>/live-keys/undo/slot-<n>/` (`slot_view::snapshot`) and keeps it with the
   routing and the slot preset shown in `Rack::closed`; `undo-clear` loads it back through
@@ -706,7 +710,7 @@ behind format-agnostic cores:
   name. A folder
   `<data dir>/live-keys/scenes/<name>/` with `scene.json` (per slot: its index, mode, and,
   if it was saved as restored, a `SavedSlot`: its `config::SlotRouting` — MIDI inputs mask,
-  channel, note/velocity ranges, volume, mute — the library slot preset it showed, and its chain
+  channel, note/velocity ranges, transposition, volume, mute — the library slot preset it showed, and its chain
   subfolder) plus per saved slot a subfolder `slot-<n>/` that is a complete slot preset
   (`slot_presets::write`; saved via `slot_presets::replace_dir`, the same temp-folder swap).
   Save… and Edit share one form (`Rack::scene_form_slots`, a `SceneSlotChoice` per slot: mode
@@ -881,7 +885,7 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   Not a general audio graph: no routing between slots, no sends/parallel branches, no
   sidechains, no per-effect bypass or dry/wet (beyond what an effect offers itself), no latency
   compensation, no master/limiter stage (several loud slots can clip), no MIDI
-  transpose/velocity curves. It follows the intended **in-process** direction: every loaded plugin's audio is mixed in our own code,
+  velocity curves. It follows the intended **in-process** direction: every loaded plugin's audio is mixed in our own code,
   with only the final mix reaching `cpal` — not one independent OS audio stream per plugin
   (which would only work via OS-level mixing like PipeWire/JACK, isn't cross-platform,
   and would make routing plugin output through our own EQ/compression/mixing code

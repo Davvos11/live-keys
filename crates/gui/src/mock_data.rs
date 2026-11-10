@@ -125,7 +125,7 @@ slint_struct!(KnobRow {
     key, param_id, name, position, default_position, min_value, max_value, logarithmic, text,
 });
 slint_struct!(SlotState {
-    artwork, muted, closed_name, knobs, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
+    artwork, muted, transpose, closed_name, knobs, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
     note_high, velocity_low, velocity_high, volume_db, slot_preset_name, slot_preset_changed,
     slot_preset_folder, slot_preset_rows,
 });
