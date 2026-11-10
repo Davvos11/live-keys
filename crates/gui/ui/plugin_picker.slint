@@ -1,4 +1,4 @@
-import { Button, LineEdit, ListView, Palette, VerticalBox } from "std-widgets.slint";
+import { Button, LineEdit, ListView, Palette, Spinner, VerticalBox } from "std-widgets.slint";
 import { AppState, AppLogic, Category, PickerRow } from "globals.slint";
 
 // Which slot the picker adds to, and which category it shows.
@@ -149,13 +149,34 @@ export component PickerPanel inherits Rectangle {
             init => { self.focus(); }
             edited => { root.filter(); }
             accepted => {
-                if (AppState.picker-rows.length > 0) {
+                if (!AppState.scanning && AppState.picker-rows.length > 0) {
                     root.choose(AppState.picker-rows[0].id);
                 }
             }
         }
 
-        ListView {
+        // While plugins are being scanned, the list is empty (at startup) or about
+        // to be replaced, along with every loaded plugin (a rescan).
+        if AppState.scanning : VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            spacing: 8px;
+            HorizontalLayout {
+                alignment: center;
+                Spinner {
+                    indeterminate: true;
+                    width: 28px;
+                    height: 28px;
+                }
+            }
+            Text {
+                text: "Scanning plugins…";
+                color: gray;
+                horizontal-alignment: center;
+            }
+        }
+
+        if !AppState.scanning : ListView {
             vertical-stretch: 1;
             for row in AppState.picker-rows : PickerItem {
                 plugin: row;
@@ -164,7 +185,7 @@ export component PickerPanel inherits Rectangle {
             }
         }
 
-        if AppState.picker-rows.length == 0 : Text {
+        if !AppState.scanning && AppState.picker-rows.length == 0 : Text {
             text: search.text == "" ? "No plugins of this kind found." : "No plugins match \"\{search.text}\".";
             color: gray;
             horizontal-alignment: center;

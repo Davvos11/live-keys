@@ -587,7 +587,8 @@ behind format-agnostic cores:
   and format. **Plugin scans** run after the window is up, so it shows at once: `Scanner`
   holds the `PluginScan` and a timer that runs it in `SCAN_SLICE`s every `SCAN_TICK` (the VST3
   half is on this thread) and installs it once done — at startup with the configured extra
-  folders, later from Rescan, which `AppState.scanning` replaces by a spinner meanwhile. The
+  folders, later from Rescan, which `AppState.scanning` replaces by a spinner meanwhile (the plugin
+  picker shows one instead of its list, and is refiltered once the scan is installed). The
   plugins already loaded keep playing until a rescan is installed. The Live tab is `SLOT_COUNT` equal-width `SlotPanel`s side by side, one per
   `AppState.slots` entry (`SlotState`: `instrument: EffectRow` — key -1 when empty —
   `midi-effects`/`audio-effects: [EffectRow]`, status, routing; an `EffectRow` is one

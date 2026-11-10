@@ -1218,6 +1218,8 @@ fn main() -> anyhow::Result<()> {
             rack.forget_all();
             engine.borrow_mut().install_plugins(scan);
             refresh_plugin_list(&app, &engine.borrow(), &picker);
+            // The picker may be open, waiting for the list.
+            picker.refilter(&config.borrow().pinned_plugins);
             rack.refresh_all(&engine.borrow());
             app.global::<AppState>().set_scanning(false);
             if std::mem::take(&mut first) {
