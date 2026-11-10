@@ -1,11 +1,14 @@
 name: release
 
-# Builds the Linux binaries when a GitHub release is published and attaches them to it.
-# Re-running the workflow replaces the assets (`--clobber`).
+# When a GitHub release is published: builds the Linux binaries, attaches a tarball and a .deb
+# to the release, then rebuilds the APT repository on GitHub Pages (the gh-pages branch).
+# Re-running the workflow replaces the assets (`--clobber`). Running it by hand
+# (workflow_dispatch) only rebuilds the APT repository.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,10 +17,15 @@ env:
   # The workspace keeps debug info in release builds (for gdb); the shipped binaries don't need it.
   CARGO_PROFILE_RELEASE_DEBUG: "false"
   CARGO_PROFILE_RELEASE_STRIP: "true"
+  # How many of the latest releases the APT repository offers (older ones can still be
+  # downloaded from their release).
+  APT_KEEP_RELEASES: 5
 
 jobs:
   linux:
-    # Built on 24.04 rather than the newest Ubuntu, so the binaries also run there (glibc, lilv 0.24).
+    if: github.event_name == 'release'
+    # Built on 24.04 rather than the newest Ubuntu, so the binaries also run there (glibc, lilv
+    # 0.24), and the .deb's dependencies (from dpkg-shlibdeps) name 24.04's library packages.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -35,6 +43,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb@3
+
       - name: Build
         run: cargo build --release --locked -p live-keys -p live-keys-gui
 
@@ -49,8 +61,83 @@ jobs:
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
 
+          # The .deb from the binaries just built (metadata in crates/gui/Cargo.toml); its
+          # version is the tag's, whatever Cargo.toml says.
+          deb=$(cargo deb -p live-keys-gui --no-build --no-strip --deb-version "${TAG#v}" --output dist/)
+          # dpkg-shlibdeps leaves Depends empty, without failing, if it can't resolve the
+          # libraries (e.g. their packages aren't installed): don't ship that.
+          dpkg-deb --field "$deb" Depends | tee /dev/stderr | grep -q liblilv
+          echo "DEB=$deb" >> "$GITHUB_ENV"
+
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" "$DEB" --clobber
+
+  # Rebuilt from scratch every time out of the latest releases' .debs, so the releases are the
+  # repository's only state: a re-run or a manual run reproduces it, and the gh-pages branch is
+  # one force-pushed commit that never accumulates old packages in its history.
+  apt:
+    needs: linux
+    if: >-
+      !cancelled() && (github.event_name == 'workflow_dispatch'
+      || (needs.linux.result == 'success' && !github.event.release.prerelease))
+    runs-on: ubuntu-24.04
+    # One publish at a time, so two releases can't race on gh-pages (each run rebuilds from
+    # every release, so a run that waited loses nothing).
+    concurrency:
+      group: apt-repository
+      cancel-in-progress: false
+    steps:
+      - name: Check for the signing key
+        id: key
+        env:
+          KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=APT repository not updated::The APT_GPG_PRIVATE_KEY secret isn't set, so the APT repository wasn't published (see README / CLAUDE.md)."
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.key.outputs.present == 'true'
+
+      - name: Download the latest releases' packages
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir debs
+          gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+              --limit "$APT_KEEP_RELEASES" --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.deb' --dir debs \
+                || echo "::notice::$tag has no .deb, skipped"
+            done
+          ls -l debs
+
+      - name: Build the repository
+        if: steps.key.outputs.present == 'true'
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          command -v apt-ftparchive || { sudo apt-get update && sudo apt-get install -y apt-utils; }
+          shopt -s nullglob
+          .github/scripts/build-apt-repo.sh site debs/*.deb
+
+      - name: Publish to gh-pages
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || 'manual run' }}
+        working-directory: site
+        run: |
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "APT repository ($TAG)"
+          git push --force -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

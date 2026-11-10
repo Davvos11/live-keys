@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Live Keys
+GenericName=Plugin Host
+Comment=Play LV2 and VST3 instruments live from a MIDI keyboard
+Exec=live-keys-gui
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Midi;
+Keywords=LV2;VST3;synthesizer;MIDI;keyboard;plugin;

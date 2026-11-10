@@ -13,10 +13,28 @@ sudo apt install liblilv-dev lv2-dev libsuil-dev
 
 VST3 hosting needs no extra system packages.
 
-## Release builds
+## Installing
 
-Each GitHub release has a Linux x86_64 tarball with `live-keys-gui` (the app) and `live-keys`
-(the headless CLI). They need these libraries at run time (Ubuntu 24.04 or newer):
+On Ubuntu 24.04 or newer, add the APT repository once, and `apt upgrade` brings new releases
+from then on:
+
+```shell
+sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/live-keys.gpg https://davvos11.github.io/live-keys/live-keys.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/live-keys.gpg] https://davvos11.github.io/live-keys stable main" \
+  | sudo tee /etc/apt/sources.list.d/live-keys.list
+sudo apt update
+sudo apt install live-keys
+```
+
+This installs `live-keys-gui` (the app, also in the applications menu as Live Keys) and
+`live-keys` (the headless CLI). The repository keeps the last few releases.
+
+Alternatively, download the `.deb` from a [release](https://github.com/Davvos11/live-keys/releases)
+and install it with `sudo apt install ./live-keys_<version>_amd64.deb` (no automatic updates).
+
+Each release also has a Linux x86_64 tarball with both binaries. They need these libraries at
+run time (Ubuntu 24.04 or newer):
 
 ```shell
 sudo apt install liblilv-0-0 libsuil-0-0 libasound2t64 libfontconfig1

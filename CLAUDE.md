@@ -134,11 +134,34 @@ half-finished code.
 - **Releases** (`.github/workflows/release.yml`): publishing a GitHub release (tag `vX.Y.Z`)
   builds `live-keys-gui` and `live-keys` on `ubuntu-24.04` (stripped, without the debug info
   the release profile keeps locally) and attaches `live-keys-<tag>-linux-x86_64.tar.gz` (both
-  binaries, `LICENSE`, `README.md`) plus its `.sha256` to the release. Linux x86_64 only. Its
-  apt list is the libraries the binaries link at build time (lilv, lv2, suil, ALSA,
-  fontconfig — checked with `ldd`; Wayland/X11/GL are dlopened): a new `-sys` dependency that
-  links a system library needs its `-dev` package added there, and to the runtime list in the
-  README.
+  binaries, `LICENSE`, `README.md`) plus its `.sha256`, and a `.deb`, to the release. Linux
+  x86_64 only. Its apt list is the libraries the binaries link at build time (lilv, lv2, suil,
+  ALSA, fontconfig — checked with `ldd`; Wayland/X11/GL are dlopened): a new `-sys` dependency
+  that links a system library needs its `-dev` package added there, and to the runtime list in
+  the README.
+  - **The `.deb`** (package `live-keys`) is made by `cargo-deb` from the same build
+    (`cargo deb -p live-keys-gui --no-build`; `[package.metadata.deb]` in
+    `crates/gui/Cargo.toml`): both binaries, `crates/gui/live-keys.desktop` (theme icon
+    `audio-x-generic`, there's no icon of our own) and `LICENSE` as the copyright file. Its
+    version is the tag minus the `v`, not Cargo.toml's (which may lag; nothing checks they
+    match). `Depends` comes from `dpkg-shlibdeps` (`$auto`), so it names 24.04's library
+    packages (`libasound2t64` etc.): the package is for Ubuntu 24.04 and newer.
+  - **The APT repository** (`https://davvos11.github.io/live-keys`, suite `stable`, component
+    `main`, amd64) is the `apt` job: it downloads the `.deb`s of the latest `APT_KEEP_RELEASES`
+    (5) non-prerelease releases, builds the repository with `.github/scripts/build-apt-repo.sh`
+    (`apt-ftparchive`, signed `InRelease`/`Release.gpg`, the public key as `live-keys.gpg`
+    beside it) and force-pushes it to `gh-pages` as a single commit, which Pages serves. So the
+    releases are its only state: a re-run, or a manual run (`workflow_dispatch`, which only
+    does this job), rebuilds it whole, a deleted release drops out, and the branch never
+    collects old packages in its history (Pages from an Actions artifact would have no state
+    to keep older versions in, and would need the `github-pages` environment opened up for
+    tags). A `concurrency` group keeps two runs off `gh-pages` at once. The signing key is
+    the `APT_GPG_PRIVATE_KEY` secret (armored; `APT_GPG_PASSPHRASE` if it has one); without
+    it the job only leaves a notice and the release still gets its assets. The public key is
+    exported from that secret on each run, so nothing about the key is committed; changing
+    the key means every user re-downloads `live-keys.gpg`. Prereleases get assets but aren't
+    in the repository. The script runs locally too (`APT_GPG_PRIVATE_KEY=… build-apt-repo.sh
+    <dir> <debs…>`), e.g. to test the layout with `apt` in an `ubuntu:24.04` container.
 - **Renovate** (`renovate.json`): the Mend Renovate app with the developer's shared preset
   (`github>Davvos11/.github`, the `dot-github` repo): weekly on Saturday morning, patch/digest
   updates and lockfile maintenance grouped and automerged, minors grouped in one PR, majors on
