@@ -343,7 +343,8 @@ version of Part B's "Customise panel".
     { "id": "vib-mode", "name": "Vibrato mode", "label": "Mode", "widget": "knob", "target": { "setbfree": "vibrato.knob" },
       "choices": ["V1", "C1", "V2", "C2", "V3", "C3"] },   // a stepped knob, like a B3's selector
     { "id": "leslie", "label": "Leslie", "widget": "lever", "target": { "setbfree": "rotary.speed-preset" },
-      "choices": [{ "label": "Slow", "value": 0 }, { "label": "Stop", "value": 64 }, { "label": "Fast", "value": 127 }] },
+      // Fast on the left, as setBfree's own lever (and a B3's half-moon) has it
+      "choices": [{ "label": "Fast", "value": 127 }, { "label": "Stop", "value": 64 }, { "label": "Slow", "value": 0 }] },
     { "id": "drive", "label": "Drive", "text": "On", "widget": "switch", "target": { "setbfree": "overdrive.enable" } },
     { "id": "drive-amt", "name": "Drive amount", "label": "Amount", "widget": "knob", "target": { "setbfree": "overdrive.character" } },
     { "id": "reverb", "label": "Reverb", "widget": "knob", "target": { "setbfree": "reverb.mix" } },

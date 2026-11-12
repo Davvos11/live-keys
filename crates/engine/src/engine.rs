@@ -686,18 +686,23 @@ impl Engine {
 
     /// Sets setBfree control `function` ("upper.drawbar16", "percussion.enable")
     /// of the plugin with `key` to `value` (0..=127), by its control message, and
-    /// records it (setBfree doesn't echo what the host sends). Nothing if the
-    /// plugin isn't setBfree. An open setBfree GUI doesn't follow.
-    pub fn send_setbfree(&mut self, key: PluginKey, function: &str, value: u8) {
-        let Some(meta) = self.plugin_mut(key) else { return };
+    /// records it. Returns the messages as the plugin would report them on its
+    /// `notify` port, for an open GUI of the plugin to show the change (setBfree
+    /// doesn't report what the host sets). Empty if the plugin isn't setBfree.
+    pub fn send_setbfree(&mut self, key: PluginKey, function: &str, value: u8) -> Vec<PortEvent> {
+        self.send_setbfree_inner(key, function, value).unwrap_or_default()
+    }
+
+    fn send_setbfree_inner(&mut self, key: PluginKey, function: &str, value: u8) -> Option<Vec<PortEvent>> {
+        let meta = self.plugin_mut(key)?;
         let (Some(setbfree), PluginEditor::Lv2 { ui_channel: Some(channel), .. }) =
             (&mut meta.setbfree, &mut meta.editor)
         else {
-            return;
+            return None;
         };
-        if let Some(event) = setbfree.set(function, value) {
-            let _ = channel.to_plugin.push(event);
-        }
+        let (to_plugin, for_gui) = setbfree.set(function, value)?;
+        let _ = channel.to_plugin.push(to_plugin);
+        Some(for_gui)
     }
 
     /// The last known value of setBfree control `function` of the plugin with

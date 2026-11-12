@@ -13,7 +13,7 @@ pub use setbfree::SETBFREE_URI;
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
 pub use live_keys_core::{ALL_INPUTS, MidiEvent, MidiFilter};
 pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo};
-pub use live_keys_lv2_host::{GuiLease, GuiLeases, livi, lv2_raw};
+pub use live_keys_lv2_host::{GuiLease, GuiLeases, PortEvent, livi, lv2_raw};
 pub use live_keys_vst3_host::{EditCallback, Vst3Controller};
 pub use live_keys_clap_host::ClapController;
 pub use midi::{MAX_MIDI_INPUTS, find_midi_port, list_midi_ports, midi_device_name};

@@ -302,13 +302,14 @@ export component DrawbarSection inherits Rectangle {
     in property <[DrawbarCell]> drawbars;
     callback set-level(/* drawbar */ int, /* level */ int);
 
-    property <length> inset: 3px;
+    // Spaced evenly: the same gap between the bars and at either end.
+    property <length> bar-width: 24px;
+    property <length> gap: max(0px, (root.width - root.drawbars.length * root.bar-width) / (root.drawbars.length + 1));
 
     height: 6px + 8 * 11px + 12px;
 
     for bar[index] in root.drawbars : Drawbar {
-        x: root.inset + (root.drawbars.length <= 1 ? 0px
-            : index * (root.width - 2 * root.inset - self.width) / (root.drawbars.length - 1));
+        x: root.gap + index * (root.bar-width + root.gap);
         y: 0;
         level: bar.level;
         colour: bar.colour;

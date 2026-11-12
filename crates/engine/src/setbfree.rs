@@ -23,6 +23,21 @@ const ATOM: &str = "http://lv2plug.in/ns/ext/atom#";
 /// The function setBfree reports before re-sending everything after a state
 /// restore: "forget what you knew".
 const REINIT: &str = "special.reinit";
+const SPEED_PRESET: &str = "rotary.speed-preset";
+const SPEED_SELECT: &str = "rotary.speed-select";
+
+/// The `rotary.speed-select` setBfree derives from a `rotary.speed-preset`
+/// value: the preset (`v / 43`: slow, stop, fast) picks horn and drum speeds
+/// (both slow, both stopped, both fast: 4, 0, 8 as `horn·3 + drum`), reported
+/// as `ceil(n · 15.875)` (b_whirl/whirl.c).
+fn speed_select(preset: u8) -> u8 {
+    let n: f32 = match preset / 43 {
+        0 => 4.0,
+        1 => 0.0,
+        _ => 8.0,
+    };
+    (n * 15.875).ceil() as u8
+}
 
 /// The URIDs the messages use, from the instance's own URID map.
 #[derive(Clone, Copy)]
@@ -60,6 +75,8 @@ pub(crate) struct Setbfree {
     urids: Urids,
     /// The `control` input's port index.
     control_port: u32,
+    /// The `notify` output's port index.
+    notify_port: u32,
     values: HashMap<String, u8>,
 }
 
@@ -69,10 +86,11 @@ impl Setbfree {
         if plugin.uri() != SETBFREE_URI {
             return None;
         }
-        let control_port = plugin.ports().find(|port| port.symbol == "control")?.index.0 as u32;
+        let port = |symbol: &str| Some(plugin.ports().find(|port| port.symbol == symbol)?.index.0 as u32);
         Some(Self {
             urids: Urids::new(features),
-            control_port,
+            control_port: port("control")?,
+            notify_port: port("notify")?,
             values: HashMap::new(),
         })
     }
@@ -83,15 +101,32 @@ impl Setbfree {
         writer.finish()
     }
 
-    /// The control message setting `function` to `value`, recorded as sent.
-    pub(crate) fn set(&mut self, function: &str, value: u8) -> Option<PortEvent> {
+    /// The control message setting `function` to `value`, recorded as sent:
+    /// for the plugin's `control` input, and the messages for its GUI, as the
+    /// plugin reports them on `notify` (it doesn't echo what the host sets).
+    /// Usually the same message; `rotary.speed-preset`, which setBfree's GUI
+    /// ignores, also gets the `rotary.speed-select` it derives (the GUI's
+    /// horn and drum levers).
+    pub(crate) fn set(&mut self, function: &str, value: u8) -> Option<(PortEvent, Vec<PortEvent>)> {
         let value = value.min(127);
-        let mut writer = ObjectWriter::new(self.control_port, self.urids.object, self.urids.controlmsg);
+        let to_plugin = self.message(self.control_port, function, value)?;
+        let mut for_gui = vec![self.message(self.notify_port, function, value)?];
+        self.values.insert(function.to_string(), value);
+        if function == SPEED_PRESET {
+            let select = speed_select(value);
+            for_gui.push(self.message(self.notify_port, SPEED_SELECT, select)?);
+            self.values.insert(SPEED_SELECT.to_string(), select);
+        }
+        Some((to_plugin, for_gui))
+    }
+
+    /// A control message for `port`.
+    fn message(&self, port: u32, function: &str, value: u8) -> Option<PortEvent> {
+        let mut writer = ObjectWriter::new(port, self.urids.object, self.urids.controlmsg);
         let mut key = function.as_bytes().to_vec();
         key.push(0);
         writer.property(self.urids.controlkey, self.urids.string, &key)?;
         writer.property(self.urids.controlval, self.urids.int, &i32::from(value).to_ne_bytes())?;
-        self.values.insert(function.to_string(), value);
         Some(writer.finish())
     }
 
@@ -184,5 +219,18 @@ impl ObjectWriter {
     fn finish(&mut self) -> PortEvent {
         self.event.size = self.len as u32;
         self.event
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::speed_select;
+
+    #[test]
+    fn speed_preset_to_select() {
+        // Slow, stop, fast: horn and drum both slow, both stopped, both fast.
+        assert_eq!([0, 64, 127].map(speed_select), [64, 0, 127]);
+        // The preset's ranges are v / 43.
+        assert_eq!([42, 43, 85, 86].map(speed_select), [64, 0, 0, 127]);
     }
 }

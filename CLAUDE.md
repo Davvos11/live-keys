@@ -646,7 +646,10 @@ behind format-agnostic cores:
   queues an empty `sb3:uiinit` on its GUI channel at once — setBfree reports nothing before
   that, then dumps every function set so far — so every load (stream restarts included) fills
   the values. `send_setbfree(key, function, value)` queues a control message and records it
-  (setBfree doesn't echo the host's); `drain_ui_events` decodes the plugin's reports into the
+  (setBfree doesn't echo the host's), returning the messages as the plugin would report them
+  on `notify`, which the GUI passes to setBfree's open GUI so that follows host edits — for
+  `rotary.speed-preset` also the `rotary.speed-select` it implies, since setBfree's GUI draws
+  its Leslie levers from that and ignores the preset; `drain_ui_events` decodes the plugin's reports into the
   record before forwarding them (`special.reinit`, sent on a state restore before a full dump,
   clears it; other `special.*` keys are ignored) and marks the plugin for
   `take_setbfree_changes`; `send_ui_atom` records setBfree's own GUI's messages the same way.
@@ -742,7 +745,8 @@ behind format-agnostic cores:
   `Profiles::panel(plugin id, params)` gives a `Panel` — an optional fixed section of drawbars,
   a pool of `Control`s (id, name, label, switch text, `Widget` knob/switch/lever/drawbar,
   `Target::Param(id)` or `Target::Setbfree(function)`, `choices`, `Overrides`
-  min/max/steps/invert/default) and a row of `ROW_LEN` (5) pool indices. `Control::read`/`write`
+  min/max/steps/invert/default) and a row of `ROW_LEN` (5) cells (fewer if the pool is smaller), each a pool index or
+  `None` (empty). `Control::read`/`write`
   convert between a target's value and the UI's `CellValue` (`Position` 0..1 — log-scaled
   through `slot_view::position`/`knob_value` —, `On`, or `Index`: the nearest choice, or a
   drawbar's level 0..=8; setBfree's drawbars are inverted, `level = rint((127 − v)·8/127)`), and
@@ -751,11 +755,12 @@ behind format-agnostic cores:
   there); a control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
   out if the plugin lacks it. User profiles are `<data dir>/live-keys/profiles/*.json` (same
   format, replacing a shipped one wholesale), and `rows.json` there is the user's row per
-  plugin (`UserRow`: control ids, plus `param:<id>` controls added via "More parameters…",
+  plugin (`UserRow`: a control id or `null` per cell, plus `param:<id>` controls added via "More parameters…",
   which stay in the pool), written by `set_cell` (swaps if the control is in another cell)
-  and removed by `reset_row`. A plugin without a profile gets every parameter
-  (`param_control`) as its pool and its first five continuous ones as its row; rows whose
-  controls went missing are filled from the default, then the pool. Unit-tested (value
+  and `clear_cell`, and removed by `reset_row`. A plugin without a profile gets every parameter
+  (`param_control`) as its pool and its first five continuous ones as its row; a default row
+  whose controls went missing is filled from the default, then the pool; a user's row keeps
+  its cells where they are, a missing control leaving its cell empty. Unit-tested (value
   mappings, row resolution and swapping, the shipped files parsing). `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
   `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
@@ -811,10 +816,12 @@ behind format-agnostic cores:
   [PanelCell]`): a `LabelledKnob` (position 0..1; `steps` for stepped parameters), a stepped
   knob (a control with choices: snaps to them, shows the option's label), a `Toggle` (the
   design's switch) or a `Lever` (2–3 options: click a part, drag sideways or up/down, scroll).
-  A short row is padded with empty cells (`widget` -1) that fill the row's next cell.
+  An empty cell (`widget` -1) shows a + that opens its menu. The tab spaces its parts (the
+  drawbars, the row, the FX grid) evenly down the slot (`LayoutAlignment.space-evenly`, the
+  content at least the visible height), and the drawbars and the row's cells evenly across.
   Right-clicking a cell (`ContextMenuArea`; any click on an empty one) lists "Show here" with
   the pool (`SlotState.pool: [PanelPoolRow]` — at most 16 plus the row's; other cells' greyed,
-  this one's ticked; `set-panel-cell`), "More parameters…" (`ParamSearchPopup`: a search
+  this one's ticked — choosing it again empties the cell; `set-panel-cell`), "More parameters…" (`ParamSearchPopup`: a search
   over every parameter, filtered in Rust — `open-param-search`/`filter-param-search`/
   `pick-param-search`, `AppState.param-search-rows`) and "Reset row" (`reset-panel-row`);
   rows are per plugin (`Profiles::set_cell`/`reset_row`), so `Rack::rebuild_panels` rebuilds

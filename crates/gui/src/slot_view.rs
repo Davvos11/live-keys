@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PresetInfo};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
-use crate::profiles::{CellValue, Control, DrawbarColour, Panel, ROW_LEN, Target, Widget};
+use crate::profiles::{CellValue, Control, DrawbarColour, Panel, Target, Widget};
 use crate::{DrawbarCell, PanelCell, PanelPoolRow, config, slot_presets};
 
 /// How many pool controls a cell's context menu lists at most (besides those in
@@ -78,22 +78,17 @@ pub fn knob_value(param: &ParamInfo, position: f32) -> f32 {
     }
 }
 
-/// The row of `panel` for the plugin with `key`, at current values. Padded with
-/// empty cells (`widget` -1, to fill from their menu) up to [`ROW_LEN`] while
-/// the plugin has more controls to offer than the row shows.
+/// The row of `panel` for the plugin with `key`, at current values; an empty
+/// cell has `widget` -1 (filled from its menu).
 pub fn panel_cells(engine: &Engine, key: PluginKey, panel: &Panel) -> Vec<PanelCell> {
-    let mut cells: Vec<PanelCell> = panel
+    panel
         .row
         .iter()
-        .filter_map(|&index| panel.pool.get(index))
-        .map(|control| panel_cell(engine, key, control))
-        .collect();
-    let params = engine.plugin(key).map_or(0, |meta| meta.params.len());
-    let offered = ROW_LEN.min(panel.pool.len().max(params));
-    if cells.len() < offered {
-        cells.resize(offered, PanelCell { widget: -1, ..Default::default() });
-    }
-    cells
+        .map(|cell| match cell.and_then(|index| panel.pool.get(index)) {
+            Some(control) => panel_cell(engine, key, control),
+            None => PanelCell { widget: -1, ..Default::default() },
+        })
+        .collect()
 }
 
 /// `control`'s cell at its current value.
@@ -202,7 +197,7 @@ pub fn panel_pool(panel: &Panel) -> Vec<PanelPoolRow> {
         .iter()
         .enumerate()
         .filter_map(|(index, control)| {
-            let cell = panel.row.iter().position(|&shown| shown == index);
+            let cell = panel.row.iter().position(|&shown| shown == Some(index));
             (index < MENU_POOL_MAX || cell.is_some()).then(|| PanelPoolRow {
                 index: index as i32,
                 name: control.name.as_str().into(),

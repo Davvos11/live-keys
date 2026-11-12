@@ -27,7 +27,7 @@
         { "label": "C2", "value": 69 }, { "label": "V3", "value": 92 }, { "label": "C3", "value": 115 }
       ] },
     { "id": "leslie", "label": "Leslie", "widget": "lever", "target": { "setbfree": "rotary.speed-preset" },
-      "choices": [{ "label": "Slow", "value": 0 }, { "label": "Stop", "value": 64 }, { "label": "Fast", "value": 127 }] },
+      "choices": [{ "label": "Fast", "value": 127 }, { "label": "Stop", "value": 64 }, { "label": "Slow", "value": 0 }] },
     { "id": "drive", "label": "Drive", "text": "On", "widget": "switch", "target": { "setbfree": "overdrive.enable" } },
     { "id": "drive-amt", "name": "Drive amount", "label": "Amount", "widget": "knob",
       "target": { "setbfree": "overdrive.character" } },

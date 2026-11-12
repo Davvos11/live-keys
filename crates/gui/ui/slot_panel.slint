@@ -381,15 +381,18 @@ export component SlotPanel inherits Rectangle {
             clip: true;
             flick := Flickable {
                 mouse-drag-pan-enabled: false;
-                content-height: content.preferred-height;
+                content-height: content.height;
                 content := VerticalLayout {
                     width: flick.width;
-                    height: self.preferred-height;
+                    // The first tab spreads its parts (drawbars, row, effects)
+                    // evenly over the slot's height; across, each part spaces
+                    // its own items evenly, so it has no side padding (the row
+                    // of five 56 px cells only just fits the narrowest slot).
+                    height: root.tab == 0 ? max(self.preferred-height, flick.height) : self.preferred-height;
+                    alignment: root.tab == 0 ? LayoutAlignment.space-evenly : LayoutAlignment.start;
                     padding: 10px;
-                    // The first tab's row of five 56 px cells only just fits
-                    // the narrowest slot (the design starts it 5 px in).
-                    padding-left: root.tab == 0 ? 5px : 10px;
-                    padding-right: root.tab == 0 ? 5px : 14px;
+                    padding-left: root.tab == 0 ? 0px : 10px;
+                    padding-right: root.tab == 0 ? 0px : 14px;
                     spacing: 12px;
 
                     if root.slot.status != "" : Text {
@@ -407,7 +410,7 @@ export component SlotPanel inherits Rectangle {
                     }
                     if root.tab == 0 && root.has-instrument && root.slot.cells.length > 0 : HorizontalLayout {
                         spacing: 2px;
-                        alignment: start;
+                        alignment: space-evenly;
                         for cell[index] in root.slot.cells : PanelCellView {
                             cell: cell;
                             cell-index: index;

@@ -1043,7 +1043,7 @@ impl Rack {
         let control = if drawbar {
             panel.drawbars.get(cell)?
         } else {
-            panel.pool.get(*panel.row.get(cell)?)?
+            panel.pool.get((*panel.row.get(cell)?)?)?
         };
         Some((*key, control.clone()))
     }
@@ -1054,7 +1054,7 @@ impl Rack {
         if control.read(&engine.borrow(), key) == value {
             return;
         }
-        control.write(&mut engine.borrow_mut(), key, value);
+        let for_gui = control.write(&mut engine.borrow_mut(), key, value);
         let engine = engine.borrow();
         match control.target {
             profiles::Target::Param(param_id) => {
@@ -1062,7 +1062,16 @@ impl Rack {
                 self.show_param_value(&engine, key, param_id, value);
                 self.notify_ui(key, param_id, value);
             }
-            profiles::Target::Setbfree(_) => self.refresh_panel_of(&engine, key),
+            profiles::Target::Setbfree(_) => {
+                // setBfree doesn't report what the host sets, so its open GUI
+                // gets the change as if the plugin had.
+                if let Some(OpenEditor::Lv2(handle)) = self.open_uis.borrow().get(&key) {
+                    for event in for_gui {
+                        handle.notify(PortMessage::Atom { port: event.port, atom: event.to_atom() });
+                    }
+                }
+                self.refresh_panel_of(&engine, key);
+            }
         }
         self.mark_changed(&engine, key);
     }
@@ -1669,10 +1678,19 @@ fn main() -> anyhow::Result<()> {
             let Some(meta) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref()) else {
                 return;
             };
-            // The empty cells after a short row all fill its next cell.
-            let row_len = rack.panels.borrow()[slot].as_ref().map_or(0, |panel| panel.panel.row.len());
-            let cell = cell.min(row_len);
-            let result = rack.profiles.borrow_mut().set_cell(&meta.id, &meta.params, cell, control_id);
+            // Choosing the control a cell already shows empties the cell.
+            let shown = rack.panels.borrow()[slot].as_ref().is_some_and(|panel| {
+                let panel = &panel.panel;
+                panel.row.get(cell).copied().flatten().and_then(|index| panel.pool.get(index))
+                    .is_some_and(|control| control.id == control_id)
+            });
+            let mut profiles = rack.profiles.borrow_mut();
+            let result = if shown {
+                profiles.clear_cell(&meta.id, &meta.params, cell)
+            } else {
+                profiles.set_cell(&meta.id, &meta.params, cell, control_id)
+            };
+            drop(profiles);
             match result {
                 Ok(()) => rack.rebuild_panels(&engine, &meta.id),
                 Err(err) => {
