@@ -1,7 +1,7 @@
 name: release
 
-# When a GitHub release is published: builds the Linux binaries, attaches a tarball and a .deb
-# to the release, then rebuilds the APT repository on GitHub Pages (the gh-pages branch).
+# When a GitHub release is published: builds the Linux binaries, attaches a tarball and two .debs
+# (with and without the APT repository as a source) to the release, then rebuilds the APT repository on GitHub Pages (the gh-pages branch).
 # Re-running the workflow replaces the assets (`--clobber`). Running it by hand
 # (workflow_dispatch) only rebuilds the APT repository.
 
@@ -66,19 +66,31 @@ jobs:
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
 
-          # The .deb from the binaries just built (metadata in crates/gui/Cargo.toml); its
-          # version is the tag's, whatever Cargo.toml says.
-          deb=$(cargo deb -p live-keys-gui --no-build --no-strip --deb-version "${TAG#v}" --output dist/)
-          # dpkg-shlibdeps leaves Depends empty, without failing, if it can't resolve the
-          # libraries (e.g. their packages aren't installed): don't ship that.
-          dpkg-deb --field "$deb" Depends | tee /dev/stderr | grep -q liblilv
+          # The .debs from the binaries just built (metadata in crates/gui/Cargo.toml); their
+          # version is the tag's, whatever Cargo.toml says. The same package twice: the
+          # apt-repository variant also adds the APT repository as a source (and its key), the
+          # other is told apart by its file name only. The apt job takes `live-keys_*_amd64.deb`.
+          version=${TAG#v}
+          deb="dist/live-keys_${version}_amd64.deb"
+          deb_no_repo="dist/live-keys_${version}_amd64-no-repo.deb"
+          cargo deb -p live-keys-gui --no-build --no-strip --deb-version "$version" \
+            --variant apt-repository --output "$deb"
+          cargo deb -p live-keys-gui --no-build --no-strip --deb-version "$version" \
+            --output "$deb_no_repo"
+          for f in "$deb" "$deb_no_repo"; do
+            # dpkg-shlibdeps leaves Depends empty, without failing, if it can't resolve the
+            # libraries (e.g. their packages aren't installed): don't ship that.
+            dpkg-deb --field "$f" Depends | tee /dev/stderr | grep -q liblilv
+          done
+          dpkg-deb --contents "$deb" | grep -q '/etc/apt/sources.list.d/live-keys.sources$'
           echo "DEB=$deb" >> "$GITHUB_ENV"
+          echo "DEB_NO_REPO=$deb_no_repo" >> "$GITHUB_ENV"
 
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" "$DEB" --clobber
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" "$DEB" "$DEB_NO_REPO" --clobber
 
   # Rebuilt from scratch every time out of the latest releases' .debs, so the releases are the
   # repository's only state: a re-run or a manual run reproduces it, and the gh-pages branch is
@@ -109,6 +121,25 @@ jobs:
       - uses: actions/checkout@v7
         if: steps.key.outputs.present == 'true'
 
+      # The packages ship packaging/live-keys.gpg as the repository's key: it must be the key
+      # the repository is signed with.
+      - name: Check the committed public key
+        if: steps.key.outputs.present == 'true'
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          gpg --batch --quiet --import <<<"$APT_GPG_PRIVATE_KEY"
+          secret=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          committed=$(gpg --batch --with-colons --show-keys packaging/live-keys.gpg | awk -F: '$1 == "fpr" { print $10; exit }')
+          gpgconf --kill gpg-agent || true
+          rm -rf "$GNUPGHOME"
+          if [ "$secret" != "$committed" ]; then
+            echo "::error::packaging/live-keys.gpg ($committed) isn't the signing key ($secret)"
+            exit 1
+          fi
+
       - name: Download the latest releases' packages
         if: steps.key.outputs.present == 'true'
         env:
@@ -118,7 +149,8 @@ jobs:
           gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
               --limit "$APT_KEEP_RELEASES" --json tagName --jq '.[].tagName' |
             while read -r tag; do
-              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.deb' --dir debs \
+              # The variant with the repository as a source, not the -no-repo one.
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'live-keys_*_amd64.deb' --dir debs \
                 || echo "::notice::$tag has no .deb, skipped"
             done
           ls -l debs

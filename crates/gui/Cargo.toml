@@ -52,3 +52,14 @@ assets = [
     ["ui/assets/icons/LICENSE", "usr/share/doc/live-keys/Lucide-LICENSE.txt", "644"],
     ["ui/assets/photos/CREDITS.md", "usr/share/doc/live-keys/photo-credits.md", "644"],
 ]
+
+# The same package, plus the APT repository as a source (and its key), so later releases come
+# with `apt upgrade`: `cargo deb --variant apt-repository`. The release attaches both .debs;
+# the APT repository serves this one, so the source stays configured.
+[package.metadata.deb.variants.apt-repository]
+name = "live-keys"
+merge-assets.append = [
+    ["../../packaging/live-keys.gpg", "usr/share/keyrings/live-keys.gpg", "644"],
+    ["../../packaging/live-keys.sources", "etc/apt/sources.list.d/live-keys.sources", "644"],
+]
+conf-files = ["/etc/apt/sources.list.d/live-keys.sources"]

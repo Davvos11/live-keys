@@ -1,0 +1,8 @@
+# The Live Keys APT repository, installed by the live-keys package so later releases come with
+# `apt upgrade`. Delete this file to stop that; upgrades won't bring it back.
+Types: deb
+URIs: https://davvos11.github.io/live-keys
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/live-keys.gpg

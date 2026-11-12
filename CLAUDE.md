@@ -152,20 +152,28 @@ half-finished code.
   builds `live-keys-gui` and `live-keys` on `ubuntu-24.04` (stripped, without the debug info
   the release profile keeps locally) and attaches `live-keys-<tag>-linux-x86_64.tar.gz` (both
   binaries, `LICENSE`, `README.md`, the bundled assets' licences in `licenses/`) plus its
-  `.sha256`, and a `.deb`, to the release. Linux
+  `.sha256`, and two `.deb`s, to the release. Linux
   x86_64 only. Its apt list is the libraries the binaries link at build time (lilv, lv2, suil,
   ALSA, fontconfig — checked with `ldd`; Wayland/X11/GL are dlopened): a new `-sys` dependency
   that links a system library needs its `-dev` package added there, and to the runtime list in
   the README.
-  - **The `.deb`** (package `live-keys`) is made by `cargo-deb` from the same build
+  - **The `.deb`s** (package `live-keys`) are made by `cargo-deb` from the same build
     (`cargo deb -p live-keys-gui --no-build`; `[package.metadata.deb]` in
     `crates/gui/Cargo.toml`): both binaries, `crates/gui/live-keys.desktop` (theme icon
-    `audio-x-generic`, there's no icon of our own) and `LICENSE` as the copyright file. Its
+    `audio-x-generic`, there's no icon of our own) and `LICENSE` as the copyright file. Two
+    variants, same package name and version, told apart by file name only:
+    `live-keys_<ver>_amd64.deb` (`--variant apt-repository`, the one the README points to)
+    also installs the APT repository as a source — `packaging/live-keys.sources` (deb822) as
+    `/etc/apt/sources.list.d/live-keys.sources`, a conffile, so a user deleting it opts out
+    for good, and `packaging/live-keys.gpg` (the repository's public key, binary) as
+    `/usr/share/keyrings/live-keys.gpg` — and `live-keys_<ver>_amd64-no-repo.deb` doesn't.
+    cargo-deb names both after the package, so the workflow passes each its file name. Their
     version is the tag minus the `v`, not Cargo.toml's (which may lag; nothing checks they
     match). `Depends` comes from `dpkg-shlibdeps` (`$auto`), so it names 24.04's library
     packages (`libasound2t64` etc.): the package is for Ubuntu 24.04 and newer.
   - **The APT repository** (`https://davvos11.github.io/live-keys`, suite `stable`, component
-    `main`, amd64) is the `apt` job: it downloads the `.deb`s of the latest `APT_KEEP_RELEASES`
+    `main`, amd64) is the `apt` job: it downloads the `live-keys_*_amd64.deb`s (the with-repository
+    variant, so installing from the repository keeps the source) of the latest `APT_KEEP_RELEASES`
     (5) non-prerelease releases, builds the repository with `.github/scripts/build-apt-repo.sh`
     (`apt-ftparchive`, signed `InRelease`/`Release.gpg`, the public key as `live-keys.gpg`
     beside it) and force-pushes it to `gh-pages` as a single commit, which Pages serves. So the
@@ -176,8 +184,11 @@ half-finished code.
     tags). A `concurrency` group keeps two runs off `gh-pages` at once. The signing key is
     the `APT_GPG_PRIVATE_KEY` secret (armored; `APT_GPG_PASSPHRASE` if it has one); without
     it the job only leaves a notice and the release still gets its assets. The public key is
-    exported from that secret on each run, so nothing about the key is committed; changing
-    the key means every user re-downloads `live-keys.gpg`. Prereleases get assets but aren't
+    exported from that secret on each run (served as `live-keys.gpg`) and also committed as
+    `packaging/live-keys.gpg`, which the packages ship; the job fails if their fingerprints
+    differ. Changing the key means committing the new public key and every user getting a
+    new package (from a release; a repository signed by the new key won't verify with the
+    old one). Prereleases get assets but aren't
     in the repository. The script runs locally too (`APT_GPG_PRIVATE_KEY=… build-apt-repo.sh
     <dir> <debs…>`), e.g. to test the layout with `apt` in an `ubuntu:24.04` container.
 - **Renovate** (`renovate.json`): the Mend Renovate app with the developer's shared preset

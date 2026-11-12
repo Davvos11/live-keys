@@ -15,23 +15,22 @@ VST3 and CLAP hosting need no extra system packages.
 
 ## Installing
 
-On Ubuntu 24.04 or newer, add the APT repository once, and `apt upgrade` brings new releases
-from then on:
+On Ubuntu 24.04 or newer, download `live-keys_<version>_amd64.deb` from the
+[latest release](https://github.com/Davvos11/live-keys/releases/latest) and install it:
 
 ```shell
-sudo mkdir -p /etc/apt/keyrings
-sudo curl -fsSLo /etc/apt/keyrings/live-keys.gpg https://davvos11.github.io/live-keys/live-keys.gpg
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/live-keys.gpg] https://davvos11.github.io/live-keys stable main" \
-  | sudo tee /etc/apt/sources.list.d/live-keys.list
-sudo apt update
-sudo apt install live-keys
+sudo apt install ./live-keys_<version>_amd64.deb
 ```
 
-This installs `live-keys-gui` (the app, also in the applications menu as Live Keys) and
-`live-keys` (the headless CLI). The repository keeps the last few releases.
+Later versions then come with `apt upgrade`: the package adds this project's APT repository
+(`/etc/apt/sources.list.d/live-keys.sources` and its key in `/usr/share/keyrings/`). Delete that
+`.sources` file to turn updates off; `live-keys_<version>_amd64-no-repo.deb` is the same package
+without it. If you added the repository by hand before, remove
+`/etc/apt/sources.list.d/live-keys.list` and `/etc/apt/keyrings/live-keys.gpg`, or `apt update`
+fails on the conflicting entries.
 
-Alternatively, download the `.deb` from a [release](https://github.com/Davvos11/live-keys/releases)
-and install it with `sudo apt install ./live-keys_<version>_amd64.deb` (no automatic updates).
+This installs `live-keys-gui` (the app, also in the applications menu as Live Keys) and
+`live-keys` (the headless CLI).
 
 Each release also has a Linux x86_64 tarball with both binaries. They need these libraries at
 run time (Ubuntu 24.04 or newer):
