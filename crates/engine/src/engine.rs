@@ -6,6 +6,7 @@ use live_keys_core::{
 };
 use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
+use live_keys_clap_host::{ClapController, ClapHost, ClapScan};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,9 @@ pub enum PluginEditor {
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
+    /// The plugin's main-thread half, which [`Engine::idle_plugins`] pumps. Its
+    /// GUI is created from it.
+    Clap(ClapController),
 }
 
 /// The main-thread view of one loaded plugin, captured at load time since the
@@ -222,19 +226,21 @@ impl StateSource<'_> {
 /// (CLI, GUI) shares one implementation instead of drifting apart.
 const NOT_SCANNED: &str = "plugins haven't been scanned yet";
 
-/// Both formats' hosts, from one [`PluginScan`].
+/// Every format's host, from one [`PluginScan`].
 struct Hosts {
     lv2: Lv2Host,
     vst3: Vst3Host,
+    clap: ClapHost,
 }
 
-/// A plugin scan in progress: LV2 on a thread of its own, VST3 a step at a time
-/// in [`PluginScan::step`] on the thread that will use the plugins (see
-/// [`Vst3Scan`]), so a GUI can keep drawing while it runs. Installed with
-/// [`Engine::install_plugins`].
+/// A plugin scan in progress: LV2 on a thread of its own, VST3 and CLAP a step
+/// at a time in [`PluginScan::step`] on the thread that will use the plugins (see
+/// [`Vst3Scan`], [`ClapScan`]), so a GUI can keep drawing while it runs.
+/// Installed with [`Engine::install_plugins`].
 pub struct PluginScan {
     lv2: std::thread::JoinHandle<Lv2Scan>,
     vst3: Vst3Scan,
+    clap: ClapScan,
 }
 
 impl PluginScan {
@@ -251,21 +257,24 @@ impl PluginScan {
                 .spawn(Lv2Scan::run)
                 .expect("failed to spawn the LV2 scan thread"),
             vst3: Vst3Scan::new(extra_dirs),
+            clap: ClapScan::new(extra_dirs),
         }
     }
 
-    /// Does one step of the VST3 scan; `true` once the whole scan is done.
+    /// Does one step of the VST3 scan, or once that's done the CLAP one; `true`
+    /// once the whole scan is done.
     pub fn step(&mut self) -> bool {
-        !self.vst3.step() && self.lv2.is_finished()
+        !self.vst3.step() && !self.clap.step() && self.lv2.is_finished()
     }
 
     fn finish(self, max_block_size: usize) -> Hosts {
         let vst3 = self.vst3.finish(max_block_size);
+        let clap = self.clap.finish(max_block_size);
         let lv2 = match self.lv2.join() {
             Ok(scan) => scan,
             Err(panic) => std::panic::resume_unwind(panic),
         };
-        Hosts { lv2: Lv2Host::from_scan(lv2, max_block_size), vst3 }
+        Hosts { lv2: Lv2Host::from_scan(lv2, max_block_size), vst3, clap }
     }
 }
 
@@ -313,11 +322,12 @@ impl Engine {
         }
     }
 
-    /// Every plugin found by the last scan, LV2 first, then VST3.
+    /// Every plugin found by the last scan, LV2 first, then VST3, then CLAP.
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
         let Some(hosts) = &self.hosts else { return Vec::new() };
         let mut plugins = hosts.lv2.list_plugins();
         plugins.extend(hosts.vst3.list_plugins());
+        plugins.extend(hosts.clap.list_plugins());
         plugins
     }
 
@@ -501,6 +511,8 @@ impl Engine {
     /// can deallocate or block. Called on every structural change; hosts may also
     /// call it periodically so a removed plugin doesn't linger until the next one.
     pub fn collect_retired(&mut self) {
+        // CLAP plugins let go of on other threads are torn down here.
+        live_keys_clap_host::destroy_pending();
         if let Some(running) = &mut self.running {
             while let Ok(plugin) = running.retired_rx.pop() {
                 drop(plugin);
@@ -568,11 +580,19 @@ impl Engine {
 
     /// Forwards a parameter change that came from a plugin's own GUI to the plugin
     /// with `key`, applied on the next audio block. A no-op if that plugin is gone
-    /// or nothing is running.
+    /// or nothing is running. A CLAP plugin has applied its GUI's changes itself
+    /// (they come from [`Engine::idle_plugins`]), so for one they're only recorded.
     pub fn send_param_change(&mut self, key: PluginKey, param_id: u32, value: f32) {
         if let Some(meta) = self.plugin_mut(key) {
             meta.values.insert(param_id, value);
+            if meta.format == PluginFormat::Clap {
+                return;
+            }
         }
+        self.queue_param(key, param_id, value);
+    }
+
+    fn queue_param(&mut self, key: PluginKey, param_id: u32, value: f32) {
         if let Some((slot, position)) = self.locate(key) {
             self.push_command(RackCommand::Param {
                 slot,
@@ -585,16 +605,37 @@ impl Engine {
     /// Sets a parameter of the plugin with `key` from the host side (e.g. a
     /// parameter slider): like [`Engine::send_param_change`], but a VST3 plugin's
     /// controller is told too, so its own GUI follows. (An LV2 plugin's GUI reads
-    /// port values itself.)
+    /// port values itself; a CLAP plugin tells its GUI.)
     pub fn set_param(&mut self, key: PluginKey, param_id: u32, value: f32) {
-        if let Some(LoadedPluginMeta {
-            editor: PluginEditor::Vst3(controller),
-            ..
-        }) = self.plugin(key)
-        {
+        let Some(meta) = self.plugin_mut(key) else { return };
+        if let PluginEditor::Vst3(controller) = &meta.editor {
             controller.set_param_normalized(param_id, value);
         }
-        self.send_param_change(key, param_id, value);
+        meta.values.insert(param_id, value);
+        self.queue_param(key, param_id, value);
+    }
+
+    /// Does what CLAP plugins asked of the main thread (their callbacks, timers
+    /// and fds, which their GUIs run on), and hands `on_edit` the parameter
+    /// changes they made themselves — in their own GUIs — for
+    /// [`Engine::send_param_change`]. Returns the plugins whose values changed
+    /// otherwise (a loaded state that took effect late), re-read into
+    /// [`Engine::param_value`] already. Call regularly (every ~16 ms) from the
+    /// main thread.
+    pub fn idle_plugins(&mut self, mut on_edit: impl FnMut(PluginKey, u32, f32)) -> Vec<PluginKey> {
+        let mut changed = Vec::new();
+        for meta in self.slots.iter_mut().flat_map(SlotChain::plugins_mut) {
+            let PluginEditor::Clap(controller) = &meta.editor else { continue };
+            if controller.idle(|param_id, value| on_edit(meta.key, param_id, value)) {
+                for param in &meta.params {
+                    if let Some(value) = controller.param_value(param.id) {
+                        meta.values.insert(param.id, value);
+                    }
+                }
+                changed.push(meta.key);
+            }
+        }
+        changed
     }
 
     /// Passes an atom its GUI wrote (`LV2_Atom` header, then body) to atom input
@@ -628,9 +669,9 @@ impl Engine {
     }
 
     /// Parameter `param_id` of the plugin with `key` at `value`, as text for display
-    /// ("-6.0 dB", "Saw", "C#3"). A VST3 plugin formats its own values; otherwise
-    /// it's formatted from the parameter's metadata. Empty if there's no such
-    /// parameter.
+    /// ("-6.0 dB", "Saw", "C#3"). VST3 and CLAP plugins format their own values;
+    /// otherwise it's formatted from the parameter's metadata. Empty if there's no
+    /// such parameter.
     pub fn param_text(&self, key: PluginKey, param_id: u32, value: f32) -> String {
         let Some(meta) = self.plugin(key) else {
             return String::new();
@@ -638,6 +679,12 @@ impl Engine {
         let Some(info) = meta.params.iter().find(|param| param.id == param_id) else {
             return String::new();
         };
+        if let PluginEditor::Clap(controller) = &meta.editor
+            && info.kind != ParamKind::Choice
+            && let Some(text) = controller.value_text(param_id, value)
+        {
+            return text;
+        }
         if let PluginEditor::Vst3(controller) = &meta.editor
             && info.kind != ParamKind::Choice
             && let Some(text) = controller.value_text(param_id, value)
@@ -658,6 +705,7 @@ impl Engine {
             Some(meta) => match (&self.hosts, meta.format) {
                 (Some(hosts), PluginFormat::Lv2) => hosts.lv2.presets(&meta.id),
                 (Some(hosts), PluginFormat::Vst3) => hosts.vst3.presets(&meta.id),
+                (Some(hosts), PluginFormat::Clap) => hosts.clap.presets(&meta.id),
                 (None, _) => Vec::new(),
             },
             None => Vec::new(),
@@ -720,6 +768,21 @@ impl Engine {
                 let meta = self.plugin_mut(key).context("plugin isn't loaded")?;
                 meta.values.extend(values);
             }
+            PluginEditor::Clap(controller) => {
+                let clap = &self.hosts()?.clap;
+                match source {
+                    StateSource::Preset(id) => clap.load_preset(controller, &plugin_id, id)?,
+                    StateSource::File(path) => clap.load_file(controller, &plugin_id, path)?,
+                }
+                // As for VST3: only our record of the values needs updating.
+                let values: Vec<(u32, f32)> = meta
+                    .params
+                    .iter()
+                    .filter_map(|param| Some((param.id, controller.param_value(param.id)?)))
+                    .collect();
+                let meta = self.plugin_mut(key).context("plugin isn't loaded")?;
+                meta.values.extend(values);
+            }
         }
         Ok(())
     }
@@ -735,6 +798,7 @@ impl Engine {
                 unsafe { lv2.save_preset(instance, &plugin_id, &plugin_name, name, value) }
             }),
             PluginEditor::Vst3(controller) => self.hosts()?.vst3.save_preset(controller, &plugin_id, name),
+            PluginEditor::Clap(controller) => self.hosts()?.clap.save_preset(controller, &plugin_id, name),
         }
     }
 
@@ -756,6 +820,11 @@ impl Engine {
             PluginEditor::Vst3(controller) => {
                 let path = dir.join(format!("{stem}.vstpreset"));
                 self.hosts()?.vst3.save_file(controller, &plugin_id, &path)?;
+                Ok(path)
+            }
+            PluginEditor::Clap(controller) => {
+                let path = dir.join(format!("{stem}.{}", live_keys_clap_host::STATE_FILE_EXTENSION));
+                self.hosts()?.clap.save_file(controller, &plugin_id, &path)?;
                 Ok(path)
             }
         }
@@ -793,9 +862,11 @@ impl Engine {
 
     /// Deletes user preset `preset_id` of the plugin with `key`.
     pub fn delete_preset(&mut self, key: PluginKey, preset_id: &str) -> Result<()> {
-        match self.plugin(key).context("plugin isn't loaded")?.format {
+        let meta = self.plugin(key).context("plugin isn't loaded")?;
+        match meta.format {
             PluginFormat::Lv2 => self.hosts()?.lv2.delete_preset(preset_id),
             PluginFormat::Vst3 => self.hosts()?.vst3.delete_preset(preset_id),
+            PluginFormat::Clap => self.hosts()?.clap.delete_preset(&meta.id, preset_id),
         }
     }
 
@@ -824,6 +895,29 @@ impl Engine {
                 params: controller.params().to_vec(),
                 editor: PluginEditor::Vst3(controller),
                 values: HashMap::new(),
+            };
+            Ok((Box::new(plugin), meta))
+        } else if plugin_id.starts_with(live_keys_clap_host::ID_PREFIX) {
+            let (plugin, controller) = self
+                .hosts()?
+                .clap
+                .instantiate(plugin_id, sample_rate)
+                .with_context(|| format!("failed to instantiate CLAP plugin '{plugin_id}'"))?;
+            // A CLAP plugin can be asked for its values, and its defaults aren't
+            // always right (Surge XT reports 0 for every one).
+            let values = controller
+                .params()
+                .iter()
+                .filter_map(|param| Some((param.id, controller.param_value(param.id)?)))
+                .collect();
+            let meta = LoadedPluginMeta {
+                key,
+                id: plugin_id.to_string(),
+                name: live_keys_core::HostedPlugin::name(&plugin).to_string(),
+                format: PluginFormat::Clap,
+                params: controller.params().to_vec(),
+                editor: PluginEditor::Clap(controller),
+                values,
             };
             Ok((Box::new(plugin), meta))
         } else {

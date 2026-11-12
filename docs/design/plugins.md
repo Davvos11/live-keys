@@ -87,7 +87,7 @@ Profiles we ship are compiled in. Profiles the user makes (Part B) go to
 
 | | A1 — built in (Rust, inside the app) | A2 — our own LV2 plugins | A3 — our own CLAP/VST3 (e.g. nih-plug) |
 |---|---|---|---|
-| How it's hosted | A third `PluginFormat`, implementing `HostedPlugin` directly | Like any LV2, through `lilv` | Through the VST3 host (CLAP would be a new format) |
+| How it's hosted | A new `PluginFormat`, implementing `HostedPlugin` directly | Like any LV2, through `lilv` | Through the CLAP or VST3 host |
 | Inline UI | Slint, from the profile; no FFI | Slint, from the profile | Slint, from the profile |
 | Usable in other hosts (Ardour, Carla) | No (unless also exported, see below) | Yes | Yes |
 | Shipping | Inside the binary/.deb; nothing to install | Separate bundles to install to `LV2_PATH` | Separate bundles |
@@ -296,10 +296,10 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
    built-in front-end, its standalone build and shipped presets.
 6. First built-in effect (a compressor) with the effect popup and its interactive graph.
 
-Later, separately: MIDI learn for hardware controls; **hosting CLAP** in live-keys (for
-third-party plugins once the app runs on Windows/macOS, where VST3 and CLAP are what users have
-— our own instruments don't need it, since live-keys uses their built-in front-end); a
-non-X11 backend for VST3 editors on those platforms.
+Later, separately: MIDI learn for hardware controls; non-X11 backends for VST3 editors and
+CLAP GUIs once the app runs on Windows/macOS. (**Hosting CLAP** is done — `crates/clap-host`
+— for third-party plugins; our own instruments don't need it, since live-keys uses their
+built-in front-end.)
 
 ## Open questions
 

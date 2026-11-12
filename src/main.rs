@@ -33,7 +33,7 @@ struct Cli {
     list_effects: bool,
 
     /// Id of the instrument plugin to load, as printed by `--list`: an LV2 plugin's
-    /// URI, or `vst3:` + a VST3 class ID.
+    /// URI, `vst3:` + a VST3 class ID, or `clap:` + a CLAP plugin id.
     #[arg(long, default_value = DEFAULT_PLUGIN_ID)]
     plugin: String,
 
@@ -102,6 +102,10 @@ fn main() -> Result<()> {
     }
 
     log::info!("Streaming. Press Ctrl+C to exit.");
-    std::thread::park();
-    Ok(())
+    // CLAP plugins run some of their work on the main thread when asked to.
+    loop {
+        let _ = engine.idle_plugins(|_, _, _| {});
+        engine.collect_retired();
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
 }

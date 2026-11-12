@@ -22,6 +22,7 @@ use anyhow::{Context, Result, bail};
 use live_keys_engine::{Engine, MidiEvent, PluginEditor, PluginKey, Section};
 use live_keys_lv2_ui::{LaunchUiRequest, PluginUiHandle, PortMessage, UiKind};
 use live_keys_vst3_ui::Vst3Editor;
+use live_keys_clap_ui::ClapEditor;
 
 use cases::{CASES, Case, Resize, Role, Target};
 
@@ -299,6 +300,15 @@ fn check_param(engine: &mut Engine, key: PluginKey, case: &Case, peak_before: f3
         }
         detail += &format!(", controller reads {read:.3}");
     }
+    if let Some(PluginEditor::Clap(controller)) = engine.plugin(key).map(|meta| &meta.editor) {
+        // The plugin only applies it on its next block.
+        std::thread::sleep(Duration::from_millis(50));
+        let read = controller.param_value(param.id).context("the plugin doesn't report its value")?;
+        if (read - value).abs() > 1e-3 * (param.max_value - param.min_value) {
+            bail!("the plugin reads {read} after setting {value}");
+        }
+        detail += &format!(", the plugin reads {read:.3}");
+    }
     if let Some(quieter_db) = check.quieter_db {
         // Give the audio thread the change before playing.
         std::thread::sleep(Duration::from_millis(50));
@@ -315,6 +325,7 @@ fn check_param(engine: &mut Engine, key: PluginKey, case: &Case, peak_before: f3
 enum Editor {
     Lv2(PluginUiHandle),
     Vst3(Vst3Editor),
+    Clap(ClapEditor),
 }
 
 impl Editor {
@@ -322,6 +333,7 @@ impl Editor {
         match self {
             Editor::Lv2(handle) => handle.is_closed(),
             Editor::Vst3(editor) => editor.is_closed(),
+            Editor::Clap(editor) => editor.is_closed(),
         }
     }
 
@@ -329,6 +341,7 @@ impl Editor {
         match self {
             Editor::Lv2(handle) => handle.window(),
             Editor::Vst3(editor) => Some(editor.window()),
+            Editor::Clap(editor) => editor.window(),
         }
     }
 }
@@ -383,6 +396,12 @@ fn open_editor(engine: &Engine, key: PluginKey, tx: mpsc::Sender<Edit>) -> Resul
             )?;
             Ok((Editor::Vst3(editor), "VST3 editor"))
         }
+        PluginEditor::Clap(controller) => {
+            if !controller.has_gui() {
+                return Err(skip("no GUI this host can show"));
+            }
+            Ok((Editor::Clap(ClapEditor::open(controller, &meta.name)?), "CLAP GUI"))
+        }
     }
 }
 
@@ -390,10 +409,19 @@ fn open_editor(engine: &Engine, key: PluginKey, tx: mpsc::Sender<Edit>) -> Resul
 fn pump(engine: &mut Engine, key: PluginKey, editor: &mut Editor, rx: &mpsc::Receiver<Edit>, traffic: &mut Traffic, duration: Duration) {
     let until = Instant::now() + duration;
     while Instant::now() < until {
-        if let Editor::Vst3(editor) = editor {
-            editor.idle();
+        match editor {
+            Editor::Vst3(editor) => editor.idle(),
+            Editor::Clap(editor) => editor.idle(),
+            Editor::Lv2(_) => {}
         }
-        while let Ok(edit) = rx.try_recv() {
+        // A CLAP GUI's edits come this way, and its timers run here.
+        let mut clap_edits = Vec::new();
+        engine.idle_plugins(|from, id, value| {
+            if from == key {
+                clap_edits.push(Edit::Param(id, value));
+            }
+        });
+        for edit in clap_edits.into_iter().chain(rx.try_iter()) {
             traffic.to_dsp += 1;
             match edit {
                 Edit::Param(id, value) => engine.send_param_change(key, id, value),
@@ -504,6 +532,7 @@ fn check_gui(engine: &mut Engine, key: PluginKey, case: &Case) {
     match editor {
         Editor::Lv2(handle) => drop(handle),
         Editor::Vst3(mut editor) => editor.close(),
+        Editor::Clap(mut editor) => editor.close(),
     }
     unload_checked(engine, case);
 }
@@ -540,6 +569,11 @@ fn info(id: &str) -> Result<()> {
     let meta = engine.plugin(key).unwrap();
     if let PluginEditor::Lv2 { plugin, .. } = &meta.editor {
         println!("GUI: {:?}", live_keys_lv2_ui::best_supported_ui(plugin).map(|(_, kind)| kind));
+    }
+    if let PluginEditor::Clap(controller) = &meta.editor {
+        let gui = controller.gui();
+        let api = |floating| gui.as_ref().is_some_and(|gui| gui.is_api_supported(floating));
+        println!("GUI: embedded X11 {}, floating X11 {}", api(false), api(true));
     }
     for param in &meta.params {
         println!(

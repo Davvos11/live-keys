@@ -15,12 +15,13 @@ const STANDARD_LV2_PATHS: &[&str] = &[
 ];
 
 /// Every folder searched for plugins when no extra folders have been added: LV2's,
-/// then VST3's. Extra folders are searched for both formats.
+/// then VST3's, then CLAP's. Extra folders are searched for every format.
 pub fn default_plugin_search_paths() -> Vec<String> {
     let mut paths = default_lv2_search_paths();
     paths.extend(
         live_keys_vst3_host::default_search_paths()
-            .iter()
+            .into_iter()
+            .chain(live_keys_clap_host::default_search_paths())
             .map(|path| path.display().to_string()),
     );
     paths

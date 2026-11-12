@@ -1,0 +1,16 @@
+[package]
+name = "live-keys-clap-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+live-keys-clap-host = { path = "../clap-host" }
+x11rb = "0.14"
+anyhow = "1"
+log = "0.4"
+
+[dev-dependencies]
+live-keys-core = { path = "../core" }
+env_logger = "0.11"

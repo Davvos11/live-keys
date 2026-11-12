@@ -6,6 +6,7 @@ use crate::MidiEvent;
 pub enum PluginFormat {
     Lv2,
     Vst3,
+    Clap,
 }
 
 impl PluginFormat {
@@ -13,6 +14,7 @@ impl PluginFormat {
         match self {
             PluginFormat::Lv2 => "LV2",
             PluginFormat::Vst3 => "VST3",
+            PluginFormat::Clap => "CLAP",
         }
     }
 }
@@ -43,7 +45,8 @@ impl PluginKind {
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     /// Identifies the plugin across scans and app restarts, unique across formats:
-    /// an LV2 plugin's URI, or `vst3:` + a VST3 class ID in hex.
+    /// an LV2 plugin's URI, `vst3:` + a VST3 class ID in hex, or `clap:` + a CLAP
+    /// plugin id.
     pub id: String,
     pub name: String,
     pub format: PluginFormat,
@@ -51,12 +54,15 @@ pub struct PluginInfo {
 }
 
 /// A saved set of a plugin's settings, as the plugin's format stores them: an LV2
-/// preset (`pset:Preset`) or a VST3 `.vstpreset` file — so presets made by
-/// other hosts (Ardour, Carla, a DAW) show up here and the other way around.
+/// preset (`pset:Preset`), a VST3 `.vstpreset` file, or a CLAP preset found by
+/// its preset discovery — so presets made by other hosts (Ardour, Carla, a DAW)
+/// show up here and the other way around. (CLAP has no shared format for user
+/// presets; saved ones are this host's state files.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresetInfo {
-    /// Identifies the preset within its plugin: an LV2 preset URI, or a
-    /// `.vstpreset` file's path.
+    /// Identifies the preset within its plugin: an LV2 preset URI, a
+    /// `.vstpreset` file's path, or a CLAP preset's location (see
+    /// `live-keys-clap-host`).
     pub id: String,
     pub name: String,
     /// Saved by the user (and so deletable), as opposed to shipped with the

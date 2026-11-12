@@ -19,7 +19,7 @@ and move on; the developer's own files get fixed by hand if needed.
 
 A cross-platform audio plugin host in Rust, optimized for live performance driven by a MIDI
 keyboard — an "instrument rack" for a live set, not a DAW/timeline. Primary target is Linux,
-with Windows/macOS as secondary goals. LV2 and VST3 are the hosted plugin formats so far (see
+with Windows/macOS as secondary goals. LV2, VST3 and CLAP are the hosted plugin formats so far (see
 "Plugin format roadmap" below); a Slint GUI now exists alongside the original headless CLI.
 
 ## Dev dependencies
@@ -35,6 +35,7 @@ Without these, `cargo check`/`cargo build` fails at a build script (`lilv-sys`'s
 `live-keys-lv2-ui`'s) with a `pkg-config` error, not a Rust compile error — if you see that, it's
 this, not a code bug. VST3 needs no system packages: the `vst3` crate ships pre-generated
 bindings (no Steinberg SDK at build time), and the editor host only needs `x11rb` + `libc`.
+Nor does CLAP: `clap-sys` is plain Rust bindings to the CLAP headers.
 
 ## Common commands
 
@@ -52,7 +53,7 @@ cargo run --release -- --list-midi             # list MIDI input port names
 cargo run --release -- --list-audio            # list logical audio output devices
 cargo run --release                            # run with defaults (Helm synth, first MIDI port, default output)
 cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr>
-# <id> as printed by --list: an LV2 URI, or `vst3:` + class ID.
+# <id> as printed by --list: an LV2 URI, `vst3:` + class ID, or `clap:` + CLAP plugin id.
 cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effects → instrument → audio
                                                # effects; each --effect goes where its kind belongs
 
@@ -106,14 +107,21 @@ SMOKE_WAIT_SECS=10 cargo run -p live-keys-vst3-host --example smoke --release
 cargo run -p live-keys-vst3-ui --example open_editor --release -- "surge xt" 10
   # opens a VST3 plugin's editor (name substring, exact match preferred) for N seconds
 
+# Manual CLAP smoke tests (not part of the app)
+cargo run -p live-keys-clap-host --example smoke --release -- [name filter]
+  # scan, then per instrument: render a chord offline (peak), parameter count, a state round
+  # trip, its presets (preset discovery: Surge XT's ~3000 take ~2 s) and loading the first
+cargo run -p live-keys-clap-ui --example open_gui --release -- "surge xt" 10
+  # opens a CLAP plugin's GUI (name substring, exact match preferred) for N seconds
+
 # Manual preset smoke tests (not part of the app; they create and delete a "Smoke Test" preset)
 cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # list/apply/save/delete
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-keys-gui   # the crates
-  # with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset round trip,
-  # MIDI device names, input-mask shifting)
+cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui
+  # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
+  # CLAP state file round trips, MIDI device names, input-mask shifting)
 ```
 
 ## Licensing
@@ -191,7 +199,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with eight crates, isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with ten crates, isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -211,10 +219,11 @@ behind format-agnostic cores:
     host with nothing to feed must zero them). `midi_output()` (default: empty) is the MIDI
     the last `process` produced — a MIDI effect's output, fed to the next chain stage.
     `set_param` applies one `ParamChange`.
-  - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`),
+  - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`/`Clap`),
     `PluginKind` (`Instrument` = MIDI → audio, `MidiEffect` = MIDI → MIDI, `AudioEffect` =
     audio → audio and anything else), `PluginInfo` (`id`, name, format, kind — `id` is unique
-    across formats: an LV2 URI, or `vst3:` + the VST3 class ID in hex), and `ParamInfo` (`id`,
+    across formats: an LV2 URI, `vst3:` + the VST3 class ID in hex, or `clap:` + the CLAP
+    plugin id), and `ParamInfo` (`id`,
     name, default/min/max, `kind: ParamKind`, `steps`, `logarithmic`, `unit`, `choices`).
     A `ParamInfo`'s id and values are in the format's own terms — an LV2 control-input port
     index and its real range, or a VST3 `ParamID` and its normalized `0.0..=1.0` — so the
@@ -225,9 +234,10 @@ behind format-agnostic cores:
     can take, `format_value` renders one as text (label, On/Off, note name via `note_name` —
     C4 = 60 — or a ~3-significant-digit number plus unit). Unit-tested.
   - `PresetInfo` (`src/plugin.rs`) — one preset of a plugin in its format's own storage
-    (`id`: an LV2 preset URI or a `.vstpreset` path; `name`; `user`: saved by the user, so
-    deletable). Presets are deliberately the formats' standard ones, not an app-specific
-    format, so they're shared with Ardour/Carla/DAWs both ways.
+    (`id`: an LV2 preset URI, a `.vstpreset` path, or a CLAP preset's location — see
+    `crates/clap-host`; `name`; `user`: saved by the user, so deletable). Presets are
+    deliberately the formats' standard ones, not an app-specific format, so they're shared with
+    Ardour/Carla/DAWs both ways — except CLAP user presets, which CLAP has no format for.
   - `ring_buffer<T>()` (`src/ring.rs`) — generic thin wrapper over `rtrb::RingBuffer` (SPSC,
     lock-free); `midi_ring_buffer()`/`param_ring_buffer()` are the `MidiEvent`/`ParamChange`
     instantiations actually used.
@@ -401,6 +411,74 @@ behind format-agnostic cores:
   `Vst3Editor::window()` is its X11 window (for the plugin check).
   Confirmed with Surge XT (JUCE) and OT P1ANO S (HISE/JUCE).
 
+- **`crates/clap-host`** (`live-keys-clap-host`) — CLAP hosting on `clap-sys` (MIT/Apache
+  bindings to the CLAP headers; all calls `unsafe`). Modules:
+  - `module.rs` — finds `.clap` files (`default_search_paths()`: `CLAP_PATH`'s entries, `~/.clap`,
+    `/usr/lib/clap`, `/usr/local/lib/clap`, plus extra folders; a few levels deep; on Linux a
+    `.clap` is a plain shared library), loads them, calls `clap_entry.init` and reads the plugin
+    factory's descriptors. Like VST3 modules, **loaded once per process and never unloaded**
+    (`deinit` never called; a global cache by path). No probing: a descriptor's features say the
+    kind (`instrument` → instrument, `note-effect` without `audio-effect` → MIDI effect, else
+    audio effect). `ClapScan` loads a file per `step`, on the main thread.
+  - `host.rs` — one `HostShared` per plugin instance (boxed; the `clap_host` it was created with
+    has `host_data` pointing back at it) and the host extensions, as `static` tables:
+    `thread-check` (main = the thread that created the plugin; audio = a thread-local flag set
+    around `start_processing`/`process`/`stop_processing`, `as_audio_thread`), `log` (to `log`),
+    `params` (`rescan` with values flags sets `values_changed`; nothing else), `gui`
+    (`request_resize`/`closed` recorded in `GuiRequests` for the editor), `timer-support` and
+    `posix-fd-support` (registries the controller's `idle` services), `state`, `note-ports`
+    (dialects CLAP + MIDI), `audio-ports`, `latency` (no-ops). `request_callback` sets a flag
+    for `idle`; `request_restart`/`request_process` are ignored.
+  - `plugin.rs` — `instantiate` creates, `init`s and `activate`s the plugin (main thread; `1 ..=
+    max_block_size` frames) and splits it, like VST3, into halves sharing an `Arc<Instance>`:
+    **`ClapPlugin`** (the `HostedPlugin`; `start_processing` lazily on its first `process`,
+    `stop_processing` in its `Drop`, both as the audio thread) and **`ClapController`** (main
+    thread only). `Instance`'s `Drop` `deactivate`s and `destroy`s — on the main thread, or, if
+    the last owner goes on another thread (a stream dropped on a thread of its own), it's queued
+    for `destroy_pending()`, which `Engine::collect_retired` calls. Audio ports: every port gets
+    buffers, input port 0 the host-filled ones, others a shared silent buffer; output port 0 is
+    read back. Events (`events.rs`, fixed capacity): `set_param` pushes a `PARAM_VALUE` (time 0,
+    plain value, no cookie) and `process` appends the block's MIDI after it — note on/off as
+    CLAP note events if the first note input supports the CLAP dialect, everything else (and
+    notes otherwise) as `CLAP_EVENT_MIDI` if it supports MIDI; a plugin without note input
+    gets none. Output events: note on/off and MIDI become `midi_output()` (a MIDI effect's), and
+    `PARAM_VALUE`s — **the plugin's own GUI's edits, which the plugin has already applied** —
+    go over a ring to the controller. Transport is null (free-running). Parameters
+    (`read_params`, once at load): hidden/read-only left out; bypass → toggle, stepped + enum
+    (≤ 256 values) → choice labelled by `value_to_text`, stepped spanning 1 → toggle, other
+    stepped → stepped; plain min/max/default. `ClapController`: `params`, `value_text` (the
+    plugin's, unit included), `param_value` (`get_value` — CLAP plugins can be asked),
+    `state`/`set_state` (`clap.state`, allowed while processing — no lending), `has_gui`/`gui`
+    (`ClapGui`: the `clap.gui` calls with X11 as the API, holding the instance alive), and
+    **`idle(on_edit) -> bool`**: runs `on_main_thread` if asked for, fires due timers (missed
+    ticks skipped), polls registered fds without blocking, hands over the GUI's edits, and
+    returns `true` when values should be re-read — after `params.rescan`, or `STATE_SETTLE`
+    (100 ms) after a state/preset load, since Surge XT applies a loaded state on its next audio
+    block without saying so.
+  - `preset.rs` — presets: **preset discovery** (`clap.preset-discovery-factory/2` or its draft
+    id): each provider is created with our indexer, its declared locations are walked (a
+    file location's folder for the declared extensions; a plugin location asked once) and each
+    file's metadata collected for presets naming this plugin's id (`user` from the
+    `IS_USER_CONTENT` flag); loaded with `clap.preset-load`'s `from_location`. Surge XT finds
+    ~3000 in ~2 s, so `ClapHost` caches them per plugin. CLAP has no shared user-preset file
+    format, so **user presets saved here are state files** (`state.rs`: `LKCLAPS1`, the plugin
+    id, then its state; `.clapstate`) in `<data dir>/live-keys/clap-presets/<plugin id>/`;
+    discovered user presets that are a file of their own can be deleted too. Preset ids are
+    `state\t<path>` or `clap-preset\t<kind>\t<location>\t<load key>`.
+  `ClapHost` (`lib.rs`) owns one scan's results, instantiates by `PluginInfo::id`, and wraps
+  presets (`presets`/`load_preset`/`save_preset`/`delete_preset`) and state files
+  (`save_file`/`load_file`, for slot presets).
+
+- **`crates/clap-ui-host`** (`live-keys-clap-ui`) — hosts a CLAP plugin's own GUI. Like VST3
+  editors, on the main thread: `ClapEditor::open(controller, title)` embeds it (`create("x11",
+  false)`, `set_parent` on an `x11rb` window of ours, sized from `get_size` once embedded, since
+  LSP's only knows its size then; min=max WM hints when `can_resize` is false), or, for a
+  plugin that only offers that, lets it open a floating window of its own. `ClapEditor::idle`
+  pumps the window's X11 events (`WM_DELETE_WINDOW` → close; a user resize → `adjust_size` +
+  `set_size`) and applies `request_resize`; the plugin's timers and fds are pumped by
+  `ClapController::idle`, GUI open or not. `close` hides, destroys, then drops the window.
+  Confirmed with Surge XT, Vital and LSP.
+
 - **`crates/engine`** (`live-keys-engine`) — the real-time wiring (`cpal` + `midir` + an
   `Lv2Host` + a `Vst3Host`) shared by both the CLI and the GUI, so there's exactly one implementation instead of
   two drifting copies. It's a fixed rack of `SLOT_COUNT` (6) slots sharing one output stream;
@@ -494,35 +572,47 @@ behind format-agnostic cores:
   simplification below). Getting this wrong previously left the tail of any oversized callback
   buffer unwritten — heard as short bursts of correct audio cutting to stale/silent output on
   outputs with a large negotiated period. All buffers involved are pre-allocated before
-  `stream.play()`, never inside the callback. `Engine::list_plugins` merges both formats (LV2
-  first); instantiation dispatches on the id (`vst3:` prefix → `Vst3Host`, else `Lv2Host`).
+  `stream.play()`, never inside the callback. `Engine::list_plugins` merges every format (LV2,
+  then VST3, then CLAP); instantiation dispatches on the id (`vst3:` prefix → `Vst3Host`,
+  `clap:` → `ClapHost`, else `Lv2Host`).
   Scanning is a `PluginScan`: `PluginScan::start(extra_dirs)` sets `LV2_PATH` to the default
   folders plus the extra ones (see `paths.rs`), builds the LV2 world on a thread of its own and
-  starts a `Vst3Scan` with the same folders, which `step` advances (`true` once both are done);
+  starts a `Vst3Scan` and a `ClapScan` with the same folders, which `step` advances (VST3,
+  then CLAP; `true` once all are done);
   `Engine::install_plugins(scan)` finishes it and swaps the hosts in — it stops the stream and
   empties every slot first, since an `Lv2Plugin` shouldn't outlive the `World` it came from.
   `Engine::new` scans the default folders before returning (CLI, examples);
   `Engine::unscanned` knows no plugins until a scan is installed (the GUI).
-  `default_plugin_search_paths()` lists both formats' default folders (for display);
+  `default_plugin_search_paths()` lists every format's default folders (for display);
   `build_lv2_path` uses only the LV2 ones. `Engine::slot(slot)` returns that slot's `SlotChain`
   and `Engine::plugin(key)` one `LoadedPluginMeta` (key, id, name, format, `params` —
   `ParamInfo`s for a parameter-editor UI — and `editor: PluginEditor`, all captured at load time
   since the running plugin itself lives in the audio callback). `PluginEditor` is what opening
   the plugin's own GUI or handling its presets needs, per format: `Lv2 { plugin, features,
-  raw_handle, instance }` or `Vst3(Vst3Controller)`. The meta also records the last value sent
-  per parameter (`Engine::param_value`, falling back to the default) — every value change goes
-  through `send_param_change`, and preset loads record theirs — since the running plugin can't
-  be asked. Presets: `presets(key)`, `load_preset(key, id)` (LV2 with state: restored while
+  raw_handle, instance }`, `Vst3(Vst3Controller)` or `Clap(ClapController)`. The meta also
+  records the last value sent per parameter (`Engine::param_value`, falling back to the
+  default) — every value change goes through `send_param_change`/`set_param`, and preset loads
+  record theirs — since the running plugin can't be asked (a CLAP one can, on the main thread:
+  its record is seeded from `ClapController::param_value` at load, since Surge XT reports every
+  default as 0). Presets: `presets(key)`, `load_preset(key, id)` (LV2 with state: restored while
   lent, port values set on the lent plugin; LV2 without: port values queued as param changes,
   no gap; VST3: `set_state` on the controller, then every parameter read back with
-  `getParamNormalized`), `save_preset(key, name)` (LV2 with state lent; port values from the
+  `getParamNormalized`; CLAP: preset discovery's `from_location` or a state file's
+  `set_state`, then every parameter read back with `get_value` — and again once it settles,
+  see `idle_plugins`), `save_preset(key, name)` (LV2 with state lent; port values from the
   record), `delete_preset(key, id)`; `save_state_file(key, dir, stem)`/`load_state_file(key,
   path)` are the same for a state file outside the plugin's presets (`<stem>.lv2/` or
-  `<stem>.vstpreset`), which slot presets are made of. Both loads go through one `restore`
+  `<stem>.vstpreset` or `<stem>.clapstate`), which slot presets are made of. Both loads go through one `restore`
   (`StateSource`), both LV2 saves through `save_lv2` (lending, port values). Two ways to change a parameter: `send_param_change(key, id, value)`
-  only queues it to the audio thread — for edits that *came from* the plugin's own GUI — while
+  only queues it to the audio thread — for edits that *came from* the plugin's own GUI; for a
+  CLAP plugin, which applied its GUI's edit itself, it only records it — while
   `set_param` (host-side edits, e.g. a slider) also tells a VST3 controller, so the plugin's
-  open editor follows (an open LV2 GUI is told by the GUI crate instead, see below).
+  open editor follows (an open LV2 GUI is told by the GUI crate instead, see below; a CLAP
+  plugin tells its own GUI). **`idle_plugins(on_edit) -> Vec<PluginKey>`** runs every CLAP
+  controller's `idle` — call it every ~16 ms from the main thread (the GUI's poll timer, the
+  CLI's loop, plugin-check's pump) — handing `on_edit` their GUIs' edits (for
+  `send_param_change`) and returning the plugins whose values it re-read (a late-settling
+  state), for refreshing what shows them.
   `send_midi(event)` plays MIDI as if from every MIDI input (the MIDI queue's producer is shared
   with the input callback behind a `Mutex`, neither being the audio thread);
   `take_slot_peak(slot)` is the slot's loudest sample since the last call.
@@ -530,7 +620,8 @@ behind format-agnostic cores:
   `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
   plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`). `param_text(key, id, value)` is
   a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
-  unless already there; main thread only), else `ParamInfo::format_value`.
+  unless already there; main thread only), a CLAP plugin's own (`ClapController::value_text`,
+  unit included), else `ParamInfo::format_value`.
   `audio.rs`/`midi.rs` hold device/port discovery and substring-based selection
   (`find_output_device`/`find_midi_port`), reused by `--audio-device`/`--midi-port` in the CLI
   (whose one port becomes MIDI input 1) and the Settings tab in the GUI.
@@ -766,10 +857,10 @@ behind format-agnostic cores:
   while running. Replacing/removing a plugin likewise closes its GUI and parameter window
   first (`Rack::forget`). On the Rust side, `Rack` owns the slots' `VecModel`s, every open GUI
   keyed by `PluginKey` as an `OpenEditor` (`Lv2(PluginUiHandle)` — its own thread — or
-  `Vst3(Vst3Editor)` — main thread), every open parameter window (`ParamWindow`: the window and
+  `Vst3(Vst3Editor)`/`Clap(ClapEditor)` — main thread), every open parameter window (`ParamWindow`: the window and
   its rows model), and the preset last loaded/saved per plugin (`current_presets`, with its
   changed flag); the poll timer calls
-  `Rack::poll_uis`, which pumps open VST3 editors (`idle`) and forgets any GUI or parameter
+  `Rack::poll_uis`, which pumps open VST3 editors and CLAP GUIs (`idle`) and forgets any GUI or parameter
   window that has closed (a window closed by its title bar is only hidden, so it's noticed by
   `is_visible`). Each slot's effect models are created once and refilled in place, changing only rows
   that differ (`sync_model`), so refreshing a slot doesn't rebuild its rows (and lose a
@@ -820,10 +911,13 @@ behind format-agnostic cores:
   the child's stderr is shown). Sound is measured with `Engine::take_slot_peak`, GUI windows
   are looked at and resized from outside through X11 (`x11.rs`: size, first child = the
   plugin's widget, distinct colours in a pixel sample — at most 2 means a blank window). The
-  GUI side is pumped like the app's poll timer (edits forwarded, `drain_ui_events` to the GUI).
+  GUI side is pumped like the app's poll timer (edits forwarded, `drain_ui_events` to the GUI,
+  `idle_plugins` for CLAP). A CLAP case's parameter check also asks the plugin for the value.
 
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
-  around `live-keys-engine` (loads its one `--plugin` into slot 0). Uses `clap` (derive) for CLI args.
+  around `live-keys-engine` (loads its one `--plugin` into slot 0), then loops calling
+  `idle_plugins` and `collect_retired`. Uses `clap` (derive) for CLI args — the argument
+  parser, not the plugin format.
 
 ### Real-time audio thread rules
 
@@ -907,8 +1001,20 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
   fixed 120 BPM 4/4, not playing). Presets are `.vstpreset` files only — factory programs
   exposed through `IUnitInfo` program lists aren't listed yet.
-- A VST3 editor runs on the GUI's main thread (see `crates/vst3-ui-host`), so — unlike an LV2
-  GUI, which wedges only its own thread — a VST3 editor that hangs inside a call freezes the
+- CLAP hosting, minimal like VST3's: `request_restart` is ignored (no deactivate/reactivate for
+  new latency or ports), `params.rescan` only re-reads values (no new parameters or metadata),
+  no `audio-ports-config`/`audio-ports-activation`, `thread-pool`, `note-name`, `voice-info`,
+  `remote-controls`, `context-menu`, `track-info`, `preset-load`'s host callbacks; no
+  transport (null — free-running); no note expressions, polyphonic modulation, note ids,
+  parameter cookies, MIDI 2 or sysex; only output port 0 is read. The plugin's `PARAM_VALUE`
+  output events are taken as its GUI's edits (recorded and shown), gesture events ignored.
+  Preset discovery reads every preset file the first time a plugin's presets are listed (~2 s
+  for Surge XT, on the main thread: the app stalls once). User presets are this host's own state
+  files, since CLAP has no shared format for them (other hosts won't list them). After a state
+  load, values are re-read 100 ms later; a plugin that takes longer shows stale values.
+- A VST3 editor or CLAP GUI runs on the GUI's main thread (see `crates/vst3-ui-host`,
+  `crates/clap-ui-host`), so — unlike an LV2
+  GUI, which wedges only its own thread — one that hangs inside a call freezes the
   whole app. There's no way around it within the VST3 threading rules short of out-of-process
   hosting (see the out-of-process note below).
 - LV2 UI hosting: Gtk/Qt-wrapped UIs may work via suil's adapter modules but aren't the
@@ -962,7 +1068,10 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
    Rust VST3 host crate exists): DSP, parameters, MIDI-CC mapping and the plugin's own editor
    (see `crates/vst3-host`/`crates/vst3-ui-host`). Open follow-ups are under "Known
    simplifications" (IMessage, restartComponent, state save/restore, transport).
-3. **Phase 3 — VST2/LXVST** via `vst2-sys`/bindgen once phases 1–2 are stable. "LXVST" is just
+3. **Phase 2b (done, core) — CLAP** via the `clap-sys` bindings: DSP, parameters, notes/MIDI,
+   state, preset discovery and the plugin's own GUI (see `crates/clap-host`/`crates/clap-ui-host`).
+   Open follow-ups are under "Known simplifications".
+4. **Phase 3 — VST2/LXVST** via `vst2-sys`/bindgen once phases 1–2 are stable. "LXVST" is just
    the Linux-native naming convention for VST2 `.so` builds (same ABI as Windows/Mac VST2,
    scanned from Linux-specific paths like `~/.lxvst/`) — not a separate format. Lowest priority;
    deprecated/unlicensable for new distribution, mainly for loading legacy plugins.
@@ -995,6 +1104,7 @@ plugin windows can't be tied to the main window (transient/always-on-top/minimis
 can look blurry under fractional scaling (unless the compositor lets X11 apps scale
 themselves), and focus between the two can feel slightly off. Forcing the whole app onto X11
 (`WAYLAND_DISPLAY` unset) would allow tying windows together but loses crisp HiDPI for the
-main window — not worth it. Revisit if CLAP (which defines a Wayland window API) is added, or
-plugins adopt VST3's Wayland interface. (Test runs that take screenshots unset
+main window — not worth it. CLAP defines a Wayland window API, but its GUIs are hosted
+through X11 here too (`crates/clap-ui-host`), as every installed CLAP plugin offers. Revisit
+if plugins adopt CLAP's or VST3's Wayland interfaces. (Test runs that take screenshots unset
 `WAYLAND_DISPLAY` to force X11, so the windows can be captured with X11 tools.)

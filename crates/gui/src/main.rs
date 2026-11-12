@@ -23,11 +23,13 @@ use live_keys_lv2_ui::{
     LaunchUiRequest, PluginUiHandle, PortMessage, UiKind, best_supported_ui, launch_ui,
 };
 use live_keys_vst3_ui::Vst3Editor;
+use live_keys_clap_ui::ClapEditor;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 const MAX_BLOCK_SIZE: usize = 8192;
 /// How often the plugin-GUI-closed check and param-change forwarding run, and VST3
-/// editors get pumped (see `Vst3Editor::idle`).
+/// editors, CLAP GUIs and CLAP plugins' main-thread work get pumped (see
+/// `Vst3Editor::idle`, `Engine::idle_plugins`).
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the plugin scan gets a turn, and for how long: VST3 plugins are
 /// scanned on this thread, so in slices that leave the window time to draw.
@@ -61,11 +63,12 @@ enum GuiEdit {
     Atom { key: PluginKey, port: u32, atom: Vec<u8> },
 }
 
-/// A plugin's open GUI. LV2 GUIs run on a thread of their own; VST3 editors live
-/// on this (the main) thread and need pumping.
+/// A plugin's open GUI. LV2 GUIs run on a thread of their own; VST3 editors and
+/// CLAP GUIs live on this (the main) thread and need pumping.
 enum OpenEditor {
     Lv2(PluginUiHandle),
     Vst3(Vst3Editor),
+    Clap(ClapEditor),
 }
 
 impl OpenEditor {
@@ -73,6 +76,7 @@ impl OpenEditor {
         match self {
             OpenEditor::Lv2(handle) => handle.is_closed(),
             OpenEditor::Vst3(editor) => editor.is_closed(),
+            OpenEditor::Clap(editor) => editor.is_closed(),
         }
     }
 
@@ -80,6 +84,7 @@ impl OpenEditor {
         match self {
             OpenEditor::Lv2(handle) => handle.request_close(),
             OpenEditor::Vst3(editor) => editor.close(),
+            OpenEditor::Clap(editor) => editor.close(),
         }
     }
 }
@@ -92,6 +97,7 @@ fn gui_supported(meta: &LoadedPluginMeta) -> bool {
             matches!(best_supported_ui(plugin), Some((_, UiKind::ExternalUi | UiKind::X11Ui)))
         }
         PluginEditor::Vst3(_) => true,
+        PluginEditor::Clap(controller) => controller.has_gui(),
     }
 }
 
@@ -996,13 +1002,15 @@ impl Rack {
         }
     }
 
-    /// Pumps open VST3 editors, and forgets any GUI or parameter window that has
+    /// Pumps open VST3 editors and CLAP GUIs, and forgets any GUI or parameter window that has
     /// closed, refreshing its slot.
     fn poll_uis(&self, engine: &Engine) {
         let mut closed = Vec::new();
         for (&key, editor) in self.open_uis.borrow_mut().iter_mut() {
-            if let OpenEditor::Vst3(editor) = editor {
-                editor.idle();
+            match editor {
+                OpenEditor::Vst3(editor) => editor.idle(),
+                OpenEditor::Clap(editor) => editor.idle(),
+                OpenEditor::Lv2(_) => {}
             }
             if editor.is_closed() {
                 closed.push(key);
@@ -1481,6 +1489,8 @@ fn main() -> anyhow::Result<()> {
                     Vst3Editor::open(controller, &meta.name, Box::new(forward_edit))
                         .map(OpenEditor::Vst3)
                 }
+                // Its edits come through `Engine::idle_plugins`.
+                PluginEditor::Clap(controller) => ClapEditor::open(controller, &meta.name).map(OpenEditor::Clap),
             };
             let error = match opened {
                 Ok(editor) => {
@@ -2169,7 +2179,16 @@ fn main() -> anyhow::Result<()> {
             {
                 rack.refresh_scenes(&app);
             }
-            while let Ok(edit) = edit_rx.try_recv() {
+            // CLAP plugins' main-thread work, and their GUIs' edits.
+            let mut edits = Vec::new();
+            let reread = engine.borrow_mut().idle_plugins(|key, param_id, value| {
+                edits.push(GuiEdit::Param { key, param_id, value });
+            });
+            for key in reread {
+                rack.refresh_param_rows(&engine.borrow(), key);
+            }
+            edits.extend(edit_rx.try_iter());
+            for edit in edits {
                 match edit {
                     GuiEdit::Param { key, param_id, value } => {
                         // Plugin GUIs also echo values back (e.g. every value when

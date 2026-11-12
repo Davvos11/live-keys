@@ -1,0 +1,18 @@
+[package]
+name = "live-keys-clap-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+live-keys-core = { path = "../core" }
+clap-sys = "0.5"
+libloading = "0.9"
+anyhow = "1"
+log = "0.4"
+dirs = "7"
+libc = "0.2"
+
+[dev-dependencies]
+env_logger = "0.11"
