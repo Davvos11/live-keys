@@ -1,16 +1,19 @@
 //! What a slot shows besides its chain: the header photo picked from the
-//! instrument's name, the instrument parameters shown as knobs, and the
-//! snapshot a cleared slot can be brought back from.
+//! instrument's name, its panel's cells and drawbars as the UI shows them, and
+//! the snapshot a cleared slot can be brought back from.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_engine::{Engine, LoadedPluginMeta, ParamInfo, ParamKind, PluginKey, PresetInfo};
+use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PresetInfo};
+use slint::{Model, ModelRc, SharedString, VecModel};
 
-use crate::{KnobRow, config, slot_presets};
+use crate::profiles::{CellValue, Control, DrawbarColour, Panel, ROW_LEN, Target, Widget};
+use crate::{DrawbarCell, PanelCell, PanelPoolRow, config, slot_presets};
 
-/// How many of the instrument's parameters show as knobs.
-pub const KNOB_COUNT: usize = 5;
+/// How many pool controls a cell's context menu lists at most (besides those in
+/// the row); the rest are under "More parameters…".
+const MENU_POOL_MAX: usize = 16;
 
 /// The header photo for an instrument, as numbered by the UI's `Artwork`:
 /// 0 generic, 1 piano, 2 electric piano, 3 organ, 4 synth, 5 strings, 6 pad.
@@ -75,30 +78,158 @@ pub fn knob_value(param: &ParamInfo, position: f32) -> f32 {
     }
 }
 
-/// The knobs for `instrument`: its first [`KNOB_COUNT`] continuous parameters,
-/// at their current values.
-pub fn knob_rows(engine: &Engine, instrument: &LoadedPluginMeta) -> Vec<KnobRow> {
-    instrument
-        .params
+/// The row of `panel` for the plugin with `key`, at current values. Padded with
+/// empty cells (`widget` -1, to fill from their menu) up to [`ROW_LEN`] while
+/// the plugin has more controls to offer than the row shows.
+pub fn panel_cells(engine: &Engine, key: PluginKey, panel: &Panel) -> Vec<PanelCell> {
+    let mut cells: Vec<PanelCell> = panel
+        .row
         .iter()
-        .filter(|param| param.kind == ParamKind::Continuous)
-        .take(KNOB_COUNT)
-        .map(|param| knob_row(engine, instrument.key, param))
+        .filter_map(|&index| panel.pool.get(index))
+        .map(|control| panel_cell(engine, key, control))
+        .collect();
+    let params = engine.plugin(key).map_or(0, |meta| meta.params.len());
+    let offered = ROW_LEN.min(panel.pool.len().max(params));
+    if cells.len() < offered {
+        cells.resize(offered, PanelCell { widget: -1, ..Default::default() });
+    }
+    cells
+}
+
+/// `control`'s cell at its current value.
+fn panel_cell(engine: &Engine, key: PluginKey, control: &Control) -> PanelCell {
+    let value = control.read(engine, key);
+    let param = param_of(engine, key, control);
+    let count = control.choices.len();
+    let index = choice_index(value, count);
+    let position = match value {
+        CellValue::Position(position) => position,
+        CellValue::On(on) => f32::from(u8::from(on)),
+        CellValue::Index(index) => index as f32 / (count.max(2) - 1) as f32,
+    };
+    // A reset goes to the parameter's default; with nothing to go by (a
+    // setBfree control), it stays where it is.
+    let default_position = param.map_or(position, |param| self::position(param, param.default_value));
+    let default_index = param
+        .and_then(|param| {
+            control
+                .choices
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    (a.value - param.default_value).abs().total_cmp(&(b.value - param.default_value).abs())
+                })
+                .map(|(index, _)| index)
+        })
+        .unwrap_or(index);
+    // Stepped parameters step on a knob too, rather than snapping only once
+    // sent (which would fight a slow drag).
+    let steps = match param {
+        Some(param)
+            if count == 0
+                && matches!(param.kind, ParamKind::Stepped | ParamKind::Note)
+                && !param.logarithmic =>
+        {
+            param.steps as i32
+        }
+        _ => 0,
+    };
+    PanelCell {
+        widget: match control.widget {
+            Widget::Knob | Widget::Drawbar => 0,
+            Widget::Switch => 1,
+            Widget::Lever => 2,
+        },
+        label: control.label.as_str().into(),
+        text: control.text.as_str().into(),
+        position,
+        default_position,
+        steps,
+        on: match value {
+            CellValue::On(on) => on,
+            CellValue::Position(position) => position >= 0.5,
+            CellValue::Index(index) => index > 0,
+        },
+        choices: ModelRc::new(VecModel::from(
+            control.choices.iter().map(|choice| SharedString::from(choice.label.as_str())).collect::<Vec<_>>(),
+        )),
+        index: index as i32,
+        default_index: default_index as i32,
+        value_text: control.value_text(engine, key).into(),
+    }
+}
+
+/// The parameter `control` drives, if it drives one.
+fn param_of<'a>(engine: &'a Engine, key: PluginKey, control: &Control) -> Option<&'a ParamInfo> {
+    let Target::Param(id) = control.target else {
+        return None;
+    };
+    engine.plugin(key)?.params.iter().find(|param| param.id == id)
+}
+
+/// `value` as an index into `count` options.
+fn choice_index(value: CellValue, count: usize) -> usize {
+    let last = count.saturating_sub(1);
+    match value {
+        CellValue::Index(index) => index.min(last),
+        CellValue::Position(position) => (position.clamp(0.0, 1.0) * last as f32).round() as usize,
+        CellValue::On(on) => if on { last } else { 0 },
+    }
+}
+
+/// The fixed section's drawbars of `panel` for the plugin with `key`.
+pub fn panel_drawbars(engine: &Engine, key: PluginKey, panel: &Panel) -> Vec<DrawbarCell> {
+    panel
+        .drawbars
+        .iter()
+        .map(|control| DrawbarCell {
+            label: control.label.as_str().into(),
+            colour: match control.colour {
+                Some(DrawbarColour::Brown) => 0,
+                Some(DrawbarColour::White) | None => 1,
+                Some(DrawbarColour::Black) => 2,
+            },
+            level: choice_index(control.read(engine, key), 9) as i32,
+        })
         .collect()
 }
 
-pub fn knob_row(engine: &Engine, key: PluginKey, param: &ParamInfo) -> KnobRow {
-    let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
-    KnobRow {
-        key: key as i32,
-        param_id: param.id as i32,
-        name: param.name.as_str().into(),
-        position: position(param, value),
-        default_position: position(param, param.default_value),
-        min_value: param.min_value,
-        max_value: param.max_value,
-        logarithmic: param.logarithmic,
-        text: engine.param_text(key, param.id, value).into(),
+/// The pool as a cell's context menu lists it: every control if there are few,
+/// else the first [`MENU_POOL_MAX`] and those in the row.
+pub fn panel_pool(panel: &Panel) -> Vec<PanelPoolRow> {
+    panel
+        .pool
+        .iter()
+        .enumerate()
+        .filter_map(|(index, control)| {
+            let cell = panel.row.iter().position(|&shown| shown == index);
+            (index < MENU_POOL_MAX || cell.is_some()).then(|| PanelPoolRow {
+                index: index as i32,
+                name: control.name.as_str().into(),
+                cell: cell.map_or(-1, |cell| cell as i32),
+            })
+        })
+        .collect()
+}
+
+/// Makes `model` hold `cells` like `sync_model`, but treating cells whose
+/// choices read the same as equal (each refresh makes new choice models), so
+/// unchanged cells aren't touched.
+pub fn sync_cells(model: &VecModel<PanelCell>, cells: Vec<PanelCell>) {
+    if model.row_count() != cells.len() {
+        model.set_vec(cells);
+        return;
+    }
+    for (index, mut cell) in cells.into_iter().enumerate() {
+        let Some(old) = model.row_data(index) else {
+            continue;
+        };
+        if old.choices.iter().eq(cell.choices.iter()) {
+            cell.choices = old.choices.clone();
+        }
+        if old != cell {
+            model.set_row_data(index, cell);
+        }
     }
 }
 

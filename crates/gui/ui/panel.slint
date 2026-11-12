@@ -1,0 +1,474 @@
+// The instrument panel on a slot's first tab, after the Penpot design: an
+// optional fixed section of drawbars, then a row of cells, each a knob, a
+// switch (the design's Toggle) or a lever, chosen from the panel's pool through
+// the cell's context menu. What a control drives lives in Rust
+// (`src/profiles.rs`); these only draw values and report edits.
+import { ListView } from "std-widgets.slint";
+import { AppState, PanelCell, PanelPoolRow, DrawbarCell } from "globals.slint";
+import { Theme, ListItem, TextField, Icons } from "widgets.slint";
+import { LabelledKnob } from "knob.slint";
+
+// The design's colours for these controls beyond the theme's: the dark wells a
+// switch's light and a lever's track sit in, and the drawbars.
+global PanelColours {
+    out property <color> well: #161616;
+    out property <color> well-border: #474747;
+    out property <color> notch: #5a5a5a;
+    out property <color> shaft: #0e0e0e;
+    out property <color> shaft-border: #3a3a3a;
+    // As `DrawbarCell.colour`: brown, white, black.
+    out property <[color]> handles: [#7a4a22, #ece9e2, #0e0e0e];
+}
+
+// The caption under a cell's control, on the same line as a `LabelledKnob`'s.
+component Caption inherits Text {
+    y: 50px;
+    width: 100%;
+    height: 17px;
+    color: Theme.text-muted;
+    font-size: Theme.small-font-size;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+// A cell's 48×44 button, lined up with a knob's bottom edge.
+component CellButton inherits Rectangle {
+    in property <bool> hover;
+    in property <bool> pressed;
+    x: 4px;
+    y: 4px;
+    width: 48px;
+    height: 44px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: root.pressed ? Theme.control-pressed : root.hover ? Theme.control-hover : Theme.control;
+}
+
+// The design's Toggle: a button with a word on it ("Soft") and a light along
+// its top, lit when on, over a caption ("Volume"). Clicking toggles it; `on`
+// only follows the host.
+export component Toggle inherits Rectangle {
+    in property <string> text;
+    in property <string> label;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback toggled(/* on */ bool);
+
+    width: 56px;
+    height: 67px;
+    opacity: root.enabled ? 1 : 0.5;
+
+    CellButton {
+        hover: touch.has-hover && root.enabled;
+        pressed: touch.pressed;
+        Rectangle {
+            x: 7px;
+            y: 7px;
+            width: 34px;
+            height: 4px;
+            border-radius: 2px;
+            background: root.on ? Theme.accent : PanelColours.well;
+            border-width: root.on ? 0px : 1px;
+            border-color: PanelColours.well-border;
+        }
+        Text {
+            x: 2px;
+            y: 19px;
+            width: parent.width - 4px;
+            height: 17px;
+            text: root.text;
+            color: root.on ? Theme.text : Theme.text-muted;
+            font-size: Theme.small-font-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.toggled(!root.on); }
+        }
+    }
+    Caption { text: root.label; }
+}
+
+// The design's Lever, after a B3's half-moon switch: 2 or 3 options as notches
+// on a track, a thumb at the current one, its word below, over a caption.
+// Click the left, middle or right part to pick that option; drag sideways or
+// up and down (right and up go towards the last option) or scroll, one option
+// per step. `index` only follows the host.
+export component Lever inherits Rectangle {
+    in property <[string]> choices;
+    in property <int> index;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback picked(/* index */ int);
+
+    property <int> count: max(root.choices.length, 1);
+    // Drag distance per option.
+    property <length> step-length: 16px;
+    property <length> press-x;
+    property <length> press-y;
+    property <int> press-index;
+    property <bool> dragged;
+    // Scrolling not yet turned into a step.
+    property <length> scrolled;
+
+    // The centre of option `i`'s notch, from the button's left edge.
+    function notch-x(i: int) -> length {
+        return root.count <= 1 ? 24px : 12px + 24px * i / (root.count - 1);
+    }
+    function pick(i: int) {
+        let target = Math.clamp(i, 0, root.count - 1);
+        if (target != root.index) {
+            root.picked(target);
+        }
+    }
+
+    width: 56px;
+    height: 67px;
+    opacity: root.enabled ? 1 : 0.5;
+
+    CellButton {
+        hover: touch.has-hover && root.enabled;
+        pressed: touch.pressed;
+        Rectangle {
+            x: 6px;
+            y: 8px;
+            width: 36px;
+            height: 8px;
+            border-radius: 4px;
+            background: PanelColours.well;
+            border-width: 1px;
+            border-color: PanelColours.well-border;
+        }
+        for i in root.count : Rectangle {
+            x: root.notch-x(i) - 1px;
+            y: 11px;
+            width: 2px;
+            height: 2px;
+            background: PanelColours.notch;
+        }
+        Rectangle {
+            x: root.notch-x(root.index) - 6px;
+            y: 6px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: Theme.accent;
+            animate x { duration: 80ms; }
+        }
+        Text {
+            x: 2px;
+            y: 21px;
+            width: parent.width - 4px;
+            height: 17px;
+            text: root.choices[root.index];
+            color: Theme.text;
+            font-size: Theme.small-font-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.press-x = self.mouse-x;
+                    root.press-y = self.mouse-y;
+                    root.press-index = root.index;
+                    root.dragged = false;
+                } else if (event.kind == PointerEventKind.move && self.pressed) {
+                    // Right and up both count towards the last option.
+                    let travel = (self.mouse-x - root.press-x) - (self.mouse-y - root.press-y);
+                    if (abs(travel) > 4px) {
+                        root.dragged = true;
+                    }
+                    if (root.dragged) {
+                        root.pick(root.press-index + Math.round(travel / root.step-length));
+                    }
+                }
+            }
+            clicked => {
+                if (!root.dragged) {
+                    root.pick(Math.floor(self.mouse-x / (self.width / root.count)));
+                }
+            }
+            scroll-event(event) => {
+                let delta = event.delta-y != 0 ? event.delta-y : -event.delta-x;
+                if (delta == 0) {
+                    return reject;
+                }
+                // About one wheel notch per option; a touchpad adds up.
+                root.scrolled += delta;
+                if (abs(root.scrolled) >= 40px) {
+                    root.pick(root.index + (root.scrolled > 0 ? 1 : -1));
+                    root.scrolled = 0;
+                }
+                accept
+            }
+        }
+    }
+    Caption { text: root.label; }
+}
+
+// The design's Drawbar: a numbered shaft pulled out to `level` (0..=8) with a
+// coloured handle at its end. Drag it up or down, or scroll, to set the level;
+// `level` only follows the host.
+export component Drawbar inherits Rectangle {
+    in property <int> level;
+    // As `DrawbarCell.colour`.
+    in property <int> colour;
+    in property <string> label;
+    callback set-level(/* level */ int);
+
+    // How far one level moves the handle.
+    property <length> pitch: 11px;
+    property <length> press-y;
+    property <int> press-level;
+    property <length> scrolled;
+
+    function set(level: int) {
+        let target = Math.clamp(level, 0, 8);
+        if (target != root.level) {
+            root.set-level(target);
+        }
+    }
+
+    width: 24px;
+    height: 6px + 8 * root.pitch + 12px;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: root.level;
+
+    if root.level > 0 : Rectangle {
+        y: 0;
+        height: 6px + root.level * root.pitch;
+        background: PanelColours.shaft;
+        border-width: 1px;
+        border-color: PanelColours.shaft-border;
+    }
+    for i in root.level : Text {
+        y: 3px + i * root.pitch;
+        height: root.pitch;
+        width: 100%;
+        text: root.level - i;
+        color: Theme.text-muted;
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: root.level > 0 ? 6px + root.level * root.pitch : 0;
+        height: 12px;
+        background: PanelColours.handles[root.colour];
+        // The white handle stands out by itself.
+        border-width: root.colour == 1 ? 0px : 1px;
+        border-color: PanelColours.shaft-border;
+    }
+    TouchArea {
+        mouse-cursor: MouseCursor.ns-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.press-y = self.mouse-y;
+                root.press-level = root.level;
+            } else if (event.kind == PointerEventKind.move && self.pressed) {
+                root.set(root.press-level + Math.round((self.mouse-y - root.press-y) / root.pitch));
+            }
+        }
+        scroll-event(event) => {
+            let delta = event.delta-y != 0 ? event.delta-y : event.delta-x;
+            if (delta == 0) {
+                return reject;
+            }
+            // Scrolling down pulls it out, like dragging down.
+            root.scrolled += delta;
+            if (abs(root.scrolled) >= 40px) {
+                root.set(root.level + (root.scrolled > 0 ? -1 : 1));
+                root.scrolled = 0;
+            }
+            accept
+        }
+    }
+}
+
+// The fixed section's drawbars, spread across the width.
+export component DrawbarSection inherits Rectangle {
+    in property <[DrawbarCell]> drawbars;
+    callback set-level(/* drawbar */ int, /* level */ int);
+
+    property <length> inset: 3px;
+
+    height: 6px + 8 * 11px + 12px;
+
+    for bar[index] in root.drawbars : Drawbar {
+        x: root.inset + (root.drawbars.length <= 1 ? 0px
+            : index * (root.width - 2 * root.inset - self.width) / (root.drawbars.length - 1));
+        y: 0;
+        level: bar.level;
+        colour: bar.colour;
+        label: bar.label;
+        set-level(level) => { root.set-level(index, level); }
+    }
+}
+
+// One cell of the row: its control by kind, and its context menu (right-click;
+// an empty cell's opens on any click) to pick what it shows.
+export component PanelCellView inherits Rectangle {
+    in property <PanelCell> cell;
+    in property <int> cell-index;
+    in property <[PanelPoolRow]> pool;
+    callback set-position(/* 0..1 */ float);
+    callback set-on(bool);
+    callback set-index(int);
+    callback choose(/* pool index */ int);
+    callback more-parameters();
+    callback reset-row();
+
+    width: 56px;
+    height: 67px;
+
+    if root.cell.widget == 0 && root.cell.choices.length == 0 : LabelledKnob {
+        label: root.cell.label;
+        value-text: root.cell.value-text;
+        minimum: 0;
+        maximum: 1;
+        step: root.cell.steps > 0 ? 1 / root.cell.steps : 0;
+        default-value: root.cell.default-position;
+        value: root.cell.position;
+        // Turning sets the knob's own value, replacing its binding; this keeps
+        // following changes from elsewhere.
+        property <float> source: root.cell.position;
+        changed source => { self.value = self.source; }
+        changed(position) => { root.set-position(position); }
+    }
+    // A stepped knob: its options as steps, showing the option's label.
+    if root.cell.widget == 0 && root.cell.choices.length > 0 : LabelledKnob {
+        label: root.cell.label;
+        value-text: root.cell.choices[Math.round(self.value)];
+        minimum: 0;
+        maximum: max(root.cell.choices.length - 1, 1);
+        step: 1;
+        default-value: root.cell.default-index;
+        value: root.cell.index;
+        property <int> source: root.cell.index;
+        changed source => { self.value = self.source; }
+        changed(value) => { root.set-index(Math.round(value)); }
+    }
+    if root.cell.widget == 1 : Toggle {
+        text: root.cell.text;
+        label: root.cell.label;
+        on: root.cell.on;
+        toggled(on) => { root.set-on(on); }
+    }
+    if root.cell.widget == 2 : Lever {
+        choices: root.cell.choices;
+        index: root.cell.index;
+        label: root.cell.label;
+        picked(index) => { root.set-index(index); }
+    }
+    // Nothing chosen yet: a faint outline to fill from the menu.
+    if root.cell.widget < 0 : Rectangle {
+        x: 4px;
+        y: 4px;
+        width: 48px;
+        height: 44px;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: empty-area.has-hover ? Theme.text-faint : Theme.control-border;
+        Text {
+            text: "+";
+            color: Theme.text-faint;
+            font-size: Theme.font-size;
+        }
+        empty-area := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { menu.show({ x: self.mouse-x + 4px, y: self.mouse-y + 4px }); }
+        }
+    }
+
+    // On top of the control, which would otherwise take the right-click; other
+    // clicks pass through.
+    menu := ContextMenuArea {
+        width: 100%;
+        height: 100%;
+        Menu {
+            MenuItem {
+                title: "Show here";
+                enabled: false;
+            }
+            for entry in root.pool : MenuItem {
+                title: entry.name;
+                // Controls in other cells are greyed; this cell's is ticked.
+                enabled: entry.cell < 0 || entry.cell == root.cell-index;
+                checked: entry.cell == root.cell-index;
+                activated => { root.choose(entry.index); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "More parameters…";
+                activated => { root.more-parameters(); }
+            }
+            MenuItem {
+                title: "Reset row";
+                activated => { root.reset-row(); }
+            }
+        }
+    }
+}
+
+// "More parameters…": a search over every parameter of the instrument
+// (`AppState.param-search-rows`, filled in Rust); choosing one shows it in the
+// cell the menu came from. Enter picks the first match.
+export component ParamSearchPopup inherits PopupWindow {
+    callback filter(/* query */ string);
+    callback pick(/* index */ int);
+
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        background: Theme.background;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000060;
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 6px;
+            search := TextField {
+                placeholder: "Search parameters";
+                icon: Icons.search;
+                init => { self.grab-focus(); }
+                edited(text) => { root.filter(text); }
+                accepted => {
+                    if (AppState.param-search-rows.length > 0) {
+                        root.pick(0);
+                        root.close();
+                    }
+                }
+            }
+            if AppState.param-search-rows.length == 0 : Text {
+                text: AppState.param-search-count == 0 ? "This instrument has no parameters." : "No parameters match \"\{search.text}\".";
+                color: Theme.text-faint;
+                font-size: Theme.small-font-size;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+            if AppState.param-search-rows.length > 0 : ListView {
+                vertical-stretch: 1;
+                for name[index] in AppState.param-search-rows : ListItem {
+                    text: name;
+                    clicked => {
+                        root.pick(index);
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}
