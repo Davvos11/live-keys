@@ -16,6 +16,7 @@ global PanelColours {
     out property <color> notch: #5a5a5a;
     out property <color> shaft: #0e0e0e;
     out property <color> shaft-border: #3a3a3a;
+    out property <color> numbers: #d2d2d2;
     // As `DrawbarCell.colour`: brown, white, black.
     out property <[color]> handles: [#7a4a22, #ece9e2, #0e0e0e];
 }
@@ -256,7 +257,8 @@ export component Drawbar inherits Rectangle {
         height: root.pitch;
         width: 100%;
         text: root.level - i;
-        color: Theme.text-muted;
+        // On the black shaft in either theme.
+        color: PanelColours.numbers;
         font-size: 10px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -265,8 +267,8 @@ export component Drawbar inherits Rectangle {
         y: root.level > 0 ? 6px + root.level * root.pitch : 0;
         height: 12px;
         background: PanelColours.handles[root.colour];
-        // The white handle stands out by itself.
-        border-width: root.colour == 1 ? 0px : 1px;
+        // The white handle stands out by itself on a dark background.
+        border-width: root.colour == 1 && Theme.dark ? 0px : 1px;
         border-color: PanelColours.shaft-border;
     }
     TouchArea {
