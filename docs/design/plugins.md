@@ -20,6 +20,14 @@ options. Started 2026-11-10.
   format's own preset mechanism, not only in live-keys.
 - **No inline displays in instrument headers** for now; inline views are for effects.
 - **Our own effects open a small in-app popup** from their FX square (see Part C).
+- **Third-party plugins first**: panel profiles for existing plugins come before any plugin of
+  our own. Profiles are **for instruments only** at first; effects keep the generic popover.
+- **setBfree** is driven by its own control messages (two-way), with the upper manual's
+  drawbars only. The generic `cc` target comes later, with the customise UI.
+- **One row of five controls** on the slot's first tab, below an optional fixed section
+  (drawbars). The user picks each cell's control from the profile's pool, or from all
+  parameters, through a context menu, and the choice is kept per plugin. The window's
+  minimum is 1200×1027, with no scrolling needed.
 - **Cross-platform is a future goal** for the app. For our own instruments: **CLAP is the
   reference format**, and **VST3 and LV2 are built too** (see "Formats for the standalone
   instruments").
@@ -81,7 +89,8 @@ A profile is roughly:
 ```
 
 Profiles we ship are compiled in. Profiles the user makes (Part B) go to
-`<data dir>/live-keys/profiles/`, and a user profile overrides a shipped one.
+`<data dir>/live-keys/profiles/`, and a user profile overrides a shipped one. The details are
+in Part B, "Panel profiles", which comes first in the order of work.
 
 ### How to package our own instruments
 
@@ -189,6 +198,215 @@ piano**, a **pad**.
 
 ## Part B — setting up third-party plugins
 
+Third-party plugins come first: profiles for the plugins people already use, before any
+plugin of our own (2026-11-12).
+
+### Panel profiles (draft, 2026-11-12)
+
+A profile describes the slot's first tab for one plugin: which controls appear, how they're
+laid out, and what each one drives. Shipped and user profiles have the same format.
+
+**Targets: what a control drives.**
+
+- **`param`**: a plugin parameter. A profile needs an id that is stable across plugin versions
+  and sessions. VST3 `ParamID`s and CLAP parameter ids are. An LV2 `ParamInfo::id` is a port
+  index, which can change when a plugin adds a port, so LV2 targets are **port symbols**.
+  `ParamInfo` gets a `symbol: String` (the LV2 port symbol, or the VST3/CLAP id in decimal),
+  and profiles match on it.
+- **`cc`**: a MIDI CC on a channel. It's for plugins that only listen to fixed CCs. It's
+  **one-way**: the host can't see the value change elsewhere (the plugin's own GUI, its
+  programs, a hardware controller), so it shows the last value it sent. The CC goes straight to
+  the instrument's MIDI input, after the slot's filter and MIDI effects, so a zone or an
+  arpeggiator can't swallow it. That needs a new rack command; `Engine::send_midi` goes through
+  every slot's router.
+- **`setbfree`**: setBfree's own control messages. Its GUI and DSP exchange every setting as
+  `sb3:controlmsg` objects (`sb3:controlkey`, a function name like `upper.drawbar16`;
+  `sb3:controlval`, 0–127) on the `control` input and the `notify` output, and the DSP reports
+  every change there, including program changes and state loads. So unlike `cc` this is
+  **two-way**: the panel shows the real drawbar positions, through plumbing that already
+  exists (`send_ui_atom`, `drain_ui_events`). It's plugin-specific code, but setBfree is the one
+  CC-only plugin that matters, and no MIDI channel needs configuring. **Decided:** use this for
+  setBfree, upper manual only (one row of drawbars, as in the design), and add `cc` with the
+  customise UI (step 2), for other CC-only plugins.
+
+**setBfree's protocol** (verified 2026-11-12 against v0.8.13, headless, through the engine; and
+its source):
+
+- **A control message** is an `atom:Object` with otype `sb3:controlmsg` (`sb3:` =
+  `http://gareus.org/oss/lv2/b_synth#`). Its properties are `sb3:controlkey`, an `atom:String`
+  function name, and `sb3:controlval`, an `atom:Int` from 0 to 127. It's the same shape both
+  ways: written to `control` (port 0), reported on `notify` (port 1).
+- **Reporting starts with `sb3:uiinit`.** setBfree reports nothing until an empty
+  `sb3:uiinit` object arrives. That message then dumps every function that has been set at
+  least once (35 on a fresh instance), followed by all 128 programs (`sb3:midipgm`). So the
+  host sends `uiinit` when the plugin loads. Functions that never got a value aren't in the
+  dump, so the profile needs defaults for those.
+- **What gets reported, and what doesn't:**
+  - Values set by the host aren't echoed back, and neither are values derived from them
+    (`vibrato.upper` ↔ `vibrato.routing`), so the panel updates its own model.
+  - Keyboard CCs and program changes are reported (only the values the program sets).
+  - A state restore (slot preset, LV2 preset) reports `special.reinit` followed by a full dump,
+    without being asked. Read `special.reinit` as "reset to defaults, the values follow".
+- **Drawbars are inverted.** 0 means fully out (8) and 127 fully in (0):
+  `level = rint((127 − v) · 8 / 127)`. The host sends `rint((8 − level) · 127 / 8)`.
+- **Values of the panel's controls:**
+
+  | Function | Values |
+  |---|---|
+  | `upper.drawbar{16,513,8,4,223,2,135,113,1}` | inverted, as above |
+  | `percussion.enable` / `.volume` / `.decay` / `.harmonic` | ≥ 64: on / soft / fast / 2nd (else off / normal / slow / 3rd) |
+  | `vibrato.knob` | V1 C1 V2 C2 V3 C3 = 0, 23, 46, 69, 92, 115 (`v / 23`); no "off" |
+  | `vibrato.upper` | ≥ 64 on (vibrato on the upper manual) |
+  | `rotary.speed-preset` | slow / stop / fast = 0 / 64 / 127 (`v / 43`) |
+  | `overdrive.enable`, `overdrive.character` | ≥ 64 on; 0–127 |
+  | `swellpedal1` | volume, 0–127 (default 127) |
+  | `reverb.mix` | 0–127 (default 12) |
+
+- **Write only through `controlmsg`.** `sb3:cfgstr`/`loadcfg` rebuild the whole synth on the
+  worker. `overdrive.inputgain`/`outputgain` print to stdout on every change.
+
+**Widgets.**
+
+| Widget | For | Notes |
+|---|---|---|
+| `knob` | continuous or stepped | the current `LabelledKnob`; ~56 px wide |
+| `drawbar` | 9 positions (0–8) | the design's `Drawbar`, colour `brown`/`white`/`black`; ~30 px wide |
+| `switch` | toggle | the design's `Toggle`: a 48×44 button with a short word on it ("Soft", "Fast") and an accent bar along its top when on, plus a caption below ("Volume", "Decay"). Same 56 px cell and caption line as a `LabelledKnob`, so the two mix in one row |
+| `lever` | a choice of 3 (or 2) options | the design's `Lever`: a track with notches and a thumb, the current option's word below it ("Fast"), the caption under the button. Click a side (or the centre), drag left/right **or** up/down (right/up is towards the last option), or scroll, one step per notch. Modelled on the B3's half-moon Leslie switch |
+
+A choice of 2–3 options can be a `lever`; any other choice or stepped parameter is a
+**stepped knob**: a `knob` that snaps to its steps and
+shows the current option's label (from the plugin, or the control's `choices`), like a B3's
+vibrato selector. A `Select` or a segmented row of buttons doesn't fit in a 56 px cell.
+
+A control can override what the plugin reports: `min`/`max` (a cutoff knob that only covers
+the useful range), `steps` and `choices` (JUCE plugins report most choice parameters as
+continuous; see CLAUDE.md), `invert`.
+
+**Layout: one row the user picks from** (decided 2026-11-12; Penpot: "Live (window minimum,
+1200×995)", slot 2). The slot's first tab has, from top to bottom:
+
+1. **An optional fixed section** that the profile defines and the user doesn't rearrange:
+   setBfree's nine drawbars. Most profiles have none.
+2. **One row of five cells**, each holding a knob, a switch or a choice. Every cell is 56 px
+   wide with a caption line, so the different kinds mix in one row. This is the current knob
+   row, generalised.
+3. **The audio effects' FX grid**, as now.
+
+This fits the minimum window without scrolling, drawbars included. The profile doesn't
+dictate the row. It offers a **pool** of curated controls (setBfree: percussion ×4, vibrato on
+and mode, Leslie, drive on and amount, reverb, swell) and a **default** five. The user changes
+a cell from its context menu (right-click), which lists:
+
+- the pool, where controls already in the row are greyed and the cell's own control is
+  highlighted;
+- **More parameters…**, a search over all of the plugin's parameters, the same as the
+  customise UI;
+- **Reset row**, which goes back to the profile's default.
+
+The user's choice is kept **per plugin** (every slot with setBfree shows the same row), as a
+user profile, so a slot preset or a scene doesn't change it. The pool is ordered as the menu
+lists it.
+
+A plugin without a profile gets a pool of all its parameters, with its first five continuous
+parameters as the default row (today's fallback). So the context menu is also the first
+version of Part B's "Customise panel".
+
+**A control** has
+
+- `id`: stable within the profile; the saved row and a later MIDI-learn binding point at it;
+- `target`: as above;
+- `widget` and its options;
+- `label`: the short caption under the control ("Drive", "16'");
+- `name`: what the context menu lists ("Perc volume"), the label if absent;
+- for a switch, `text`: the word on the button ("Soft"), lit when on.
+
+```jsonc
+{
+  "plugin": "http://gareus.org/oss/lv2/b_synth",
+  "fixed": "drawbars",                       // the fixed section's layout, if any
+  "drawbars": [
+    { "id": "db16", "label": "16'", "colour": "brown", "target": { "setbfree": "upper.drawbar16" } },
+    // … 5⅓' brown, 8' white, 4' white, 2⅔' black, 2' white, 1⅗' black, 1⅓' black, 1' white
+  ],
+  "controls": [                              // the pool, in menu order
+    { "id": "perc", "label": "Perc", "text": "On", "widget": "switch", "target": { "setbfree": "percussion.enable" } },
+    { "id": "perc-vol", "name": "Perc volume", "label": "Volume", "text": "Soft", "widget": "switch",
+      "target": { "setbfree": "percussion.volume" } },
+    { "id": "perc-decay", "name": "Perc decay", "label": "Decay", "text": "Fast", "widget": "switch",
+      "target": { "setbfree": "percussion.decay" } },
+    { "id": "perc-harm", "name": "Perc harmonic", "label": "Harmonic", "text": "2nd", "widget": "switch",
+      "target": { "setbfree": "percussion.harmonic" } },
+    { "id": "vibrato", "label": "Vibrato", "text": "On", "widget": "switch", "target": { "setbfree": "vibrato.upper" } },
+    { "id": "vib-mode", "name": "Vibrato mode", "label": "Mode", "widget": "knob", "target": { "setbfree": "vibrato.knob" },
+      "choices": ["V1", "C1", "V2", "C2", "V3", "C3"] },   // a stepped knob, like a B3's selector
+    { "id": "leslie", "label": "Leslie", "widget": "lever", "target": { "setbfree": "rotary.speed-preset" },
+      "choices": [{ "label": "Slow", "value": 0 }, { "label": "Stop", "value": 64 }, { "label": "Fast", "value": 127 }] },
+    { "id": "drive", "label": "Drive", "text": "On", "widget": "switch", "target": { "setbfree": "overdrive.enable" } },
+    { "id": "drive-amt", "name": "Drive amount", "label": "Amount", "widget": "knob", "target": { "setbfree": "overdrive.character" } },
+    { "id": "reverb", "label": "Reverb", "widget": "knob", "target": { "setbfree": "reverb.mix" } },
+    { "id": "swell", "name": "Swell (volume)", "label": "Swell", "widget": "knob", "target": { "setbfree": "swellpedal1" } }
+  ],
+  "row": ["perc", "vibrato", "leslie", "drive", "reverb"]
+}
+```
+
+A Surge XT profile has no
+fixed section, a pool of M1–M8 and Global Volume (`{ "param": "<id>" }` targets), and M1–M5 as
+its row.
+
+**Values.** Parameter values are already recorded by the engine (`Engine::param_value`). `cc`
+and `setbfree` values are recorded per plugin in the same way. `cc` values also go into the
+session and slot presets (`slot.json`), so the panel shows them again after a reload. The
+plugin's state restores the sound either way. setBfree's values come back from the plugin
+itself.
+
+**Storage.** Shipped profiles are JSON files in the repo, compiled in (`include_str!`). User
+profiles are `<data dir>/live-keys/profiles/*.json`, one per plugin, with the plugin id inside
+the file (ids contain `/` and `:`, so they don't make good file names). A user profile replaces
+the shipped one wholesale, with no merging, and "Reset" deletes it. Profiles are per plugin, so
+they're not part of slot presets or scenes.
+
+**No profile:** the current fallback (the first five continuous parameters as knobs).
+
+**Shipped profiles to start with** (investigated 2026-11-12 with `plugin-check --info`; the
+raw lists are not kept):
+
+- **setBfree**: as above.
+The lists below were proposed as rows before the one-row decision. Read the first group as
+the default row and the rest as the pool.
+
+- **mda EPiano** (LV2, 12 ports, all 0–1). Knobs:
+  - default row: Decay `env_decay`, Release `env_release`, Hardness `hardness`, Treble
+    `treble_boost`, Drive `overdrive`;
+  - also in the pool: Trem/Pan `modulation`, Rate `lfo_rate`, Velocity `vel_sense`, Width
+    `stereo_width`, Detune `random_tuning`.
+
+  Hardness, Treble and Trem/Pan are centred (0.5 = neutral), which argues for a bipolar knob
+  style.
+- **Helm** (LV2 only, 139 ports; symbol = name). The JUCE LV2 wrapper reports everything as
+  continuous 0–1, so `*_on` switches need `steps: 1` and type parameters need `steps` +
+  `choices`. Pool:
+  - default row (filter): `cutoff`, `resonance`, `fil_env_depth`, `filter_drive`, `keytrack`;
+  - amp: `amp_attack`/`decay`/`sustain`/`release`, `velocity_track`;
+  - FX: `delay_on`, `reverb_on`, `reverb_dry_wet`, `portamento`, `volume`.
+- **Surge XT** (target **CLAP**: preset discovery, and values read back after loads). Its LV2
+  build exposes no control ports at all (its parameters are `lv2:Parameter`s over atoms), and
+  VST3 ids are the CLAP ids `& 0x7FFFFFFF`. Profile: the 8 macros (M1–M8) and Global Volume,
+  since many patches use scene B, where fixed scene-A knobs do nothing. Surge puts a patch's
+  macro names in the parameter names ("M1: Brightness") and asks for a rescan on patch load.
+  We ignore that rescan today; supporting it would give the knobs live labels.
+- **Vital** (CLAP; ids identical in VST3): Macro 1–4 (the macro knobs of its own UI, which
+  factory presets assign) and Volume, then Filter 1
+  Cutoff/Resonance/Drive and Envelope 1 Attack/Release. Its CLAP build loses the stepped
+  flags that its VST3 build reports.
+- **OT P1ANO S**: **no profile possible.** It exposes only Bypass. Its 159 controls live in
+  HISE's script and aren't host parameters, which is why it shows no knobs today. Its slot
+  should show something useful (its GUI, presets) instead of an empty knob row.
+
+Everything these JUCE plugins report is normalized 0–1, so range overrides are in normalized
+units and knob text comes from the plugin's own value text (`param_text`).
+
 - **Choosing the panel's controls.** A "Customise panel" mode on the slot's first tab: pick
   which parameters get a control (searchable, like the preset browser), which widget each is
   (knob, drawbar, switch/button), relabel and reorder them. Saved as a user panel profile for
@@ -198,9 +416,9 @@ piano**, a **pad**.
   stage with their own design; profiles shouldn't preclude it (a control has a stable id that a
   binding could point at later).
 - **Shipped profiles for popular free plugins** are cheap wins and need no plugin of our own:
-  e.g. **setBfree**, whose drawbars are only reachable by MIDI CC (it has no control ports) —
-  a drawbar panel that sends those CCs would give it the design's drawbars today.
-  This needs the profile to address a **MIDI CC** as well as a parameter.
+  e.g. **setBfree**, which has no control ports: its drawbars are reachable by MIDI CC or by
+  its own control messages (see "Panel profiles": the `setbfree` target), so a drawbar panel
+  gives it the design's drawbars today.
 
 ## Part C — inline views for effects
 
@@ -286,10 +504,13 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
 
 ## Possible order of work
 
-1. **Panel profiles** in the host (data model, shipped + user profiles, the slot tab rendering a
-   profile with knobs/drawbars/switches). Replaces the "first five parameters" placeholder.
-2. **Customise panel** UI for third-party plugins, plus a few shipped profiles (setBfree drawbars
-   via CC).
+1. **Panel profiles** in the host (data model, `param` and `setbfree` targets, shipped + user
+   profiles, the slot tab rendering the fixed section and the one row of knobs/switches,
+   choosing a cell's control from its context menu), with setBfree's profile and a few more
+   shipped ones, and the window's minimum size (done: 1200×1027). Replaces the "first five
+   parameters" placeholder.
+2. **Customise panel** beyond the context menu (relabelling, a widget per parameter, overrides)
+   for third-party plugins, and the `cc` target.
 3. **LV2 inline display** hosting in the FX squares.
 4. **The truce spike** (can run in parallel with 1–3).
 5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (organ) with its
@@ -302,6 +523,9 @@ CLAP GUIs once the app runs on Windows/macOS. (**Hosting CLAP** is done — `cra
 built-in front-end.)
 
 ## Open questions
+
+- **Panel profiles for effects** (later): whether a profile also picks a third-party effect's
+  popup knobs and FX-square curve. Revisit with the effect popup.
 
 - **Toolkit**: confirm truce with the spike above (or fall back to nice-plug).
 - **Recognising each other**: the id scheme and shared presets above, once the spike shows

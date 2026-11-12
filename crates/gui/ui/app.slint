@@ -10,8 +10,13 @@ export { AppState, AppLogic, ParamsWindow }
 
 export component AppWindow inherits Window {
     title: "Live Keys";
+    // The size the window opened at before the Live tab's slots had a minimum
+    // (the Settings tab's contents made it this tall): the Live tab, 1200×995
+    // under the tab bar, is designed for it (Penpot: "Live (window minimum)").
+    min-width: 1200px;
+    min-height: 1027px;
     preferred-width: 1200px;
-    preferred-height: 860px;
+    preferred-height: 1027px;
     default-font-family: Theme.font-family;
     default-font-size: 16px;
 

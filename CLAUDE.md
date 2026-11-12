@@ -690,7 +690,9 @@ behind format-agnostic cores:
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
-  via `TabWidget`/`Tab` from `std-widgets.slint`. **Look:** the Live tab follows the Penpot
+  via `TabWidget`/`Tab` from `std-widgets.slint`. The window opens at, and can't shrink below,
+  1200×1027 (the Live tab is 1200×995 under the tab bar, the size the design's "Live (window
+  minimum)" board is drawn for). **Look:** the Live tab follows the Penpot
   design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
   greys in dark mode, a derived light variant otherwise — following `Palette.color-scheme` —
   with `Palette.accent-background`/`-foreground` as the primary colour, so the style's accent
