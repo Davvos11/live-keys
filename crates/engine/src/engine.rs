@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crate::audio::find_output_device;
 use crate::midi::{MidiInputs, RoutedMidi};
 use crate::paths::build_lv2_path;
+use crate::setbfree::Setbfree;
 use crate::rack::{
     BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section, SlotPeaks,
 };
@@ -104,6 +105,9 @@ pub struct LoadedPluginMeta {
     /// The last value sent per parameter, for reading parameters back (the
     /// running plugin is out of reach) — see [`Engine::param_value`].
     values: HashMap<u32, f32>,
+    /// setBfree's control messages and their recorded values, if the plugin is
+    /// setBfree (see [`Engine::send_setbfree`]).
+    setbfree: Option<Setbfree>,
 }
 
 /// A slot's chain as the control thread sees it — a mirror of the audio thread's,
@@ -293,6 +297,9 @@ pub struct Engine {
     slots: [SlotChain; SLOT_COUNT],
     settings: [SlotSettings; SLOT_COUNT],
     next_key: PluginKey,
+    /// setBfree plugins whose reported values changed, for
+    /// [`Engine::take_setbfree_changes`].
+    setbfree_changed: Vec<PluginKey>,
 }
 
 impl Engine {
@@ -319,6 +326,7 @@ impl Engine {
             slots: Default::default(),
             settings: Default::default(),
             next_key: 0,
+            setbfree_changed: Vec::new(),
         }
     }
 
@@ -640,27 +648,35 @@ impl Engine {
 
     /// Passes an atom its GUI wrote (`LV2_Atom` header, then body) to atom input
     /// `port` of the LV2 plugin with `key`, from its next block. Dropped if
-    /// malformed, too big, or the channel is full.
+    /// malformed, too big, or the channel is full. setBfree's GUI's control
+    /// messages are recorded on the way (see [`Engine::setbfree_value`]).
     pub fn send_ui_atom(&mut self, key: PluginKey, port: u32, atom: &[u8]) {
-        if let Some(LoadedPluginMeta {
-            editor: PluginEditor::Lv2 { ui_channel: Some(channel), .. },
-            ..
-        }) = self.plugin_mut(key)
-            && let Some(event) = PortEvent::from_atom(port, atom)
-        {
-            let _ = channel.to_plugin.push(event);
+        let Some(meta) = self.plugin_mut(key) else { return };
+        let PluginEditor::Lv2 { ui_channel: Some(channel), .. } = &mut meta.editor else { return };
+        let Some(event) = PortEvent::from_atom(port, atom) else { return };
+        let changed = channel.to_plugin.push(event).is_ok()
+            && meta.setbfree.as_mut().is_some_and(|setbfree| setbfree.observe(&event));
+        if changed && !self.setbfree_changed.contains(&key) {
+            self.setbfree_changed.push(key);
         }
     }
 
     /// Hands every event LV2 plugins wrote to their atom outputs since the last
     /// call to `forward` (as the plugin's key, the port and the atom for its GUI),
     /// emptying their channels. Call regularly, GUI or not: a full channel drops
-    /// newer events.
+    /// newer events. setBfree's reports are recorded first (see
+    /// [`Engine::take_setbfree_changes`]).
     pub fn drain_ui_events(&mut self, mut forward: impl FnMut(PluginKey, u32, &PortEvent)) {
         for chain in &mut self.slots {
             for meta in chain.plugins_mut() {
                 if let PluginEditor::Lv2 { ui_channel: Some(channel), .. } = &mut meta.editor {
                     while let Ok(event) = channel.from_plugin.pop() {
+                        if let Some(setbfree) = &mut meta.setbfree
+                            && setbfree.observe(&event)
+                            && !self.setbfree_changed.contains(&meta.key)
+                        {
+                            self.setbfree_changed.push(meta.key);
+                        }
                         forward(meta.key, event.port, &event);
                     }
                 }
@@ -670,12 +686,18 @@ impl Engine {
 
     /// Sets setBfree control `function` ("upper.drawbar16", "percussion.enable")
     /// of the plugin with `key` to `value` (0..=127), by its control message, and
-    /// records it. Nothing if the plugin isn't setBfree.
-    ///
-    /// Stub: not implemented yet (see `docs/design/plugins.md`, "setBfree's
-    /// protocol").
+    /// records it (setBfree doesn't echo what the host sends). Nothing if the
+    /// plugin isn't setBfree. An open setBfree GUI doesn't follow.
     pub fn send_setbfree(&mut self, key: PluginKey, function: &str, value: u8) {
-        let _ = (key, function, value);
+        let Some(meta) = self.plugin_mut(key) else { return };
+        let (Some(setbfree), PluginEditor::Lv2 { ui_channel: Some(channel), .. }) =
+            (&mut meta.setbfree, &mut meta.editor)
+        else {
+            return;
+        };
+        if let Some(event) = setbfree.set(function, value) {
+            let _ = channel.to_plugin.push(event);
+        }
     }
 
     /// The last known value of setBfree control `function` of the plugin with
@@ -683,8 +705,7 @@ impl Engine {
     /// keyboard CC, its own GUI) or sent by [`Engine::send_setbfree`]. `None` if
     /// it isn't known (never set) or the plugin isn't setBfree.
     pub fn setbfree_value(&self, key: PluginKey, function: &str) -> Option<u8> {
-        let _ = (key, function);
-        None
+        self.plugin(key)?.setbfree.as_ref()?.value(function)
     }
 
     /// The plugins whose setBfree values changed (as reported by the plugin, not
@@ -692,7 +713,7 @@ impl Engine {
     /// [`Engine::drain_ui_events`], which decodes setBfree's reports before
     /// forwarding them; call this after it.
     pub fn take_setbfree_changes(&mut self) -> Vec<PluginKey> {
-        Vec::new()
+        std::mem::take(&mut self.setbfree_changed)
     }
 
     /// Parameter `param_id` of the plugin with `key` at `value`, as text for display
@@ -922,6 +943,7 @@ impl Engine {
                 params: controller.params().to_vec(),
                 editor: PluginEditor::Vst3(controller),
                 values: HashMap::new(),
+                setbfree: None,
             };
             Ok((Box::new(plugin), meta))
         } else if plugin_id.starts_with(live_keys_clap_host::ID_PREFIX) {
@@ -945,6 +967,7 @@ impl Engine {
                 params: controller.params().to_vec(),
                 editor: PluginEditor::Clap(controller),
                 values,
+                setbfree: None,
             };
             Ok((Box::new(plugin), meta))
         } else {
@@ -953,7 +976,12 @@ impl Engine {
                 .lv2
                 .instantiate(plugin_id, sample_rate)
                 .with_context(|| format!("failed to instantiate LV2 plugin '{plugin_id}'"))?;
-            let ui_channel = plugin.take_ui_channel();
+            let mut ui_channel = plugin.take_ui_channel();
+            let setbfree = Setbfree::new(plugin.plugin(), plugin.features());
+            // setBfree reports its settings only once asked; it then dumps them all.
+            if let (Some(setbfree), Some(channel)) = (&setbfree, &mut ui_channel) {
+                let _ = channel.to_plugin.push(setbfree.uiinit());
+            }
             let meta = LoadedPluginMeta {
                 key,
                 id: plugin_id.to_string(),
@@ -969,6 +997,7 @@ impl Engine {
                     gui_leases: plugin.gui_leases(),
                 },
                 values: HashMap::new(),
+                setbfree,
             };
             Ok((Box::new(plugin), meta))
         }

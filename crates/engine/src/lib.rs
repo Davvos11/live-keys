@@ -3,11 +3,13 @@ mod engine;
 mod midi;
 mod paths;
 mod rack;
+mod setbfree;
 
 pub use audio::{find_output_device, is_logical_output_device, list_logical_output_devices};
 pub use engine::{
     Engine, LoadedPluginMeta, PluginEditor, PluginKey, PluginScan, SLOT_COUNT, SlotChain, SlotSettings,
 };
+pub use setbfree::SETBFREE_URI;
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
 pub use live_keys_core::{ALL_INPUTS, MidiEvent, MidiFilter};
 pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo};

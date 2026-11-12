@@ -3022,6 +3022,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "dirs",
+ "env_logger",
  "live-keys-clap-host",
  "live-keys-core",
  "live-keys-lv2-host",
