@@ -577,8 +577,8 @@ fn info(id: &str) -> Result<()> {
     }
     for param in &meta.params {
         println!(
-            "  {:>5} {:<32} {:?} {}..{} (default {})",
-            param.id, param.name, param.kind, param.min_value, param.max_value, param.default_value
+            "  {:>10} {:<24} {:<32} {:?} {}..{} (default {})",
+            param.id, param.symbol, param.name, param.kind, param.min_value, param.max_value, param.default_value
         );
     }
     Ok(())

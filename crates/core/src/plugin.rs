@@ -107,6 +107,11 @@ pub struct ParamChoice {
 #[derive(Debug, Clone)]
 pub struct ParamInfo {
     pub id: u32,
+    /// A reference to the parameter that stays the same across plugin versions,
+    /// for profiles to match on: the LV2 port symbol (an LV2 `id` is a port
+    /// index, which moves when a plugin adds a port), or the VST3/CLAP id in
+    /// decimal.
+    pub symbol: String,
     pub name: String,
     pub default_value: f32,
     pub min_value: f32,
@@ -126,10 +131,12 @@ pub struct ParamInfo {
 }
 
 impl ParamInfo {
-    /// A continuous parameter with no unit, labels or log scale.
+    /// A continuous parameter with no unit, labels or log scale, its symbol the
+    /// id in decimal.
     pub fn continuous(id: u32, name: String, default_value: f32, min_value: f32, max_value: f32) -> Self {
         Self {
             id,
+            symbol: id.to_string(),
             name,
             default_value,
             min_value,

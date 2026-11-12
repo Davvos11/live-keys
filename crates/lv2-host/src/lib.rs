@@ -167,6 +167,7 @@ fn read_params(world: &livi::World, plugin: &livi::Plugin, sample_rate: f64) -> 
             );
             let mut info =
                 ParamInfo::continuous(port.index.0 as u32, port.name, default_value, min_value, max_value);
+            info.symbol = port.symbol;
 
             let unit = raw.get(&unit_pred);
             let is_note = unit.as_ref().and_then(|unit| unit.as_uri()) == Some(midi_note.as_str());
