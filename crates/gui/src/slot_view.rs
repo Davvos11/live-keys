@@ -52,7 +52,7 @@ pub fn graph(effect_name: &str) -> i32 {
 
 /// A value of `param` as a knob position: 0..1 across its range, on a log scale
 /// for logarithmic parameters.
-fn position(param: &ParamInfo, value: f32) -> f32 {
+pub fn position(param: &ParamInfo, value: f32) -> f32 {
     let (min, max) = (param.min_value, param.max_value);
     let position = if param.logarithmic && min > 0.0 && max > min {
         (value / min).ln() / (max / min).ln()
@@ -62,6 +62,17 @@ fn position(param: &ParamInfo, value: f32) -> f32 {
         0.0
     };
     position.clamp(0.0, 1.0)
+}
+
+/// The inverse of [`position`]: the value of `param` at knob position 0..1.
+pub fn knob_value(param: &ParamInfo, position: f32) -> f32 {
+    let (min, max) = (param.min_value, param.max_value);
+    let position = position.clamp(0.0, 1.0);
+    if param.logarithmic && min > 0.0 && max > min {
+        min * (max / min).powf(position)
+    } else {
+        min + (max - min) * position
+    }
 }
 
 /// The knobs for `instrument`: its first [`KNOB_COUNT`] continuous parameters,

@@ -3,6 +3,7 @@ slint::include_modules!();
 mod config;
 mod midi_inputs;
 mod mock_data;
+mod profiles;
 mod scenes;
 mod session;
 mod slot_presets;

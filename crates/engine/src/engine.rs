@@ -668,6 +668,33 @@ impl Engine {
         }
     }
 
+    /// Sets setBfree control `function` ("upper.drawbar16", "percussion.enable")
+    /// of the plugin with `key` to `value` (0..=127), by its control message, and
+    /// records it. Nothing if the plugin isn't setBfree.
+    ///
+    /// Stub: not implemented yet (see `docs/design/plugins.md`, "setBfree's
+    /// protocol").
+    pub fn send_setbfree(&mut self, key: PluginKey, function: &str, value: u8) {
+        let _ = (key, function, value);
+    }
+
+    /// The last known value of setBfree control `function` of the plugin with
+    /// `key`: as reported by the plugin (after a load, a program change, a
+    /// keyboard CC, its own GUI) or sent by [`Engine::send_setbfree`]. `None` if
+    /// it isn't known (never set) or the plugin isn't setBfree.
+    pub fn setbfree_value(&self, key: PluginKey, function: &str) -> Option<u8> {
+        let _ = (key, function);
+        None
+    }
+
+    /// The plugins whose setBfree values changed (as reported by the plugin, not
+    /// by [`Engine::send_setbfree`]) since the last call, each once. Updated by
+    /// [`Engine::drain_ui_events`], which decodes setBfree's reports before
+    /// forwarding them; call this after it.
+    pub fn take_setbfree_changes(&mut self) -> Vec<PluginKey> {
+        Vec::new()
+    }
+
     /// Parameter `param_id` of the plugin with `key` at `value`, as text for display
     /// ("-6.0 dB", "Saw", "C#3"). VST3 and CLAP plugins format their own values;
     /// otherwise it's formatted from the parameter's metadata. Empty if there's no
