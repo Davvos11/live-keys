@@ -1,7 +1,8 @@
-import { AppState, AppLogic, Category, EffectRow, KnobRow, SlotState } from "globals.slint";
+import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
 import { Theme, Icons, Icon, KButton, DropdownButton, ListItem, Select, TabBar, Stepper, FxSlot, ScrollIndicator } from "widgets.slint";
 import { Artwork } from "theme.slint";
-import { Knob, LabelledKnob } from "knob.slint";
+import { Knob } from "knob.slint";
+import { DrawbarSection, PanelCellView, ParamSearchPopup } from "panel.slint";
 import { RangeSlider } from "range_slider.slint";
 import { PresetPopup } from "preset_bar.slint";
 import { SlotPresets } from "slot_presets.slint";
@@ -194,10 +195,9 @@ export component SlotPanel inherits Rectangle {
     function note-name(note: int) -> string {
         return ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][Math.mod(note, 12)] + (Math.floor(note / 12) - 1);
     }
-    // A knob position as the parameter's value.
-    function knob-value(knob: KnobRow, position: float) -> float {
-        return knob.logarithmic ? knob.min-value * Math.pow(knob.max-value / knob.min-value, position)
-            : knob.min-value + position * (knob.max-value - knob.min-value);
+    function show-param-search(cell: int) {
+        AppLogic.open-param-search(root.slot-index, cell);
+        param-search.show();
     }
     function show-presets(section: int, index: int) {
         root.preset-section = section;
@@ -386,7 +386,10 @@ export component SlotPanel inherits Rectangle {
                     width: flick.width;
                     height: self.preferred-height;
                     padding: 10px;
-                    padding-right: 14px;
+                    // The first tab's row of five 56 px cells only just fits
+                    // the narrowest slot (the design starts it 5 px in).
+                    padding-left: root.tab == 0 ? 5px : 10px;
+                    padding-right: root.tab == 0 ? 5px : 14px;
                     spacing: 12px;
 
                     if root.slot.status != "" : Text {
@@ -396,22 +399,28 @@ export component SlotPanel inherits Rectangle {
                         wrap: word-wrap;
                     }
 
-                    // The instrument's first parameters, and the audio effects.
-                    if root.tab == 0 && root.has-instrument && root.slot.knobs.length > 0 : HorizontalLayout {
-                        alignment: space-around;
-                        for knob in root.slot.knobs : LabelledKnob {
-                            label: knob.name;
-                            value-text: knob.text;
-                            minimum: 0;
-                            maximum: 1;
-                            default-value: knob.default-position;
-                            value: knob.position;
-                            property <float> source: knob.position;
-                            changed source => { self.value = self.source; }
-                            changed(position) => { AppLogic.set-param(knob.key, knob.param-id, root.knob-value(knob, position)); }
+                    // The instrument's panel (drawbars, if any, then the row),
+                    // and the audio effects.
+                    if root.tab == 0 && root.has-instrument && root.slot.drawbars.length > 0 : DrawbarSection {
+                        drawbars: root.slot.drawbars;
+                        set-level(drawbar, level) => { AppLogic.set-drawbar(root.slot-index, drawbar, level); }
+                    }
+                    if root.tab == 0 && root.has-instrument && root.slot.cells.length > 0 : HorizontalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        for cell[index] in root.slot.cells : PanelCellView {
+                            cell: cell;
+                            cell-index: index;
+                            pool: root.slot.pool;
+                            set-position(position) => { AppLogic.set-cell-position(root.slot-index, index, position); }
+                            set-on(on) => { AppLogic.set-cell-on(root.slot-index, index, on); }
+                            set-index(option) => { AppLogic.set-cell-index(root.slot-index, index, option); }
+                            choose(pool-index) => { AppLogic.set-panel-cell(root.slot-index, index, pool-index); }
+                            more-parameters => { root.show-param-search(index); }
+                            reset-row => { AppLogic.reset-panel-row(root.slot-index); }
                         }
                     }
-                    if root.tab == 0 && root.has-instrument && root.slot.knobs.length == 0 : Text {
+                    if root.tab == 0 && root.has-instrument && root.slot.cells.length == 0 && root.slot.drawbars.length == 0 : Text {
                         text: "This instrument has no parameters to show here.";
                         color: Theme.text-faint;
                         font-size: Theme.small-font-size;
@@ -578,6 +587,15 @@ export component SlotPanel inherits Rectangle {
         width: root.width - 10px;
         height: min(380px, max(200px, root.height - 160px));
         plugin: root.preset-plugin;
+    }
+
+    param-search := ParamSearchPopup {
+        x: 5px;
+        y: 194px;
+        width: root.width - 10px;
+        height: min(380px, max(200px, root.height - 204px));
+        filter(query) => { AppLogic.filter-param-search(query); }
+        pick(index) => { AppLogic.pick-param-search(index); }
     }
 
     effect-popup := EffectPopup {

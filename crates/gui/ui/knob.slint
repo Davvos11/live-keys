@@ -188,6 +188,8 @@ export component LabelledKnob inherits VerticalLayout {
     in property <float> minimum: 0;
     in property <float> maximum: 1;
     in property <float> default-value: 0;
+    // As `Knob.step`.
+    in property <float> step: 0;
     callback changed(/* value */ float);
 
     width: 56px;
@@ -201,6 +203,7 @@ export component LabelledKnob inherits VerticalLayout {
             minimum: root.minimum;
             maximum: root.maximum;
             default-value: root.default-value;
+            step: root.step;
             changed(value) => { root.changed(value); }
         }
     }

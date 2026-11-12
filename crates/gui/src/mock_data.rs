@@ -11,7 +11,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
     AppState, AppWindow, EffectRow, MidiDeviceRow, MidiInputRow, ParamRow, PickerRow, PresetRow,
-    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, KnobRow,
+    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow,
 };
 
 /// Where to write the mock data, if asked to.
@@ -121,11 +121,13 @@ slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
-slint_struct!(KnobRow {
-    key, param_id, name, position, default_position, min_value, max_value, logarithmic, text,
+slint_struct!(PanelCell {
+    widget, label, text, position, default_position, steps, on, choices, index, default_index, value_text,
 });
+slint_struct!(DrawbarCell { label, colour, level });
+slint_struct!(PanelPoolRow { index, name, cell });
 slint_struct!(SlotState {
-    artwork, muted, transpose, closed_name, knobs, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
+    artwork, muted, transpose, closed_name, drawbars, cells, pool, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
     note_high, velocity_low, velocity_high, volume_db, slot_preset_name, slot_preset_changed,
     slot_preset_folder, slot_preset_rows,
 });
@@ -146,7 +148,7 @@ pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
          import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SceneSlotChoice, SlotState, KnobRow } from \"types.slint\";\n\n\
+         SceneRow, SceneSlotChoice, SlotState } from \"types.slint\";\n\n\
          export global MockData {\n",
     );
     property(&mut out, "[string]", "audio-devices", &state.get_audio_devices());
@@ -168,6 +170,8 @@ pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>
     property(&mut out, "[PresetRow]", "preset-rows", &state.get_preset_rows());
     property(&mut out, "int", "preset-count", &state.get_preset_count());
     property(&mut out, "string", "preset-query", &state.get_preset_query());
+    property(&mut out, "[string]", "param-search-rows", &state.get_param_search_rows());
+    property(&mut out, "int", "param-search-count", &state.get_param_search_count());
     property(&mut out, "string", "params-window-name", &params_window.0);
     property(&mut out, "[ParamRow]", "params-window-params", &params_window.1);
     out.push_str("}\n");

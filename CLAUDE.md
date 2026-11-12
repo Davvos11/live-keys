@@ -61,7 +61,8 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # the Penpot design: a scenes pane on the left — per slot restore/clear/leave unchanged, searchable,
 # renamable — then 6 rack slots in a 3×2 grid, each: a header (instrument photo and name, its GUI,
 # mute and ✕-clear-with-undo buttons, a volume knob, its presets), then three tabs — the instrument's
-# first parameters as knobs and the audio effects as squares; the slot presets (the whole chain with
+# panel (setBfree's drawbars, then a row of five knobs/switches/levers, each picked by right-click
+# from its profile's controls or any parameter) and the audio effects as squares; the slot presets (the whole chain with
 # every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
 # channel/note-range/velocity-range filter and a transposition. Up to 8 MIDI effects → an
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
@@ -791,7 +792,7 @@ behind format-agnostic cores:
   exit (`started` in `main`) — that would overwrite the last session with an empty rack. The Live tab (`live_tab.slint`) is the scenes pane, then
   one `SlotPanel` (`ui/slot_panel.slint`) per `AppState.slots` entry in a grid of
   `SlotGrid.columns` (3) equal cells (`SlotState`: `instrument: EffectRow` — key -1 when empty —
-  `midi-effects`/`audio-effects: [EffectRow]`, `knobs: [KnobRow]`, `artwork`, `muted`,
+  `midi-effects`/`audio-effects: [EffectRow]`, the panel's `drawbars`/`cells`/`pool`, `artwork`, `muted`,
   `closed-name`, status, routing; an `EffectRow` is one plugin's name/key, whether its
   GUI/parameter window is open, its FX-square curve and its current preset). A slot with
   nothing in it is a big + (picks an instrument) with a "Slot presets…" popup; one just cleared
@@ -803,10 +804,28 @@ behind format-agnostic cores:
   to replace or remove it or open its parameter window; "+ Instrument" without one), a volume
   `Knob` (dB, value shown while hovered), and the instrument's preset `DropdownButton`. Then a
   `TabBar` (the selected tab is per slot, in the UI only) over a scrolling area
-  (`Flickable` + `ScrollIndicator`): tab 1 the instrument's first `slot_view::KNOB_COUNT` (5)
-  continuous parameters as `LabelledKnob`s (`KnobRow`: position 0..1, on a log scale for
-  logarithmic ones, mapped back to a value by `knob-value` before `set-param`; updated by
-  `Rack::show_knob_value` with every value change and refilled on preset loads) and the audio
+  (`Flickable` + `ScrollIndicator`): tab 1 the instrument's **panel** (`ui/panel.slint`, from
+  its profile, see `src/profiles.rs`) — an optional fixed section of `Drawbar`s
+  (`DrawbarSection`; `SlotState.drawbars: [DrawbarCell]`, level 0..=8, dragged vertically or
+  scrolled) and a row of `profiles::ROW_LEN` 56 px `PanelCellView`s (`SlotState.cells:
+  [PanelCell]`): a `LabelledKnob` (position 0..1; `steps` for stepped parameters), a stepped
+  knob (a control with choices: snaps to them, shows the option's label), a `Toggle` (the
+  design's switch) or a `Lever` (2–3 options: click a part, drag sideways or up/down, scroll).
+  A short row is padded with empty cells (`widget` -1) that fill the row's next cell.
+  Right-clicking a cell (`ContextMenuArea`; any click on an empty one) lists "Show here" with
+  the pool (`SlotState.pool: [PanelPoolRow]` — at most 16 plus the row's; other cells' greyed,
+  this one's ticked; `set-panel-cell`), "More parameters…" (`ParamSearchPopup`: a search
+  over every parameter, filtered in Rust — `open-param-search`/`filter-param-search`/
+  `pick-param-search`, `AppState.param-search-rows`) and "Reset row" (`reset-panel-row`);
+  rows are per plugin (`Profiles::set_cell`/`reset_row`), so `Rack::rebuild_panels` rebuilds
+  every slot with that instrument. `Rack` keeps each slot's `profiles::Panel`
+  (`Rack::panels`, built by `refresh_panel` when the instrument changes) and turns it into
+  rows with `slot_view::panel_cells`/`panel_drawbars`/`panel_pool`; edits
+  (`set-cell-position`/`-on`/`-index`, `set-drawbar`) go through `Control::write`
+  (`Rack::write_control`, which then shows the value like `set-param` does and marks presets
+  changed), and values are re-read (`Control::read`, `Rack::refresh_panel_of`) on every
+  parameter change, preset load and `idle_plugins` re-read, and for each plugin in
+  `Engine::take_setbfree_changes` after `drain_ui_events` — and the audio
   effects as an `FxGrid` of `FxSlot`s (3 a row; + appends one); tab 2 `SlotPresets`; tab 3 the
   MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
   `RangeSlider`s, and a transpose `Stepper` (`set-slot-transpose`: `SlotConfig.transpose`,
@@ -949,8 +968,9 @@ behind format-agnostic cores:
   `AppConfig.slots` (`SlotConfig`) as the GUI's source of truth and are pushed to the engine on
   startup and on every edit; `Rack::refresh_slot` only touches a row's plugin/GUI fields,
   `Rack::set_routing` its filter/volume fields. Since a recalled scene changes them from Rust,
-  the channel `Select`, both `RangeSlider`s, the volume `Knob` and the parameter knobs follow
-  their values through `changed source =>` helpers (dragging replaces their bindings). Edits that fire continuously (knob drags)
+  the channel `Select`, both `RangeSlider`s, the volume `Knob` and the panel's knobs follow
+  their values through `changed source =>` helpers (dragging replaces their bindings); the
+  panel's `Toggle`, `Lever` and `Drawbar` never set their own value, only report the new one. Edits that fire continuously (knob drags)
   mark the config dirty and the poll timer saves it, rather than writing the file per step.
 
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end

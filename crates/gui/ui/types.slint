@@ -118,21 +118,50 @@ export struct SceneSlotChoice {
     can-restore: bool,
 }
 
-// One of the instrument parameters shown as a knob on a slot's first tab.
-export struct KnobRow {
-    // The instrument's `PluginKey`.
-    key: int,
-    param-id: int,
-    name: string,
-    // The value as a knob position, 0..1 (on a log scale for logarithmic
-    // parameters), and where a reset puts it.
+// One cell of the row on a slot's first tab: a control of the instrument's
+// panel (see `src/profiles.rs`).
+export struct PanelCell {
+    // As `profiles::Widget`: 0 knob, 1 switch, 2 lever; -1 an empty cell (the
+    // row has fewer controls than cells, and the pool more to offer).
+    widget: int,
+    // The caption under the control.
+    label: string,
+    // A switch's word on its button.
+    text: string,
+    // A knob without choices: its position, 0..1, where a reset (double-click)
+    // puts it, and how many steps it snaps to (0: continuous).
     position: float,
     default-position: float,
-    min-value: float,
-    max-value: float,
-    logarithmic: bool,
-    // The value as the plugin would show it.
-    text: string,
+    steps: int,
+    // A switch: whether it's on.
+    on: bool,
+    // A lever or a knob with choices (a stepped knob): the options, the
+    // current one and where a reset puts it.
+    choices: [string],
+    index: int,
+    default-index: int,
+    // The value as text, shown while a knob is hovered or turned.
+    value-text: string,
+}
+
+// One drawbar of a slot's fixed section.
+export struct DrawbarCell {
+    // Its footage ("16'").
+    label: string,
+    // 0 brown, 1 white, 2 black.
+    colour: int,
+    // How far it's pulled out, 0..=8.
+    level: int,
+}
+
+// One control of the instrument panel's pool, as a cell's context menu lists
+// it.
+export struct PanelPoolRow {
+    // Its index in the pool (the menu leaves some out when the pool is long).
+    index: int,
+    name: string,
+    // The row cell showing it, or -1.
+    cell: int,
 }
 
 // One rack slot on the Live tab: MIDI effects, an instrument, then audio
@@ -147,8 +176,11 @@ export struct SlotState {
     // The instrument name of a slot that was just cleared and can still be
     // brought back (Undo); empty otherwise.
     closed-name: string,
-    // The instrument's first few continuous parameters, as knobs.
-    knobs: [KnobRow],
+    // The instrument's panel: its fixed section's drawbars (usually none), the
+    // row of cells, and the pool the cells' context menu offers.
+    drawbars: [DrawbarCell],
+    cells: [PanelCell],
+    pool: [PanelPoolRow],
     // Its key is -1 when no instrument is loaded into this slot.
     instrument: EffectRow,
     // The last load/open/preset error; empty if none.

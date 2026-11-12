@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, KnobRow } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, KnobRow } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -60,6 +60,11 @@ export global AppState {
     in property <[PresetRow]> preset-rows: Platform.uses-mock-data ? MockData.preset-rows : [];
     in property <int> preset-count: Platform.uses-mock-data ? MockData.preset-count : 0;
     in property <string> preset-query: Platform.uses-mock-data ? MockData.preset-query : "";
+    // "More parameters…" of a panel cell's context menu (one at a time): the
+    // instrument's parameters matching the search, by name, and how many it
+    // has in all. Filled by `AppLogic.open-param-search`/`filter-param-search`.
+    in property <[string]> param-search-rows: Platform.uses-mock-data ? MockData.param-search-rows : [];
+    in property <int> param-search-count: Platform.uses-mock-data ? MockData.param-search-count : 0;
 }
 
 // Plugin categories, as the picker's tabs and `category` arguments number them.
@@ -134,6 +139,24 @@ export global AppLogic {
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
+    // The instrument panel on a slot's first tab. `cell` indexes
+    // `SlotState.cells`, `drawbar` `SlotState.drawbars`. A cell's value: a
+    // knob's position, a switch's state, or a lever's or stepped knob's option.
+    callback set-cell-position(/* slot */ int, /* cell */ int, /* 0..1 */ float);
+    callback set-cell-on(/* slot */ int, /* cell */ int, bool);
+    callback set-cell-index(/* slot */ int, /* cell */ int, /* option */ int);
+    callback set-drawbar(/* slot */ int, /* drawbar */ int, /* level 0..=8 */ int);
+    // Shows pool control `pool-index` (into `SlotState.pool`) in the cell; kept
+    // per plugin, so every slot with this instrument follows.
+    callback set-panel-cell(/* slot */ int, /* cell */ int, /* pool-index */ int);
+    // Puts the instrument's row back to its profile's default.
+    callback reset-panel-row(/* slot */ int);
+    // "More parameters…": starts a search over the slot's instrument's
+    // parameters for the cell (`AppState.param-search-rows`), narrows it, and
+    // shows the parameter at `index` in the cell.
+    callback open-param-search(/* slot */ int, /* cell */ int);
+    callback filter-param-search(/* query */ string);
+    callback pick-param-search(/* index */ int);
     // Scenes. `index` is into `AppState.scene-rows`; -1 means the current scene.
     callback filter-scenes(/* query */ string);
     callback load-scene(/* index */ int);

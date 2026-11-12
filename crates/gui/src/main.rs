@@ -338,6 +338,39 @@ fn slot_of(engine: &Engine, key: PluginKey) -> Option<usize> {
     })
 }
 
+/// The panel a slot shows for its instrument.
+struct SlotPanel {
+    key: PluginKey,
+    plugin_id: String,
+    panel: profiles::Panel,
+}
+
+/// "More parameters…" of a cell's context menu: a search over every parameter
+/// of the slot's instrument, to show one in the cell.
+struct ParamSearch {
+    slot: usize,
+    cell: usize,
+    plugin_id: String,
+    /// Every parameter's name and control id, in the plugin's order.
+    params: Vec<(String, String)>,
+    /// Indices into `params` matching the search, as listed.
+    shown: Vec<usize>,
+}
+
+impl ParamSearch {
+    /// Lists the parameters whose name contains every word of `query`.
+    fn filter(&mut self, query: &str, rows: &VecModel<slint::SharedString>) {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        self.shown = (0..self.params.len())
+            .filter(|&index| {
+                let name = self.params[index].0.to_lowercase();
+                words.iter().all(|word| name.contains(word.as_str()))
+            })
+            .collect();
+        rows.set_vec(self.shown.iter().map(|&index| self.params[index].0.as_str().into()).collect::<Vec<_>>());
+    }
+}
+
 /// GUI-side state of the Live tab's slots: the models backing `AppState.slots`,
 /// every open plugin GUI and every open parameter window.
 struct Rack {
@@ -347,8 +380,20 @@ struct Rack {
     /// rebuild that slot's rows).
     midi_effects: Vec<Rc<VecModel<EffectRow>>>,
     audio_effects: Vec<Rc<VecModel<EffectRow>>>,
-    /// Per slot, like the effect models: the instrument parameters shown as knobs.
-    knobs: Vec<Rc<VecModel<KnobRow>>>,
+    /// Shipped and user panel profiles, and the user's row choices.
+    profiles: RefCell<profiles::Profiles>,
+    /// Per slot: its instrument's panel, built when the instrument is loaded and
+    /// after its row changes.
+    panels: RefCell<Vec<Option<SlotPanel>>>,
+    /// Per slot, like the effect models: the panel's row, drawbars and the pool
+    /// as the cells' menu lists it.
+    cells: Vec<Rc<VecModel<PanelCell>>>,
+    drawbars: Vec<Rc<VecModel<DrawbarCell>>>,
+    pool_rows: Vec<Rc<VecModel<PanelPoolRow>>>,
+    /// "More parameters…", while its popup is open; its rows back
+    /// `AppState.param-search-rows`.
+    param_search: RefCell<Option<ParamSearch>>,
+    param_search_rows: Rc<VecModel<slint::SharedString>>,
     /// Per slot: what it was before its ✕ cleared it, until Undo, Dismiss or
     /// anything else loaded into it.
     closed: RefCell<Vec<Option<slot_view::Closed>>>,
@@ -396,10 +441,12 @@ impl Rack {
         }
         let (midi_effects, audio_effects) = (models(), models());
         let slot_preset_rows = models();
-        let knobs = models();
+        let (cells, drawbars, pool_rows) = (models(), models(), models());
         let slots = (0..SLOT_COUNT)
             .map(|slot| SlotState {
-                knobs: ModelRc::from(knobs[slot].clone()),
+                cells: ModelRc::from(cells[slot].clone()),
+                drawbars: ModelRc::from(drawbars[slot].clone()),
+                pool: ModelRc::from(pool_rows[slot].clone()),
                 midi_effects: ModelRc::from(midi_effects[slot].clone()),
                 audio_effects: ModelRc::from(audio_effects[slot].clone()),
                 slot_preset_rows: ModelRc::from(slot_preset_rows[slot].clone()),
@@ -414,7 +461,13 @@ impl Rack {
             slots: Rc::new(VecModel::from(slots)),
             midi_effects,
             audio_effects,
-            knobs,
+            profiles: RefCell::new(profiles::Profiles::load()),
+            panels: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
+            cells,
+            drawbars,
+            pool_rows,
+            param_search: RefCell::default(),
+            param_search_rows: Rc::new(VecModel::default()),
             closed: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
             open_uis: RefCell::new(HashMap::new()),
             param_windows: RefCell::new(HashMap::new()),
@@ -461,10 +514,7 @@ impl Rack {
         );
         row.status = error.unwrap_or_default().into();
         row.artwork = slot_view::artwork(chain.instrument.as_ref().map(|meta| meta.name.as_str()));
-        sync_model(
-            &self.knobs[slot],
-            chain.instrument.as_ref().map(|meta| slot_view::knob_rows(engine, meta)).unwrap_or_default(),
-        );
+        self.refresh_panel(engine, slot, false);
         // Anything loaded into a cleared slot replaces what Undo would bring back.
         if chain.plugins().next().is_some() {
             self.closed.borrow_mut()[slot] = None;
@@ -860,12 +910,7 @@ impl Rack {
         if let Some(open) = self.param_windows.borrow().get(&key) {
             open.rows.set_vec(param_rows(engine, key));
         }
-        if let Some(slot) = slot_of(engine, key)
-            && let Some(instrument) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref())
-            && instrument.key == key
-        {
-            sync_model(&self.knobs[slot], slot_view::knob_rows(engine, instrument));
-        }
+        self.refresh_panel_of(engine, key);
         if let (Some(OpenEditor::Lv2(handle)), Some(meta)) = (self.open_uis.borrow().get(&key), engine.plugin(key)) {
             for param in &meta.params {
                 let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
@@ -924,7 +969,7 @@ impl Rack {
     /// Shows a param value that was just sent to the engine in the plugin's
     /// parameter window, if open.
     fn show_param_value(&self, engine: &Engine, key: PluginKey, param_id: u32, value: f32) {
-        self.show_knob_value(engine, key, param_id);
+        self.refresh_panel_of(engine, key);
         let param_windows = self.param_windows.borrow();
         let Some(rows) = param_windows.get(&key).map(|open| &open.rows) else {
             return;
@@ -940,19 +985,86 @@ impl Rack {
         }
     }
 
-    /// Updates the knob showing `key`'s parameter `param_id`, if there is one.
-    fn show_knob_value(&self, engine: &Engine, key: PluginKey, param_id: u32) {
-        let Some(slot) = slot_of(engine, key) else {
-            return;
-        };
-        let knobs = &self.knobs[slot];
-        let Some(index) = knobs.iter().position(|knob| knob.key == key as i32 && knob.param_id as u32 == param_id)
-        else {
-            return;
-        };
-        if let Some(param) = engine.plugin(key).and_then(|meta| meta.params.iter().find(|p| p.id == param_id)) {
-            knobs.set_row_data(index, slot_view::knob_row(engine, key, param));
+    /// Shows `slot`'s instrument panel at current values, building it first if
+    /// the instrument changed (or `rebuild`: its row did).
+    fn refresh_panel(&self, engine: &Engine, slot: usize, rebuild: bool) {
+        let instrument = engine.slot(slot).and_then(|chain| chain.instrument.as_ref());
+        let mut panels = self.panels.borrow_mut();
+        let current = &mut panels[slot];
+        match instrument {
+            None => *current = None,
+            Some(meta) if rebuild || current.as_ref().is_none_or(|panel| panel.key != meta.key) => {
+                *current = Some(SlotPanel {
+                    key: meta.key,
+                    plugin_id: meta.id.clone(),
+                    panel: self.profiles.borrow().panel(&meta.id, &meta.params),
+                });
+            }
+            Some(_) => {}
         }
+        let (cells, drawbars, pool) = match current {
+            Some(SlotPanel { key, panel, .. }) => (
+                slot_view::panel_cells(engine, *key, panel),
+                slot_view::panel_drawbars(engine, *key, panel),
+                slot_view::panel_pool(panel),
+            ),
+            None => Default::default(),
+        };
+        slot_view::sync_cells(&self.cells[slot], cells);
+        sync_model(&self.drawbars[slot], drawbars);
+        sync_model(&self.pool_rows[slot], pool);
+    }
+
+    /// Shows the values of `key`'s panel, if it's an instrument (after a
+    /// parameter or setBfree value changed).
+    fn refresh_panel_of(&self, engine: &Engine, key: PluginKey) {
+        let slot = self.panels.borrow().iter().position(|panel| panel.as_ref().is_some_and(|panel| panel.key == key));
+        if let Some(slot) = slot {
+            self.refresh_panel(engine, slot, false);
+        }
+    }
+
+    /// Rebuilds the panel of every slot with this instrument, after its row
+    /// changed (rows are per plugin).
+    fn rebuild_panels(&self, engine: &Engine, plugin_id: &str) {
+        for slot in 0..SLOT_COUNT {
+            let shows = self.panels.borrow()[slot].as_ref().is_some_and(|panel| panel.plugin_id == plugin_id);
+            if shows {
+                self.refresh_panel(engine, slot, true);
+            }
+        }
+    }
+
+    /// The instrument and control behind `slot`'s row cell `cell`, or its
+    /// drawbar `cell` if `drawbar`.
+    fn panel_control(&self, slot: usize, cell: usize, drawbar: bool) -> Option<(PluginKey, profiles::Control)> {
+        let panels = self.panels.borrow();
+        let SlotPanel { key, panel, .. } = panels.get(slot)?.as_ref()?;
+        let control = if drawbar {
+            panel.drawbars.get(cell)?
+        } else {
+            panel.pool.get(*panel.row.get(cell)?)?
+        };
+        Some((*key, control.clone()))
+    }
+
+    /// Sets a panel control to `value` (a host-side edit), and shows it: in the
+    /// panel, an open parameter window and an open LV2 GUI.
+    fn write_control(&self, engine: &RefCell<Engine>, key: PluginKey, control: &profiles::Control, value: profiles::CellValue) {
+        if control.read(&engine.borrow(), key) == value {
+            return;
+        }
+        control.write(&mut engine.borrow_mut(), key, value);
+        let engine = engine.borrow();
+        match control.target {
+            profiles::Target::Param(param_id) => {
+                let value = engine.param_value(key, param_id).unwrap_or_default();
+                self.show_param_value(&engine, key, param_id, value);
+                self.notify_ui(key, param_id, value);
+            }
+            profiles::Target::Setbfree(_) => self.refresh_panel_of(&engine, key),
+        }
+        self.mark_changed(&engine, key);
     }
 
     /// Closes `key`'s plugin GUI, if open. For an LV2 GUI this is only a
@@ -1088,6 +1200,7 @@ fn main() -> anyhow::Result<()> {
     state.set_max_effects(MAX_EFFECTS as i32);
     state.set_picker_rows(ModelRc::from(picker.rows.clone()));
     state.set_preset_rows(ModelRc::from(rack.preset_rows.clone()));
+    state.set_param_search_rows(ModelRc::from(rack.param_search_rows.clone()));
     refresh_plugin_folders(&app, &config.borrow());
     refresh_plugin_list(&app, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
@@ -1516,6 +1629,142 @@ fn main() -> anyhow::Result<()> {
             let engine = engine.borrow();
             if let Some(slot) = slot_of(&engine, key) {
                 rack.refresh_slot(&engine, slot, None);
+            }
+        });
+    }
+
+    // The instrument panel: values of its cells and drawbars, and which
+    // controls the row shows.
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let edit = move |slot: i32, cell: i32, drawbar: bool, value: profiles::CellValue| {
+            if let Some((key, control)) = rack.panel_control(slot as usize, cell as usize, drawbar) {
+                rack.write_control(&engine, key, &control, value);
+            }
+        };
+        let edit = Rc::new(edit);
+        let e = edit.clone();
+        logic.on_set_cell_position(move |slot, cell, position| {
+            e(slot, cell, false, profiles::CellValue::Position(position));
+        });
+        let e = edit.clone();
+        logic.on_set_cell_on(move |slot, cell, on| e(slot, cell, false, profiles::CellValue::On(on)));
+        let e = edit.clone();
+        logic.on_set_cell_index(move |slot, cell, index| {
+            e(slot, cell, false, profiles::CellValue::Index(index.max(0) as usize));
+        });
+        logic.on_set_drawbar(move |slot, drawbar, level| {
+            edit(slot, drawbar, true, profiles::CellValue::Index(level.clamp(0, 8) as usize));
+        });
+    }
+
+    // Shows a control in a row cell (from its menu, or "More parameters…"),
+    // keeping the choice for this instrument; errors go to the slot's status.
+    let set_panel_cell = {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        Rc::new(move |slot: usize, cell: usize, control_id: &str| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref()) else {
+                return;
+            };
+            // The empty cells after a short row all fill its next cell.
+            let row_len = rack.panels.borrow()[slot].as_ref().map_or(0, |panel| panel.panel.row.len());
+            let cell = cell.min(row_len);
+            let result = rack.profiles.borrow_mut().set_cell(&meta.id, &meta.params, cell, control_id);
+            match result {
+                Ok(()) => rack.rebuild_panels(&engine, &meta.id),
+                Err(err) => {
+                    log::error!("failed to change the panel of {}: {err:#}", meta.name);
+                    rack.refresh_slot(&engine, slot, Some(format!("failed to change the panel: {err}")));
+                }
+            }
+        })
+    };
+    {
+        let rack = rack.clone();
+        let set_panel_cell = set_panel_cell.clone();
+        logic.on_set_panel_cell(move |slot, cell, pool_index| {
+            let control_id = rack.panels.borrow()[slot as usize]
+                .as_ref()
+                .and_then(|panel| panel.panel.pool.get(pool_index as usize))
+                .map(|control| control.id.clone());
+            if let Some(control_id) = control_id {
+                set_panel_cell(slot as usize, cell as usize, &control_id);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_reset_panel_row(move |slot| {
+            let slot = slot as usize;
+            let engine = engine.borrow();
+            let Some(meta) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref()) else {
+                return;
+            };
+            let result = rack.profiles.borrow_mut().reset_row(&meta.id);
+            match result {
+                Ok(()) => rack.rebuild_panels(&engine, &meta.id),
+                Err(err) => {
+                    log::error!("failed to reset the panel of {}: {err:#}", meta.name);
+                    rack.refresh_slot(&engine, slot, Some(format!("failed to reset the panel: {err}")));
+                }
+            }
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_open_param_search(move |slot, cell| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.slot(slot as usize).and_then(|chain| chain.instrument.as_ref()) else {
+                return;
+            };
+            let mut search = ParamSearch {
+                slot: slot as usize,
+                cell: cell as usize,
+                plugin_id: meta.id.clone(),
+                params: meta
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), profiles::param_control(param).id))
+                    .collect(),
+                shown: Vec::new(),
+            };
+            search.filter("", &rack.param_search_rows);
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_param_search_count(search.params.len() as i32);
+            }
+            *rack.param_search.borrow_mut() = Some(search);
+        });
+    }
+    {
+        let rack = rack.clone();
+        logic.on_filter_param_search(move |query| {
+            if let Some(search) = rack.param_search.borrow_mut().as_mut() {
+                search.filter(&query, &rack.param_search_rows);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_pick_param_search(move |index| {
+            let Some(search) = rack.param_search.borrow_mut().take() else {
+                return;
+            };
+            // The instrument may have changed meanwhile.
+            let same = engine
+                .borrow()
+                .slot(search.slot)
+                .and_then(|chain| chain.instrument.as_ref())
+                .is_some_and(|meta| meta.id == search.plugin_id);
+            let control_id = search.shown.get(index as usize).map(|&shown| &search.params[shown].1);
+            if let (true, Some(control_id)) = (same, control_id) {
+                set_panel_cell(search.slot, search.cell, control_id);
             }
         });
     }
@@ -2215,6 +2464,12 @@ fn main() -> anyhow::Result<()> {
                         handle.notify(PortMessage::Atom { port, atom: event.to_atom() });
                     }
                 });
+            }
+            // setBfree's reports (its own GUI, a program change, a state load)
+            // move its panel's drawbars and switches.
+            let changed = engine.borrow_mut().take_setbfree_changes();
+            for key in changed {
+                rack.refresh_panel_of(&engine.borrow(), key);
             }
             engine.borrow_mut().collect_retired();
             if config_dirty.replace(false) {
