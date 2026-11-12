@@ -1,0 +1,20 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Thu, 12 Nov 2026 19:14:32 +0000
+Description: Live Keys releases
+Label: Live Keys
+Origin: Live Keys
+Suite: stable
+MD5Sum:
+ f501545fbaa2b69b8c3a98c3fbf0043b             3083 main/binary-amd64/Packages
+ 7f783f3142e2c171cd04a09389409cd5             1082 main/binary-amd64/Packages.gz
+SHA1:
+ 919702286976a205c70e868db391e2a63dc465bf             3083 main/binary-amd64/Packages
+ 3c2d5898d1174ec456293e7cd1ee68eb986c1d13             1082 main/binary-amd64/Packages.gz
+SHA256:
+ 1e5a087d6154e354b405dc1458208a3bbbc28023469eaa3b3735f613bd323634             3083 main/binary-amd64/Packages
+ 6c39f3d9739df01d16323a3f537a94f71fa91d15c53754995f645b389b0da137             1082 main/binary-amd64/Packages.gz
+SHA512:
+ d364e713fe0e6f1fd37d4862bd8632c27208d62c0eb4a3de956c062fe2d460e0df5d4027aa13b827a46b767c0de4b302b889b5076f7268a650689570ac526b08             3083 main/binary-amd64/Packages
+ 1b3197ce9f26e7a78ac2853e8d7eca9fb9747218c66597601bf0d3d181bdfbdcf32e6a56a221e1e2e51e47f2f31e45e3a21a3894c7fd0c7086366420c2551e1d             1082 main/binary-amd64/Packages.gz
