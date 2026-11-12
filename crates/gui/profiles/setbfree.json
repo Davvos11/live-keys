@@ -1,0 +1,39 @@
+{
+  "plugin": "http://gareus.org/oss/lv2/b_synth",
+  "fixed": "drawbars",
+  "drawbars": [
+    { "id": "db16", "label": "16'", "colour": "brown", "target": { "setbfree": "upper.drawbar16" } },
+    { "id": "db513", "label": "5⅓'", "colour": "brown", "target": { "setbfree": "upper.drawbar513" } },
+    { "id": "db8", "label": "8'", "colour": "white", "target": { "setbfree": "upper.drawbar8" } },
+    { "id": "db4", "label": "4'", "colour": "white", "target": { "setbfree": "upper.drawbar4" } },
+    { "id": "db223", "label": "2⅔'", "colour": "black", "target": { "setbfree": "upper.drawbar223" } },
+    { "id": "db2", "label": "2'", "colour": "white", "target": { "setbfree": "upper.drawbar2" } },
+    { "id": "db135", "label": "1⅗'", "colour": "black", "target": { "setbfree": "upper.drawbar135" } },
+    { "id": "db113", "label": "1⅓'", "colour": "black", "target": { "setbfree": "upper.drawbar113" } },
+    { "id": "db1", "label": "1'", "colour": "white", "target": { "setbfree": "upper.drawbar1" } }
+  ],
+  "controls": [
+    { "id": "perc", "label": "Perc", "text": "On", "widget": "switch", "target": { "setbfree": "percussion.enable" } },
+    { "id": "perc-vol", "name": "Perc volume", "label": "Volume", "text": "Soft", "widget": "switch",
+      "target": { "setbfree": "percussion.volume" } },
+    { "id": "perc-decay", "name": "Perc decay", "label": "Decay", "text": "Fast", "widget": "switch",
+      "target": { "setbfree": "percussion.decay" } },
+    { "id": "perc-harm", "name": "Perc harmonic", "label": "Harmonic", "text": "2nd", "widget": "switch",
+      "target": { "setbfree": "percussion.harmonic" } },
+    { "id": "vibrato", "label": "Vibrato", "text": "On", "widget": "switch", "target": { "setbfree": "vibrato.upper" } },
+    { "id": "vib-mode", "name": "Vibrato mode", "label": "Mode", "widget": "knob", "target": { "setbfree": "vibrato.knob" },
+      "choices": [
+        { "label": "V1", "value": 0 }, { "label": "C1", "value": 23 }, { "label": "V2", "value": 46 },
+        { "label": "C2", "value": 69 }, { "label": "V3", "value": 92 }, { "label": "C3", "value": 115 }
+      ] },
+    { "id": "leslie", "label": "Leslie", "widget": "lever", "target": { "setbfree": "rotary.speed-preset" },
+      "choices": [{ "label": "Slow", "value": 0 }, { "label": "Stop", "value": 64 }, { "label": "Fast", "value": 127 }] },
+    { "id": "drive", "label": "Drive", "text": "On", "widget": "switch", "target": { "setbfree": "overdrive.enable" } },
+    { "id": "drive-amt", "name": "Drive amount", "label": "Amount", "widget": "knob",
+      "target": { "setbfree": "overdrive.character" } },
+    { "id": "reverb", "label": "Reverb", "widget": "knob", "target": { "setbfree": "reverb.mix" }, "default": 12 },
+    { "id": "swell", "name": "Swell (volume)", "label": "Swell", "widget": "knob", "target": { "setbfree": "swellpedal1" },
+      "default": 127 }
+  ],
+  "row": ["perc", "vibrato", "leslie", "drive", "reverb"]
+}

@@ -281,7 +281,9 @@ vibrato selector. A `Select` or a segmented row of buttons doesn't fit in a 56 p
 
 A control can override what the plugin reports: `min`/`max` (a cutoff knob that only covers
 the useful range), `steps` and `choices` (JUCE plugins report most choice parameters as
-continuous; see CLAUDE.md), `invert`.
+continuous; see CLAUDE.md), `invert`, and `default` (the value shown while setBfree hasn't
+reported a function). `choices` are `{ "label", "value" }` objects in the target's terms, or bare
+labels spread evenly across the target's range.
 
 **Layout: one row the user picks from** (decided 2026-11-12; Penpot: "Live (window minimum,
 1200×995)", slot 2). The slot's first tab has, from top to bottom:
@@ -304,8 +306,8 @@ a cell from its context menu (right-click), which lists:
   customise UI;
 - **Reset row**, which goes back to the profile's default.
 
-The user's choice is kept **per plugin** (every slot with setBfree shows the same row), as a
-user profile, so a slot preset or a scene doesn't change it. The pool is ordered as the menu
+The user's choice is kept **per plugin** (every slot with setBfree shows the same row), next to
+the user profiles (see Storage), so a slot preset or a scene doesn't change it. The pool is ordered as the menu
 lists it.
 
 A plugin without a profile gets a pool of all its parameters, with its first five continuous
@@ -364,8 +366,12 @@ itself.
 **Storage.** Shipped profiles are JSON files in the repo, compiled in (`include_str!`). User
 profiles are `<data dir>/live-keys/profiles/*.json`, one per plugin, with the plugin id inside
 the file (ids contain `/` and `:`, so they don't make good file names). A user profile replaces
-the shipped one wholesale, with no merging, and "Reset" deletes it. Profiles are per plugin, so
-they're not part of slot presets or scenes.
+the shipped one wholesale, with no merging. The user's rows aren't profiles: they're one file,
+`<data dir>/live-keys/profiles/rows.json` (left out when reading profiles), mapping a plugin id
+to its row's control ids and the parameters added through "More parameters…" (which stay in
+the pool until the row is reset). So a row choice doesn't freeze a shipped profile's pool,
+and "Reset row" removes the plugin's entry. Profiles and rows are per plugin, so they're not
+part of slot presets or scenes.
 
 **No profile:** the current fallback (the first five continuous parameters as knobs).
 

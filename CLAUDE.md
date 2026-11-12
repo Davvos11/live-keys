@@ -87,6 +87,10 @@ cargo run -p live-keys-lv2-ui --example test_surge   # X11UI path (needs Surge X
 cargo run -p live-keys-lv2-ui --example test_setbfree --release -- [seconds] [plugin uri]
   # a plugin's GUI through a live engine (default setBfree, whose GUI uses atom ports only;
   # needs an audio device); prints how many messages crossed each way
+cargo run -p live-keys-engine --example setbfree --release
+  # setBfree's control messages headless through a live engine: its uiinit dump, a drawbar set
+  # and read back, a state file restored (reinit + dump); RUST_LOG=live_keys_engine=trace
+  # prints every message
 
 # Plugin check: one representative of every class of plugin with a known quirk (see
 # crates/plugin-check/src/cases.rs), each in a child process: load, play a note (heard?),
@@ -95,7 +99,8 @@ cargo run -p live-keys-lv2-ui --example test_setbfree --release -- [seconds] [pl
 # Needs an X display and audio output; plugins not installed are skipped.
 cargo run -p live-keys-plugin-check --release              # all cases; exit code 1 on a failure
 cargo run -p live-keys-plugin-check --release -- vst3 lsp  # cases whose name contains a filter
-cargo run -p live-keys-plugin-check --release -- --info <plugin id>   # GUI kind + params, for a new case
+cargo run -p live-keys-plugin-check --release -- --info <plugin id>   # GUI kind + params (id, symbol, name,
+                                               # kind, range), for a new case or a panel profile
 # Run it after touching plugin hosting or GUI hosting, and add a case when a plugin shows a new quirk.
 
 # Manual VST3 smoke tests (not part of the app)
@@ -234,7 +239,8 @@ behind format-agnostic cores:
     `PluginKind` (`Instrument` = MIDI → audio, `MidiEffect` = MIDI → MIDI, `AudioEffect` =
     audio → audio and anything else), `PluginInfo` (`id`, name, format, kind — `id` is unique
     across formats: an LV2 URI, `vst3:` + the VST3 class ID in hex, or `clap:` + the CLAP
-    plugin id), and `ParamInfo` (`id`,
+    plugin id), and `ParamInfo` (`id`, `symbol` — a stable reference for panel profiles: the
+    LV2 port symbol, or the VST3/CLAP id in decimal —
     name, default/min/max, `kind: ParamKind`, `steps`, `logarithmic`, `unit`, `choices`).
     A `ParamInfo`'s id and values are in the format's own terms — an LV2 control-input port
     index and its real range, or a VST3 `ParamID` and its normalized `0.0..=1.0` — so the
@@ -311,7 +317,8 @@ behind format-agnostic cores:
   metadata): `lv2:toggled` → toggle, `lv2:enumeration` + scale points → choice, the
   `units:midiNote` unit with a non-negative range → note (a negative range is a transposition:
   stepped), `lv2:integer` → stepped, `pprops:logarithmic` (min > 0) → log slider; the unit's
-  `units:symbol` as `unit`; scale points as `choices`; `pprops:notOnGUI` ports left out;
+  `units:symbol` as `unit`; scale points as `choices`; the port symbol as `symbol`;
+  `pprops:notOnGUI` ports left out;
   `lv2:sampleRate` bounds/default scaled to the sample rate. `min`/`max` always come back finite
   (an LV2 port with no declared range falls back to a span around its default) since a UI can't
   usefully expose an infinite slider.
@@ -629,7 +636,21 @@ behind format-agnostic cores:
   `take_slot_peak(slot)` is the slot's loudest sample since the last call.
   `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
   `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
-  plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`). `param_text(key, id, value)` is
+  plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`).
+  **setBfree** (`setbfree.rs`; `SETBFREE_URI`) has no control ports: every setting is an
+  `sb3:controlmsg` atom object (`sb3:controlkey` string, e.g. `upper.drawbar16`; `sb3:controlval`
+  int 0..=127) on its `control` input and `notify` output (see "setBfree's protocol" in
+  `docs/design/plugins.md`). A loaded setBfree gets a `Setbfree` in its `LoadedPluginMeta`
+  (URIDs from the instance's own `livi::Features` map, the recorded values), and `instantiate`
+  queues an empty `sb3:uiinit` on its GUI channel at once — setBfree reports nothing before
+  that, then dumps every function set so far — so every load (stream restarts included) fills
+  the values. `send_setbfree(key, function, value)` queues a control message and records it
+  (setBfree doesn't echo the host's); `drain_ui_events` decodes the plugin's reports into the
+  record before forwarding them (`special.reinit`, sent on a state restore before a full dump,
+  clears it; other `special.*` keys are ignored) and marks the plugin for
+  `take_setbfree_changes`; `send_ui_atom` records setBfree's own GUI's messages the same way.
+  `setbfree_value(key, function)` reads the record — `None` for functions never set (the dump
+  only has those). All control-thread work; the atoms travel like a GUI's. `param_text(key, id, value)` is
   a value as display text: a VST3 plugin's own (`Vst3Controller::value_text`, unit appended
   unless already there; main thread only), a CLAP plugin's own (`ClapController::value_text`,
   unit included), else `ParamInfo::format_value`.
@@ -715,7 +736,26 @@ behind format-agnostic cores:
   generated `ui/mock_data.slint`: a real session's UI state, written on exit when the app runs
   with `LIVE_KEYS_MOCK_DATA` (`src/mock_data.rs`: a `ToSlint` trait writing values as Slint
   literals, implemented per struct by `slint_struct!` from a field list — add new struct fields
-  there, and new `AppState` properties to `generate` and to `MockData`). `config.rs` handles settings persistence (`dirs` +
+  there, and new `AppState` properties to `generate` and to `MockData`). **Panel profiles**
+  (`src/profiles.rs`, the slot's first tab; see "Panel profiles" in `docs/design/plugins.md`):
+  `Profiles::panel(plugin id, params)` gives a `Panel` — an optional fixed section of drawbars,
+  a pool of `Control`s (id, name, label, switch text, `Widget` knob/switch/lever/drawbar,
+  `Target::Param(id)` or `Target::Setbfree(function)`, `choices`, `Overrides`
+  min/max/steps/invert/default) and a row of `ROW_LEN` (5) pool indices. `Control::read`/`write`
+  convert between a target's value and the UI's `CellValue` (`Position` 0..1 — log-scaled
+  through `slot_view::position`/`knob_value` —, `On`, or `Index`: the nearest choice, or a
+  drawbar's level 0..=8; setBfree's drawbars are inverted, `level = rint((127 − v)·8/127)`), and
+  `value_text` shows it. Shipped profiles are `crates/gui/profiles/*.json` (setBfree, mda
+  EPiano, Helm, Surge XT and Vital — the CLAP builds), compiled in (`SHIPPED`; add new ones
+  there); a control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
+  out if the plugin lacks it. User profiles are `<data dir>/live-keys/profiles/*.json` (same
+  format, replacing a shipped one wholesale), and `rows.json` there is the user's row per
+  plugin (`UserRow`: control ids, plus `param:<id>` controls added via "More parameters…",
+  which stay in the pool), written by `set_cell` (swaps if the control is in another cell)
+  and removed by `reset_row`. A plugin without a profile gets every parameter
+  (`param_control`) as its pool and its first five continuous ones as its row; rows whose
+  controls went missing are filled from the default, then the pool. Unit-tested (value
+  mappings, row resolution and swapping, the shipped files parsing). `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
   `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
   removed; on a first run, every device present but Midi Through becomes input 1's devices): the Settings tab lists them

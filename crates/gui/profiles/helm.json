@@ -1,0 +1,25 @@
+{
+  "plugin": "http://tytel.org/helm",
+  "controls": [
+    { "id": "cutoff", "label": "Cutoff", "target": { "param": "cutoff" } },
+    { "id": "resonance", "label": "Resonance", "target": { "param": "resonance" } },
+    { "id": "env-depth", "name": "Filter envelope depth", "label": "Env depth", "target": { "param": "fil_env_depth" } },
+    { "id": "filter-drive", "name": "Filter drive", "label": "Drive", "target": { "param": "filter_drive" } },
+    { "id": "keytrack", "name": "Filter key tracking", "label": "Keytrack", "target": { "param": "keytrack" } },
+    { "id": "filter", "name": "Filter on", "label": "Filter", "text": "On", "widget": "switch", "steps": 1,
+      "target": { "param": "filter_on" } },
+    { "id": "attack", "name": "Amp attack", "label": "Attack", "target": { "param": "amp_attack" } },
+    { "id": "decay", "name": "Amp decay", "label": "Decay", "target": { "param": "amp_decay" } },
+    { "id": "sustain", "name": "Amp sustain", "label": "Sustain", "target": { "param": "amp_sustain" } },
+    { "id": "release", "name": "Amp release", "label": "Release", "target": { "param": "amp_release" } },
+    { "id": "velocity", "name": "Velocity tracking", "label": "Velocity", "target": { "param": "velocity_track" } },
+    { "id": "delay", "name": "Delay on", "label": "Delay", "text": "On", "widget": "switch", "steps": 1,
+      "target": { "param": "delay_on" } },
+    { "id": "reverb", "name": "Reverb on", "label": "Reverb", "text": "On", "widget": "switch", "steps": 1,
+      "target": { "param": "reverb_on" } },
+    { "id": "reverb-mix", "name": "Reverb mix", "label": "Rev mix", "target": { "param": "reverb_dry_wet" } },
+    { "id": "portamento", "label": "Glide", "name": "Portamento", "target": { "param": "portamento" } },
+    { "id": "volume", "label": "Volume", "target": { "param": "volume" } }
+  ],
+  "row": ["cutoff", "resonance", "env-depth", "filter-drive", "keytrack"]
+}

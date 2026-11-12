@@ -1,0 +1,15 @@
+{
+  "plugin": "clap:org.surge-synth-team.surge-xt",
+  "controls": [
+    { "id": "m1", "name": "Macro 1", "label": "M1", "target": { "param": "825615485" } },
+    { "id": "m2", "name": "Macro 2", "label": "M2", "target": { "param": "825615486" } },
+    { "id": "m3", "name": "Macro 3", "label": "M3", "target": { "param": "825615487" } },
+    { "id": "m4", "name": "Macro 4", "label": "M4", "target": { "param": "825615488" } },
+    { "id": "m5", "name": "Macro 5", "label": "M5", "target": { "param": "825615489" } },
+    { "id": "m6", "name": "Macro 6", "label": "M6", "target": { "param": "825615490" } },
+    { "id": "m7", "name": "Macro 7", "label": "M7", "target": { "param": "825615491" } },
+    { "id": "m8", "name": "Macro 8", "label": "M8", "target": { "param": "825615492" } },
+    { "id": "volume", "name": "Global volume", "label": "Volume", "target": { "param": "3484083994" } }
+  ],
+  "row": ["m1", "m2", "m3", "m4", "m5"]
+}

@@ -1,0 +1,16 @@
+{
+  "plugin": "clap:audio.vital.synth",
+  "controls": [
+    { "id": "macro1", "name": "Macro 1", "label": "Macro 1", "target": { "param": "49618" } },
+    { "id": "macro2", "name": "Macro 2", "label": "Macro 2", "target": { "param": "49619" } },
+    { "id": "macro3", "name": "Macro 3", "label": "Macro 3", "target": { "param": "49620" } },
+    { "id": "macro4", "name": "Macro 4", "label": "Macro 4", "target": { "param": "49621" } },
+    { "id": "volume", "label": "Volume", "target": { "param": "51696" } },
+    { "id": "cutoff", "name": "Filter 1 cutoff", "label": "Cutoff", "target": { "param": "48629" } },
+    { "id": "resonance", "name": "Filter 1 resonance", "label": "Resonance", "target": { "param": "48661" } },
+    { "id": "filter-drive", "name": "Filter 1 drive", "label": "Drive", "target": { "param": "48630" } },
+    { "id": "attack", "name": "Envelope 1 attack", "label": "Attack", "target": { "param": "1668" } },
+    { "id": "release", "name": "Envelope 1 release", "label": "Release", "target": { "param": "1693" } }
+  ],
+  "row": ["macro1", "macro2", "macro3", "macro4", "volume"]
+}

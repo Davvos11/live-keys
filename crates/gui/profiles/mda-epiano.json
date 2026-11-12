@@ -1,0 +1,16 @@
+{
+  "plugin": "http://drobilla.net/plugins/mda/EPiano",
+  "controls": [
+    { "id": "decay", "label": "Decay", "target": { "param": "env_decay" } },
+    { "id": "release", "label": "Release", "target": { "param": "env_release" } },
+    { "id": "hardness", "label": "Hardness", "target": { "param": "hardness" } },
+    { "id": "treble", "label": "Treble", "target": { "param": "treble_boost" } },
+    { "id": "drive", "label": "Drive", "target": { "param": "overdrive" } },
+    { "id": "trem", "name": "Tremolo / pan", "label": "Trem/Pan", "target": { "param": "modulation" } },
+    { "id": "rate", "name": "Tremolo rate", "label": "Rate", "target": { "param": "lfo_rate" } },
+    { "id": "velocity", "name": "Velocity sense", "label": "Velocity", "target": { "param": "vel_sense" } },
+    { "id": "width", "name": "Stereo width", "label": "Width", "target": { "param": "stereo_width" } },
+    { "id": "detune", "name": "Random detune", "label": "Detune", "target": { "param": "random_tuning" } }
+  ],
+  "row": ["decay", "release", "hardness", "treble", "drive"]
+}
