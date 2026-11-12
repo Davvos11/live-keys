@@ -12,5 +12,5 @@
     { "id": "attack", "name": "Envelope 1 attack", "label": "Attack", "target": { "param": "1668" } },
     { "id": "release", "name": "Envelope 1 release", "label": "Release", "target": { "param": "1693" } }
   ],
-  "row": ["macro1", "macro2", "macro3", "macro4", "volume"]
+  "row": ["macro1", "macro2", "macro3", "macro4", "volume", "cutoff", "resonance", "filter-drive", "attack", "release"]
 }

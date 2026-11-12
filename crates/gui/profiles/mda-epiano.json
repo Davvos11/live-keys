@@ -12,5 +12,5 @@
     { "id": "width", "name": "Stereo width", "label": "Width", "target": { "param": "stereo_width" } },
     { "id": "detune", "name": "Random detune", "label": "Detune", "target": { "param": "random_tuning" } }
   ],
-  "row": ["decay", "release", "hardness", "treble", "drive"]
+  "row": ["decay", "release", "hardness", "treble", "drive", "trem", "rate", "velocity", "width", "detune"]
 }

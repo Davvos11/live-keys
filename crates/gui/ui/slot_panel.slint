@@ -2,7 +2,7 @@ import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slin
 import { Theme, Icons, Icon, KButton, DropdownButton, ListItem, Select, TabBar, Stepper, FxSlot, ScrollIndicator } from "widgets.slint";
 import { Artwork } from "theme.slint";
 import { Knob } from "knob.slint";
-import { DrawbarSection, PanelCellView, ParamSearchPopup } from "panel.slint";
+import { DrawbarSection, PanelControls, ParamSearchPopup } from "panel.slint";
 import { RangeSlider } from "range_slider.slint";
 import { PresetPopup } from "preset_bar.slint";
 import { SlotPresets } from "slot_presets.slint";
@@ -156,6 +156,90 @@ component FxGrid inherits Rectangle {
         y: Math.floor(root.effects.length / 3) * (root.cell + root.row-gap);
         empty: true;
         clicked => { root.add(); }
+    }
+}
+
+// The audio effects in one row of FX squares, then a + to add one while
+// there's room, scrolling sideways (drag, the mouse wheel, or the scrollbar
+// under it) when they don't fit; three fit a slot, spaced like `FxGrid`'s.
+component FxStrip inherits Rectangle {
+    in property <[EffectRow]> effects;
+    in property <bool> can-add;
+    in property <int> selected: -1;
+    callback open(/* index */ int);
+    callback add();
+
+    property <length> cell: 80px;
+    property <int> count: root.effects.length + (root.can-add ? 1 : 0);
+    property <length> gap: max(4px, (root.width - 3 * root.cell) / 4);
+    property <length> strip-width: root.gap + root.count * (root.cell + root.gap);
+    // The scrollbar's room under the squares, kept when it's hidden so the
+    // tab's layout doesn't move when effects are added.
+    property <length> bar-gap: 6px;
+    property <length> bar-height: 4px;
+    property <length> max-scroll: max(0px, root.strip-width - root.width);
+
+    height: root.cell + root.bar-gap + root.bar-height;
+
+    // Behind the squares, which don't take wheel events: turns the wheel into
+    // sideways scrolling.
+    TouchArea {
+        scroll-event(event) => {
+            let delta = event.delta-x != 0 ? event.delta-x : event.delta-y;
+            strip.content-x = max(min(strip.content-x + delta, 0px), -root.max-scroll);
+            accept
+        }
+    }
+    strip := Flickable {
+        height: root.cell;
+        y: 0;
+        content-width: max(root.width, root.strip-width);
+        content-height: root.cell;
+        for effect[index] in root.effects : FxSlot {
+            x: root.gap + index * (root.cell + root.gap);
+            name: effect.name;
+            graph: effect.graph;
+            selected: index == root.selected;
+            clicked => { root.open(index); }
+        }
+        if root.can-add : FxSlot {
+            x: root.gap + root.effects.length * (root.cell + root.gap);
+            empty: true;
+            clicked => { root.add(); }
+        }
+    }
+    // The scrollbar: a thin thumb, like the tab's, that can be dragged.
+    if root.max-scroll > 0 : Rectangle {
+        x: root.gap;
+        y: root.cell + root.bar-gap;
+        width: root.width - 2 * root.gap;
+        height: root.bar-height;
+        property <float> ratio: root.width / root.strip-width;
+        thumb := Rectangle {
+            width: max(24px, parent.width * parent.ratio);
+            x: (parent.width - self.width) * (-strip.content-x / root.max-scroll);
+            height: parent.height;
+            border-radius: root.bar-height / 2;
+            background: thumb-area.pressed || thumb-area.has-hover ? Theme.text-faint : Theme.control-border;
+        }
+        thumb-area := TouchArea {
+            y: -root.bar-gap;
+            height: parent.height + root.bar-gap + 4px;
+            property <length> start-x;
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    self.start-x = strip.content-x;
+                }
+            }
+            moved => {
+                if self.pressed {
+                    let travel = parent.width - thumb.width;
+                    let scrolled = travel > 0 ? (self.mouse-x - self.pressed-x) / travel * root.max-scroll : 0px;
+                    strip.content-x = max(min(self.start-x - scrolled, 0px), -root.max-scroll);
+                }
+            }
+        }
     }
 }
 
@@ -381,14 +465,15 @@ export component SlotPanel inherits Rectangle {
             clip: true;
             flick := Flickable {
                 mouse-drag-pan-enabled: false;
+                // The first tab never scrolls: it's laid out to fit.
+                interactive: root.tab != 0;
                 content-height: content.height;
                 content := VerticalLayout {
                     width: flick.width;
-                    // The first tab spreads its parts (drawbars, row, effects)
-                    // evenly over the slot's height; across, each part spaces
-                    // its own items evenly, so it has no side padding (the row
-                    // of five 56 px cells only just fits the narrowest slot).
-                    height: root.tab == 0 ? max(self.preferred-height, flick.height) : self.preferred-height;
+                    // The first tab spreads its parts (drawbars, controls,
+                    // effects) evenly over the slot's height; across, each part
+                    // spaces its own items, so it has no side padding.
+                    height: root.tab == 0 ? flick.height : self.preferred-height;
                     alignment: root.tab == 0 ? LayoutAlignment.space-evenly : LayoutAlignment.start;
                     padding: 10px;
                     padding-left: root.tab == 0 ? 0px : 10px;
@@ -408,20 +493,16 @@ export component SlotPanel inherits Rectangle {
                         drawbars: root.slot.drawbars;
                         set-level(drawbar, level) => { AppLogic.set-drawbar(root.slot-index, drawbar, level); }
                     }
-                    if root.tab == 0 && root.has-instrument && root.slot.cells.length > 0 : HorizontalLayout {
-                        spacing: 2px;
-                        alignment: space-evenly;
-                        for cell[index] in root.slot.cells : PanelCellView {
-                            cell: cell;
-                            cell-index: index;
-                            pool: root.slot.pool;
-                            set-position(position) => { AppLogic.set-cell-position(root.slot-index, index, position); }
-                            set-on(on) => { AppLogic.set-cell-on(root.slot-index, index, on); }
-                            set-index(option) => { AppLogic.set-cell-index(root.slot-index, index, option); }
-                            choose(pool-index) => { AppLogic.set-panel-cell(root.slot-index, index, pool-index); }
-                            more-parameters => { root.show-param-search(index); }
-                            reset-row => { AppLogic.reset-panel-row(root.slot-index); }
-                        }
+                    if root.tab == 0 && root.has-instrument && root.slot.cells.length > 0 : PanelControls {
+                        cells: root.slot.cells;
+                        pool: root.slot.pool;
+                        single-row: root.slot.drawbars.length > 0;
+                        set-position(cell, position) => { AppLogic.set-cell-position(root.slot-index, cell, position); }
+                        set-on(cell, on) => { AppLogic.set-cell-on(root.slot-index, cell, on); }
+                        set-index(cell, option) => { AppLogic.set-cell-index(root.slot-index, cell, option); }
+                        choose(cell, pool-index) => { AppLogic.set-panel-cell(root.slot-index, cell, pool-index); }
+                        more-parameters(cell) => { root.show-param-search(cell); }
+                        reset-row => { AppLogic.reset-panel-row(root.slot-index); }
                     }
                     if root.tab == 0 && root.has-instrument && root.slot.cells.length == 0 && root.slot.drawbars.length == 0 : Text {
                         text: "This instrument has no parameters to show here.";
@@ -429,7 +510,7 @@ export component SlotPanel inherits Rectangle {
                         font-size: Theme.small-font-size;
                         wrap: word-wrap;
                     }
-                    if root.tab == 0 : FxGrid {
+                    if root.tab == 0 : FxStrip {
                         effects: root.slot.audio-effects;
                         can-add: root.slot.audio-effects.length < AppState.max-effects;
                         selected: effect-popup.is-open && root.fx-section == 1 ? root.fx-index : -1;

@@ -78,17 +78,21 @@ pub fn knob_value(param: &ParamInfo, position: f32) -> f32 {
     }
 }
 
-/// The row of `panel` for the plugin with `key`, at current values; an empty
-/// cell has `widget` -1 (filled from its menu).
+/// The shown controls of `panel` for the plugin with `key`, at current values,
+/// then — while there's room and the pool has more — an empty cell (`widget`
+/// -1, a + whose menu adds one).
 pub fn panel_cells(engine: &Engine, key: PluginKey, panel: &Panel) -> Vec<PanelCell> {
-    panel
+    let mut cells: Vec<PanelCell> = panel
         .row
         .iter()
-        .map(|cell| match cell.and_then(|index| panel.pool.get(index)) {
-            Some(control) => panel_cell(engine, key, control),
-            None => PanelCell { widget: -1, ..Default::default() },
-        })
-        .collect()
+        .filter_map(|&index| panel.pool.get(index))
+        .map(|control| panel_cell(engine, key, control))
+        .collect();
+    let params = engine.plugin(key).map_or(0, |meta| meta.params.len());
+    if cells.len() < panel.max && panel.pool.len().max(params) > cells.len() {
+        cells.push(PanelCell { widget: -1, ..Default::default() });
+    }
+    cells
 }
 
 /// `control`'s cell at its current value.
@@ -197,7 +201,7 @@ pub fn panel_pool(panel: &Panel) -> Vec<PanelPoolRow> {
         .iter()
         .enumerate()
         .filter_map(|(index, control)| {
-            let cell = panel.row.iter().position(|&shown| shown == Some(index));
+            let cell = panel.row.iter().position(|&shown| shown == index);
             (index < MENU_POOL_MAX || cell.is_some()).then(|| PanelPoolRow {
                 index: index as i32,
                 name: control.name.as_str().into(),

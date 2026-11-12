@@ -1043,7 +1043,7 @@ impl Rack {
         let control = if drawbar {
             panel.drawbars.get(cell)?
         } else {
-            panel.pool.get((*panel.row.get(cell)?)?)?
+            panel.pool.get(*panel.row.get(cell)?)?
         };
         Some((*key, control.clone()))
     }
@@ -1673,22 +1673,22 @@ fn main() -> anyhow::Result<()> {
     let set_panel_cell = {
         let engine = engine.clone();
         let rack = rack.clone();
-        Rc::new(move |slot: usize, cell: usize, control_id: &str| {
+        Rc::new(move |slot: usize, cell: usize, control_id: &str, toggle: bool| {
             let engine = engine.borrow();
             let Some(meta) = engine.slot(slot).and_then(|chain| chain.instrument.as_ref()) else {
                 return;
             };
-            // Choosing the control a cell already shows empties the cell.
+            // From a cell's menu, a shown control is taken off; anything else
+            // is added (instead of that cell's control when the panel is full).
             let shown = rack.panels.borrow()[slot].as_ref().is_some_and(|panel| {
                 let panel = &panel.panel;
-                panel.row.get(cell).copied().flatten().and_then(|index| panel.pool.get(index))
-                    .is_some_and(|control| control.id == control_id)
+                panel.row.iter().any(|&index| panel.pool[index].id == control_id)
             });
             let mut profiles = rack.profiles.borrow_mut();
-            let result = if shown {
-                profiles.clear_cell(&meta.id, &meta.params, cell)
+            let result = if shown && toggle {
+                profiles.remove_control(&meta.id, &meta.params, control_id)
             } else {
-                profiles.set_cell(&meta.id, &meta.params, cell, control_id)
+                profiles.add_control(&meta.id, &meta.params, control_id, cell)
             };
             drop(profiles);
             match result {
@@ -1709,7 +1709,7 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|panel| panel.panel.pool.get(pool_index as usize))
                 .map(|control| control.id.clone());
             if let Some(control_id) = control_id {
-                set_panel_cell(slot as usize, cell as usize, &control_id);
+                set_panel_cell(slot as usize, cell as usize, &control_id, true);
             }
         });
     }
@@ -1782,7 +1782,7 @@ fn main() -> anyhow::Result<()> {
                 .is_some_and(|meta| meta.id == search.plugin_id);
             let control_id = search.shown.get(index as usize).map(|&shown| &search.params[shown].1);
             if let (true, Some(control_id)) = (same, control_id) {
-                set_panel_cell(search.slot, search.cell, control_id);
+                set_panel_cell(search.slot, search.cell, control_id, false);
             }
         });
     }

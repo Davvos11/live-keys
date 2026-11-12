@@ -1,7 +1,7 @@
 //! Panel profiles: what an instrument's slot shows on its first tab — an
-//! optional fixed section (setBfree's drawbars), then one row of
-//! [`ROW_LEN`] cells, each a knob, switch or lever chosen from the profile's
-//! pool of controls. See "Panel profiles" in `docs/design/plugins.md`.
+//! optional fixed section (setBfree's drawbars), then up to [`MAX_CONTROLS`]
+//! controls ([`MAX_CONTROLS_WITH_DRAWBARS`] under drawbars), each a knob,
+//! switch or lever chosen from the profile's pool of controls. See "Panel profiles" in `docs/design/plugins.md`.
 //!
 //! This is the contract between the profile/engine side ("backend": loading
 //! shipped and user profiles, resolving targets, reading and writing values)
@@ -14,9 +14,10 @@
 //! ([`SHIPPED`]). The user's live in `<data dir>/live-keys/profiles/`: any
 //! `*.json` there is a profile (same format, the plugin id inside), replacing
 //! the shipped one for that plugin wholesale — except `rows.json`, which holds
-//! the user's row per plugin ([`UserRow`]: the row's control ids or `null` per cell, plus
+//! the user's row per plugin ([`UserRow`]: the shown controls' ids, plus
 //! parameters added through "More parameters…"), written by
-//! [`Profiles::set_cell`], [`Profiles::clear_cell`] and [`Profiles::reset_row`].
+//! [`Profiles::add_control`], [`Profiles::remove_control`] and
+//! [`Profiles::reset_row`].
 //!
 //! **Profile format** (JSON, unknown fields rejected): `plugin` (its
 //! `PluginInfo::id`), `fixed` (`"drawbars"` to show `drawbars`), `drawbars` and
@@ -35,8 +36,11 @@ use anyhow::{Context, Result, bail};
 use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PortEvent};
 use serde::{Deserialize, Serialize};
 
-/// How many cells the row has.
-pub const ROW_LEN: usize = 5;
+/// How many controls a panel shows at most (the UI lays them out zigzag, in
+/// two rows).
+pub const MAX_CONTROLS: usize = 10;
+/// How many under drawbars (one row).
+pub const MAX_CONTROLS_WITH_DRAWBARS: usize = 5;
 
 /// The shipped profiles, compiled in.
 const SHIPPED: &[(&str, &str)] = &[
@@ -159,11 +163,12 @@ pub struct Panel {
     /// profile, one knob per parameter (switch for toggles, stepped knob for
     /// choices).
     pub pool: Vec<Control>,
-    /// The row's cells, left to right: an index into `pool`, or `None` for an
-    /// empty cell (the user cleared it, or there's nothing to put there).
-    /// [`ROW_LEN`] cells, fewer if the pool is smaller. The user's choice if they
-    /// made one, else the profile's default.
-    pub row: Vec<Option<usize>>,
+    /// The controls shown, in order: indices into `pool`, at most `max`. The
+    /// user's choice if they made one, else the profile's default.
+    pub row: Vec<usize>,
+    /// How many controls the panel can show: [`MAX_CONTROLS`], or
+    /// [`MAX_CONTROLS_WITH_DRAWBARS`] if it has drawbars.
+    pub max: usize,
 }
 
 impl Control {
@@ -530,8 +535,8 @@ impl ControlSpec {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UserRow {
-    /// The row's control ids, left to right; `null` for an empty cell.
-    pub row: Vec<Option<String>>,
+    /// The shown controls' ids, in order.
+    pub row: Vec<String>,
     /// `param:<id>` controls added through "More parameters…", which stay in
     /// the pool (after the profile's) until the row is reset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -605,7 +610,7 @@ impl Profiles {
                 let default_row = params
                     .iter()
                     .filter(|p| p.kind == ParamKind::Continuous)
-                    .take(ROW_LEN)
+                    .take(MAX_CONTROLS)
                     .map(|p| format!("param:{}", p.id))
                     .collect();
                 (Vec::new(), params.iter().map(param_control).collect(), default_row)
@@ -613,7 +618,7 @@ impl Profiles {
         };
         // Parameters the user picked through "More parameters…".
         if let Some(user) = user {
-            for id in user.extra.iter().chain(user.row.iter().flatten()) {
+            for id in user.extra.iter().chain(&user.row) {
                 if !pool.iter().any(|control| control.id == *id)
                     && let Some(param) = param_by_control_id(params, id)
                 {
@@ -622,24 +627,26 @@ impl Profiles {
             }
         }
         let ids: Vec<&str> = pool.iter().map(|control| control.id.as_str()).collect();
-        let row = resolve_row(&ids, user.map(|user| user.row.as_slice()), &default_row);
-        Panel { drawbars, pool, row }
+        let max = if drawbars.is_empty() { MAX_CONTROLS } else { MAX_CONTROLS_WITH_DRAWBARS };
+        let row = resolve_row(&ids, user.map(|user| user.row.as_slice()), &default_row, max);
+        Panel { drawbars, pool, row, max }
     }
 
-    /// Shows pool control `control_id` in cell `cell` (0-based) of this plugin's
-    /// row, and saves that choice as the user's (per plugin). If the control was
-    /// already in another cell, the two swap. `control_id` may also be a
+    /// Shows pool control `control_id` on this plugin's panel, and saves that
+    /// as the user's choice (per plugin): after the shown ones, or — when the
+    /// panel is full — instead of the one at `replace` (an index into the shown
+    /// ones). Nothing if it's shown already. `control_id` may also be a
     /// parameter's [`param_control`] id that isn't in the pool ("More
     /// parameters…"): it's added to this plugin's pool for good (until
     /// [`Profiles::reset_row`]).
-    pub fn set_cell(&mut self, plugin_id: &str, params: &[ParamInfo], cell: usize, control_id: &str) -> Result<()> {
+    pub fn add_control(&mut self, plugin_id: &str, params: &[ParamInfo], control_id: &str, replace: usize) -> Result<()> {
         let panel = self.panel(plugin_id, params);
         let in_pool = panel.pool.iter().any(|control| control.id == control_id);
         if !in_pool && param_by_control_id(params, control_id).is_none() {
             bail!("no control '{control_id}' for {plugin_id}");
         }
         let mut row = row_ids(&panel);
-        place(&mut row, cell, control_id)?;
+        add(&mut row, control_id, panel.max, replace)?;
         let user = self.rows.entry(plugin_id.to_string()).or_default();
         user.row = row;
         if !in_pool && !user.extra.iter().any(|id| id == control_id) {
@@ -648,15 +655,11 @@ impl Profiles {
         self.save_rows()
     }
 
-    /// Empties cell `cell` (0-based) of this plugin's row, and saves that as the
-    /// user's row.
-    pub fn clear_cell(&mut self, plugin_id: &str, params: &[ParamInfo], cell: usize) -> Result<()> {
-        let panel = self.panel(plugin_id, params);
-        let mut row = row_ids(&panel);
-        let Some(slot) = row.get_mut(cell) else {
-            bail!("no cell {cell} in a row of {}", panel.row.len());
-        };
-        *slot = None;
+    /// Takes control `control_id` off this plugin's panel (the ones after it
+    /// move up), and saves that as the user's choice.
+    pub fn remove_control(&mut self, plugin_id: &str, params: &[ParamInfo], control_id: &str) -> Result<()> {
+        let mut row = row_ids(&self.panel(plugin_id, params));
+        row.retain(|id| id != control_id);
         self.rows.entry(plugin_id.to_string()).or_default().row = row;
         self.save_rows()
     }
@@ -716,62 +719,53 @@ fn param_by_control_id<'a>(params: &'a [ParamInfo], control_id: &str) -> Option<
     params.iter().find(|param| param.id == id)
 }
 
-/// `panel`'s row as control ids.
-fn row_ids(panel: &Panel) -> Vec<Option<String>> {
-    panel.row.iter().map(|cell| cell.map(|index| panel.pool[index].id.clone())).collect()
+/// `panel`'s shown controls as ids.
+fn row_ids(panel: &Panel) -> Vec<String> {
+    panel.row.iter().map(|&index| panel.pool[index].id.clone()).collect()
 }
 
-/// The row as cells of pool indices, [`ROW_LEN`] of them (fewer if the pool is
-/// smaller). The user's row, if they chose one, keeps its cells where they are:
-/// an id that isn't in the pool (`pool_ids`) any more, or a repeat, leaves its
-/// cell empty. The default row's ids fill the cells in order, leaving out ones
-/// not in the pool; if that leaves it short of what it names (controls whose
-/// parameter is gone), it's filled from the default row, then the pool —
-/// while a plugin without a profile whose default row is short (few
-/// continuous parameters) just gets empty cells.
-fn resolve_row(pool_ids: &[&str], user: Option<&[Option<String>]>, default: &[String]) -> Vec<Option<usize>> {
-    let len = pool_ids.len().min(ROW_LEN);
-    let index_of = |id: &str| pool_ids.iter().position(|pool_id| *pool_id == id);
-    if let Some(user) = user {
-        let mut row: Vec<Option<usize>> = Vec::with_capacity(len);
-        for cell in user.iter().take(len) {
-            let index = cell.as_deref().and_then(index_of);
-            row.push(index.filter(|index| !row.contains(&Some(*index))));
-        }
-        row.resize(len, None);
-        return row;
-    }
-    let mut row: Vec<usize> = Vec::with_capacity(len);
+/// The shown controls as pool indices, at most `max`: the user's ids if they
+/// chose, else the default ids, leaving out ones not in the pool (`pool_ids`)
+/// and repeats. A default that comes out short of what it names (controls
+/// whose parameter is gone) is filled from the pool; a user's choice isn't.
+fn resolve_row(pool_ids: &[&str], user: Option<&[String]>, default: &[String], max: usize) -> Vec<usize> {
+    let mut row: Vec<usize> = Vec::with_capacity(max);
     let add = |id: &str, row: &mut Vec<usize>| {
-        if row.len() < len
-            && let Some(index) = index_of(id)
+        if row.len() < max
+            && let Some(index) = pool_ids.iter().position(|pool_id| *pool_id == id)
             && !row.contains(&index)
         {
             row.push(index);
         }
     };
-    for id in default {
+    let chosen = user.unwrap_or(default);
+    for id in chosen {
         add(id, &mut row);
     }
-    if row.len() < default.len().min(len) {
-        for id in default.iter().map(String::as_str).chain(pool_ids.iter().copied()) {
+    let wanted = default.len().min(max);
+    if user.is_none() && row.len() < wanted {
+        for id in pool_ids {
+            if row.len() == wanted {
+                break;
+            }
             add(id, &mut row);
         }
     }
-    let mut row: Vec<Option<usize>> = row.into_iter().map(Some).collect();
-    row.resize(len, None);
     row
 }
 
-/// Puts `control_id` in `cell` of `row` (control ids per cell): if it's in
-/// another cell already, the two cells swap.
-fn place(row: &mut [Option<String>], cell: usize, control_id: &str) -> Result<()> {
-    if cell >= row.len() {
-        bail!("no cell {cell} in a row of {}", row.len());
+/// Adds `control_id` to `row` (shown control ids, at most `max`): at the end,
+/// or instead of `row[replace]` when it's full. Nothing if it's there already.
+fn add(row: &mut Vec<String>, control_id: &str, max: usize, replace: usize) -> Result<()> {
+    if row.iter().any(|id| id == control_id) {
+        return Ok(());
     }
-    match row.iter().position(|id| id.as_deref() == Some(control_id)) {
-        Some(current) => row.swap(current, cell),
-        None => row[cell] = Some(control_id.to_string()),
+    if row.len() < max {
+        row.push(control_id.to_string());
+    } else if let Some(id) = row.get_mut(replace) {
+        *id = control_id.to_string();
+    } else {
+        bail!("the panel is full");
     }
     Ok(())
 }
@@ -884,34 +878,31 @@ mod tests {
     }
 
     #[test]
-    fn rows_fill_gaps_and_swap() {
+    fn rows_fill_gaps_and_add() {
         let pool = ["a", "b", "c", "d", "e", "f"];
         let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
-        let cells = |ids: &[Option<&str>]| ids.iter().map(|id| id.map(str::to_string)).collect::<Vec<_>>();
         // A default naming a control the plugin lacks is filled from the pool.
-        assert_eq!(resolve_row(&pool, None, &ids(&["a", "x", "c", "d", "e"])), [0, 2, 3, 4, 1].map(Some));
-        // The user's row wins, keeping its empty cells and emptying gone ones.
-        assert_eq!(
-            resolve_row(&pool, Some(&cells(&[Some("f"), None, Some("x"), Some("c"), Some("f")])), &ids(&["a"])),
-            [Some(5), None, None, Some(2), None]
-        );
-        // A short fallback row (few continuous parameters) gets empty cells.
-        assert_eq!(resolve_row(&pool, None, &ids(&["b", "c"])), [Some(1), Some(2), None, None, None]);
-        // A small pool, a short row.
-        assert_eq!(resolve_row(&pool[..2], None, &ids(&["b"])), [Some(1), None]);
+        assert_eq!(resolve_row(&pool, None, &ids(&["a", "x", "c", "d", "e"]), 10), [0, 2, 3, 4, 1]);
+        // At most `max`.
+        assert_eq!(resolve_row(&pool, None, &ids(&["a", "b", "c"]), 2), [0, 1]);
+        // The user's choice wins, gone controls just left out.
+        assert_eq!(resolve_row(&pool, Some(&ids(&["f", "x", "c", "f"])), &ids(&["a"]), 10), [5, 2]);
+        // A short fallback default (few continuous parameters) stays short.
+        assert_eq!(resolve_row(&pool, None, &ids(&["b", "c"]), 10), [1, 2]);
 
-        let mut row = cells(&[Some("a"), Some("b"), None, Some("d"), Some("e")]);
-        place(&mut row, 0, "d").unwrap();
-        assert_eq!(row, cells(&[Some("d"), Some("b"), None, Some("a"), Some("e")]));
-        place(&mut row, 2, "f").unwrap();
-        assert_eq!(row, cells(&[Some("d"), Some("b"), Some("f"), Some("a"), Some("e")]));
-        place(&mut row, 2, "b").unwrap();
-        assert_eq!(row, cells(&[Some("d"), Some("f"), Some("b"), Some("a"), Some("e")]));
-        assert!(place(&mut row, ROW_LEN, "b").is_err());
+        let mut row = ids(&["a", "b"]);
+        add(&mut row, "c", 3, 0).unwrap();
+        assert_eq!(row, ids(&["a", "b", "c"]));
+        add(&mut row, "b", 3, 0).unwrap();
+        assert_eq!(row, ids(&["a", "b", "c"]));
+        // Full: replaces.
+        add(&mut row, "d", 3, 1).unwrap();
+        assert_eq!(row, ids(&["a", "d", "c"]));
+        assert!(add(&mut row, "e", 3, 3).is_err());
     }
 
     #[test]
-    fn set_cell_keeps_more_parameters_in_the_pool() {
+    fn add_control_keeps_more_parameters_in_the_pool() {
         let params: Vec<ParamInfo> =
             (0..8).map(|id| ParamInfo::continuous(id, format!("P{id}"), 0.0, 0.0, 1.0)).collect();
         let plugin = "http://example.org/plugin";
@@ -925,25 +916,21 @@ mod tests {
         profiles.profiles.insert(plugin.into(), profile);
         let row = |profiles: &Profiles| {
             let panel = profiles.panel(plugin, &params);
-            panel.row.iter().map(|cell| cell.map(|index| panel.pool[index].id.clone())).collect::<Vec<_>>()
+            panel.row.iter().map(|&index| panel.pool[index].id.clone()).collect::<Vec<_>>()
         };
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 2);
 
-        let some = |ids: &[&str]| ids.iter().map(|id| Some(id.to_string())).collect::<Vec<_>>();
-        profiles.set_cell(plugin, &params, 0, "param:7").unwrap();
-        assert_eq!(row(&profiles), [Some("param:7".to_string()), Some("b".to_string()), None]);
-        // Swapped out again, it stays in the pool.
-        profiles.set_cell(plugin, &params, 0, "a").unwrap();
-        assert_eq!(row(&profiles), [Some("a".to_string()), Some("b".to_string()), None]);
+        profiles.add_control(plugin, &params, "param:7", 0).unwrap();
+        assert_eq!(row(&profiles), ["a", "b", "param:7"]);
+        // Taken off again, it stays in the pool.
+        profiles.remove_control(plugin, &params, "param:7").unwrap();
+        profiles.remove_control(plugin, &params, "a").unwrap();
+        assert_eq!(row(&profiles), ["b"]);
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 3);
-        profiles.set_cell(plugin, &params, 0, "b").unwrap();
-        assert_eq!(row(&profiles), [Some("b".to_string()), Some("a".to_string()), None]);
-        profiles.clear_cell(plugin, &params, 0).unwrap();
-        assert_eq!(row(&profiles), [None, Some("a".to_string()), None]);
 
-        assert!(profiles.set_cell(plugin, &params, 0, "param:99").is_err());
+        assert!(profiles.add_control(plugin, &params, "param:99", 0).is_err());
         profiles.reset_row(plugin).unwrap();
-        assert_eq!(row(&profiles), some(&["a", "b"]));
+        assert_eq!(row(&profiles), ["a", "b"]);
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 2);
     }
 }

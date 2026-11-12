@@ -399,15 +399,11 @@ export component PanelCellView inherits Rectangle {
         width: 100%;
         height: 100%;
         Menu {
-            MenuItem {
-                title: "Show here";
-                enabled: false;
-            }
+            // The shown controls are ticked: choosing one takes it off,
+            // choosing another adds it (instead of this cell's when full).
             for entry in root.pool : MenuItem {
                 title: entry.name;
-                // Controls in other cells are greyed; this cell's is ticked.
-                enabled: entry.cell < 0 || entry.cell == root.cell-index;
-                checked: entry.cell == root.cell-index;
+                checked: entry.cell >= 0;
                 activated => { root.choose(entry.index); }
             }
             MenuSeparator { }
@@ -473,5 +469,51 @@ export component ParamSearchPopup inherits PopupWindow {
                 }
             }
         }
+    }
+}
+
+// The panel's controls (and a trailing + while there's room). Under drawbars,
+// or when there are only a few, one row spaced evenly; otherwise zigzag over
+// two rows — the 1st, 3rd, 5th… on top, the 2nd, 4th… below between them — so
+// up to ten fit the slot's width without the user arranging rows.
+export component PanelControls inherits Rectangle {
+    in property <[PanelCell]> cells;
+    in property <[PanelPoolRow]> pool;
+    // One straight row (a panel with drawbars).
+    in property <bool> single-row;
+    callback set-position(/* cell */ int, /* 0..1 */ float);
+    callback set-on(/* cell */ int, bool);
+    callback set-index(/* cell */ int, int);
+    callback choose(/* cell */ int, /* pool index */ int);
+    callback more-parameters(/* cell */ int);
+    callback reset-row();
+
+    property <length> cell-width: 56px;
+    property <length> cell-height: 67px;
+    // How far the lower row sits below the upper one.
+    property <length> row-step: 75px;
+    property <int> count: root.cells.length;
+    property <bool> zigzag: !root.single-row && root.count > 3;
+    // Single row: the same gap between the cells and at either end.
+    property <length> gap: (root.width - root.count * root.cell-width) / (root.count + 1);
+    // Zigzag: cell centres from `margin` to `width - margin`, evenly.
+    property <length> margin: max(root.cell-width / 2, root.width / (root.count + 1));
+    property <length> pitch: root.count <= 1 ? 0px : (root.width - 2 * root.margin) / (root.count - 1);
+
+    height: root.zigzag ? root.row-step + root.cell-height : root.cell-height;
+
+    for cell[index] in root.cells : PanelCellView {
+        x: root.zigzag ? root.margin + index * root.pitch - root.cell-width / 2
+            : root.gap + index * (root.cell-width + root.gap);
+        y: root.zigzag && Math.mod(index, 2) == 1 ? root.row-step : 0px;
+        cell: cell;
+        cell-index: index;
+        pool: root.pool;
+        set-position(position) => { root.set-position(index, position); }
+        set-on(on) => { root.set-on(index, on); }
+        set-index(option) => { root.set-index(index, option); }
+        choose(pool-index) => { root.choose(index, pool-index); }
+        more-parameters => { root.more-parameters(index); }
+        reset-row => { root.reset-row(); }
     }
 }

@@ -745,8 +745,8 @@ behind format-agnostic cores:
   `Profiles::panel(plugin id, params)` gives a `Panel` — an optional fixed section of drawbars,
   a pool of `Control`s (id, name, label, switch text, `Widget` knob/switch/lever/drawbar,
   `Target::Param(id)` or `Target::Setbfree(function)`, `choices`, `Overrides`
-  min/max/steps/invert/default) and a row of `ROW_LEN` (5) cells (fewer if the pool is smaller), each a pool index or
-  `None` (empty). `Control::read`/`write`
+  min/max/steps/invert/default) and the shown controls (`row`: pool indices, at most `max` — `MAX_CONTROLS` (10), or
+  `MAX_CONTROLS_WITH_DRAWBARS` (5) under drawbars). `Control::read`/`write`
   convert between a target's value and the UI's `CellValue` (`Position` 0..1 — log-scaled
   through `slot_view::position`/`knob_value` —, `On`, or `Index`: the nearest choice, or a
   drawbar's level 0..=8; setBfree's drawbars are inverted, `level = rint((127 − v)·8/127)`), and
@@ -755,13 +755,13 @@ behind format-agnostic cores:
   there); a control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
   out if the plugin lacks it. User profiles are `<data dir>/live-keys/profiles/*.json` (same
   format, replacing a shipped one wholesale), and `rows.json` there is the user's row per
-  plugin (`UserRow`: a control id or `null` per cell, plus `param:<id>` controls added via "More parameters…",
-  which stay in the pool), written by `set_cell` (swaps if the control is in another cell)
-  and `clear_cell`, and removed by `reset_row`. A plugin without a profile gets every parameter
-  (`param_control`) as its pool and its first five continuous ones as its row; a default row
-  whose controls went missing is filled from the default, then the pool; a user's row keeps
-  its cells where they are, a missing control leaving its cell empty. Unit-tested (value
-  mappings, row resolution and swapping, the shipped files parsing). `config.rs` handles settings persistence (`dirs` +
+  plugin (`UserRow`: the shown controls' ids, plus `param:<id>` controls added via "More
+  parameters…", which stay in the pool), written by `add_control` (appends; replaces the
+  control at a given index when full) and `remove_control`, and removed by `reset_row`. A plugin without a profile gets every parameter
+  (`param_control`) as its pool and its first ten continuous ones shown; a default
+  whose controls went missing is filled from the pool, up to its own length; a user's choice
+  just loses the missing ones. Unit-tested (value mappings, row resolution and adding, the
+  shipped files parsing). `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
   `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
   removed; on a first run, every device present but Midi Through becomes input 1's devices): the Settings tab lists them
@@ -809,22 +809,26 @@ behind format-agnostic cores:
   to replace or remove it or open its parameter window; "+ Instrument" without one), a volume
   `Knob` (dB, value shown while hovered), and the instrument's preset `DropdownButton`. Then a
   `TabBar` (the selected tab is per slot, in the UI only) over a scrolling area
-  (`Flickable` + `ScrollIndicator`): tab 1 the instrument's **panel** (`ui/panel.slint`, from
+  (`Flickable` + `ScrollIndicator`; tab 1 is laid out to fit and never scrolls): tab 1 the
+  instrument's **panel** (`ui/panel.slint`, from
   its profile, see `src/profiles.rs`) — an optional fixed section of `Drawbar`s
   (`DrawbarSection`; `SlotState.drawbars: [DrawbarCell]`, level 0..=8, dragged vertically or
-  scrolled) and a row of `profiles::ROW_LEN` 56 px `PanelCellView`s (`SlotState.cells:
-  [PanelCell]`): a `LabelledKnob` (position 0..1; `steps` for stepped parameters), a stepped
+  scrolled) and the controls, 56 px `PanelCellView`s in a `PanelControls` (`SlotState.cells:
+  [PanelCell]`) — one row spaced evenly under drawbars or when there are 3 or fewer, else
+  zigzag over two rows (1st, 3rd, 5th… on top, the others below between them), so up to ten
+  fit; each: a `LabelledKnob` (position 0..1; `steps` for stepped parameters), a stepped
   knob (a control with choices: snaps to them, shows the option's label), a `Toggle` (the
   design's switch) or a `Lever` (2–3 options: click a part, drag sideways or up/down, scroll).
-  An empty cell (`widget` -1) shows a + that opens its menu. The tab spaces its parts (the
-  drawbars, the row, the FX grid) evenly down the slot (`LayoutAlignment.space-evenly`, the
-  content at least the visible height), and the drawbars and the row's cells evenly across.
-  Right-clicking a cell (`ContextMenuArea`; any click on an empty one) lists "Show here" with
-  the pool (`SlotState.pool: [PanelPoolRow]` — at most 16 plus the row's; other cells' greyed,
-  this one's ticked — choosing it again empties the cell; `set-panel-cell`), "More parameters…" (`ParamSearchPopup`: a search
+  While there's room, a last empty cell (`widget` -1) shows a + that opens its menu. The tab
+  spaces its parts (the drawbars, the controls, the FX strip) evenly down the slot
+  (`LayoutAlignment.space-evenly`, the content exactly the visible height), and the drawbars
+  evenly across. Right-clicking a cell (`ContextMenuArea`; any click on the +) lists the pool
+  (`SlotState.pool: [PanelPoolRow]` — at most 16 plus the shown ones) as a checklist: shown
+  ones ticked, choosing one takes it off, choosing another adds it — instead of this cell's
+  when full (`set-panel-cell`), "More parameters…" (`ParamSearchPopup`: a search
   over every parameter, filtered in Rust — `open-param-search`/`filter-param-search`/
   `pick-param-search`, `AppState.param-search-rows`) and "Reset row" (`reset-panel-row`);
-  rows are per plugin (`Profiles::set_cell`/`reset_row`), so `Rack::rebuild_panels` rebuilds
+  the choice is per plugin (`Profiles::add_control`/`remove_control`/`reset_row`), so `Rack::rebuild_panels` rebuilds
   every slot with that instrument. `Rack` keeps each slot's `profiles::Panel`
   (`Rack::panels`, built by `refresh_panel` when the instrument changes) and turns it into
   rows with `slot_view::panel_cells`/`panel_drawbars`/`panel_pool`; edits
@@ -833,7 +837,9 @@ behind format-agnostic cores:
   changed), and values are re-read (`Control::read`, `Rack::refresh_panel_of`) on every
   parameter change, preset load and `idle_plugins` re-read, and for each plugin in
   `Engine::take_setbfree_changes` after `drain_ui_events` — and the audio
-  effects as an `FxGrid` of `FxSlot`s (3 a row; + appends one); tab 2 `SlotPresets`; tab 3 the
+  effects as an `FxStrip`: one row of `FxSlot`s (+ appends one), three fitting a slot,
+  scrolling sideways by dragging, the mouse wheel or a thin scrollbar under it (shown
+  when they don't fit; its thumb can be dragged); tab 2 `SlotPresets`; tab 3 the
   MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
   `RangeSlider`s, and a transpose `Stepper` (`set-slot-transpose`: `SlotConfig.transpose`,
   ±`MAX_TRANSPOSE` (48) semitones, into the slot's `MidiFilter`; part of `SlotRouting`, so

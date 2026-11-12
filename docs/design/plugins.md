@@ -24,10 +24,11 @@ options. Started 2026-11-10.
   our own. Profiles are **for instruments only** at first; effects keep the generic popover.
 - **setBfree** is driven by its own control messages (two-way), with the upper manual's
   drawbars only. The generic `cc` target comes later, with the customise UI.
-- **One row of five controls** on the slot's first tab, below an optional fixed section
-  (drawbars). The user picks each cell's control from the profile's pool, or from all
-  parameters, through a context menu, and the choice is kept per plugin. The window's
-  minimum is 1200×1027, with no scrolling needed.
+- **Up to ten controls** on the slot's first tab, laid out zigzag over two rows; under an
+  optional fixed section (drawbars), one row of at most five. The user picks which ones
+  (a checklist) from the profile's pool, or from all parameters, through a context menu, and
+  the choice is kept per plugin. The audio effects scroll sideways in one row. The first tab
+  never scrolls vertically; the window's minimum is 1200×1027 (2026-11-13).
 - **Cross-platform is a future goal** for the app. For our own instruments: **CLAP is the
   reference format**, and **VST3 and LV2 are built too** (see "Formats for the standalone
   instruments").
@@ -285,34 +286,38 @@ continuous; see CLAUDE.md), `invert`, and `default` (the value shown while setBf
 reported a function). `choices` are `{ "label", "value" }` objects in the target's terms, or bare
 labels spread evenly across the target's range.
 
-**Layout: one row the user picks from** (decided 2026-11-12; Penpot: "Live (window minimum,
-1200×995)", slot 2). The slot's first tab has, from top to bottom:
+**Layout: up to ten controls, chosen as a list** (revised 2026-11-13 from the user's sketches;
+first decided 2026-11-12 as one row of five). The slot's first tab has, from top to bottom,
+spaced evenly, never scrolling vertically:
 
 1. **An optional fixed section** that the profile defines and the user doesn't rearrange:
    setBfree's nine drawbars. Most profiles have none.
-2. **One row of five cells**, each holding a knob, a switch or a choice. Every cell is 56 px
-   wide with a caption line, so the different kinds mix in one row. This is the current knob
-   row, generalised.
-3. **The audio effects' FX grid**, as now.
+2. **The controls**: up to **ten**, or **five** under drawbars. Each is a 56 px cell (a knob,
+   switch, lever or stepped knob, with a caption line), so the kinds mix. Under drawbars, or
+   with three or fewer, they're one row spaced evenly; otherwise **zigzag** over two rows —
+   the 1st, 3rd, 5th… on top, the 2nd, 4th… lower and between them — so ten fit the slot's
+   width. The user never arranges rows: it's one ordered list.
+3. **The audio effects** in one row of 80 px squares, three fitting the slot, **scrolling
+   sideways** when there are more: drag, the mouse wheel, or a thin scrollbar under the row
+   (its thumb draggable) that shows when they don't fit.
 
-This fits the minimum window without scrolling, drawbars included. The profile doesn't
-dictate the row. It offers a **pool** of curated controls (setBfree: percussion ×4, vibrato on
-and mode, Leslie, drive on and amount, reverb, swell) and a **default** five. The user changes
-a cell from its context menu (right-click), which lists:
+The profile offers a **pool** of curated controls (setBfree: percussion ×4, vibrato on and
+mode, Leslie, drive on and amount, reverb, swell) and a **default** list. A control's context
+menu (right-click), or the **+** shown after the last one while there's room, lists:
 
-- the pool, where controls already in the row are greyed and the cell's own control is
-  highlighted;
-- **More parameters…**, a search over all of the plugin's parameters, the same as the
-  customise UI;
+- the pool as a **checklist**: the shown controls are ticked. Choosing a ticked one takes it
+  off (the rest move up). Choosing another adds it at the end, or, when the panel is full,
+  puts it in place of the control whose menu it is;
+- **More parameters…**, a search over all of the plugin's parameters (adds the same way);
 - **Reset row**, which goes back to the profile's default.
 
-The user's choice is kept **per plugin** (every slot with setBfree shows the same row), next to
-the user profiles (see Storage), so a slot preset or a scene doesn't change it. The pool is ordered as the menu
-lists it.
+The user's choice is kept **per plugin** (every slot with setBfree shows the same), next to the
+user profiles (see Storage), so a slot preset or a scene doesn't change it. The pool is ordered
+as the menu lists it.
 
-A plugin without a profile gets a pool of all its parameters, with its first five continuous
-parameters as the default row (today's fallback). So the context menu is also the first
-version of Part B's "Customise panel".
+A plugin without a profile gets a pool of all its parameters, with its first ten continuous
+parameters as the default. So the context menu is also the first version of Part B's
+"Customise panel".
 
 **A control** has
 
@@ -512,7 +517,7 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
 ## Possible order of work
 
 1. **Panel profiles** in the host (data model, `param` and `setbfree` targets, shipped + user
-   profiles, the slot tab rendering the fixed section and the one row of knobs/switches,
+   profiles, the slot tab rendering the fixed section and up to ten knobs/switches,
    choosing a cell's control from its context menu), with setBfree's profile and a few more
    shipped ones, and the window's minimum size (done: 1200×1027). Replaces the "first five
    parameters" placeholder.

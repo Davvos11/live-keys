@@ -21,5 +21,5 @@
     { "id": "portamento", "label": "Glide", "name": "Portamento", "target": { "param": "portamento" } },
     { "id": "volume", "label": "Volume", "target": { "param": "volume" } }
   ],
-  "row": ["cutoff", "resonance", "env-depth", "filter-drive", "keytrack"]
+  "row": ["cutoff", "resonance", "env-depth", "filter-drive", "keytrack", "attack", "decay", "sustain", "release", "volume"]
 }
