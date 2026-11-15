@@ -1,0 +1,30 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Sun, 15 Nov 2026 15:11:03 +0000
+Description: Live Keys releases
+Label: Live Keys
+Origin: Live Keys
+Suite: stable
+MD5Sum:
+ 3eac78d9aca392936aa15e72d3e7235c             4115 main/binary-amd64/Packages
+ b882d1d12e7bfbb602286a66da915011             1281 main/binary-amd64/Packages.gz
+SHA1:
+ e3b6f2e689615ba2fb0c14b1b3a47d1fe7549cfd             4115 main/binary-amd64/Packages
+ c961af2968f2991930b9e6e593393711bdfa4af7             1281 main/binary-amd64/Packages.gz
+SHA256:
+ 4447dd688912c75a547e6094c7b95881b848c07d0c0106638ab3656bbc5c0be2             4115 main/binary-amd64/Packages
+ 62ca86346a697f9b670203e22df0f152d7c8ac49127d48eb550f595881509a1c             1281 main/binary-amd64/Packages.gz
+SHA512:
+ 758e70244dce8142737e6538f9aa4ce1778a30ab1cdadb48cb4ebe39024e3ebc0b061339403faf43055e284f84cb993631785b9992325ac3f349dbbf6e4cea5d             4115 main/binary-amd64/Packages
+ 396a5ab258925ae7a5c25646c0ae283cacfe1e69d98c2e2861df7c471223a47c35d3a94d1af743c15d5a706e8985193c299ecfc2f83a55bf250befb3f9ca52d4             1281 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQSRM/O7T1GdnOQ2e1e0K5QTsJuWjgUCavnLhwAKCRC0K5QTsJuW
+ju5nAP9B1ysjRGeNcwwaILj48jEKk+9hgT4nxAn6a37CTqCieQEAnnC5dM7JxVvu
+TPvLREcOwiXYTKQRpyBfZM1duJ3SOwQ=
+=PV6X
+-----END PGP SIGNATURE-----
