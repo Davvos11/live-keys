@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod config;
+mod metronome;
 mod midi_inputs;
 mod mock_data;
 mod profiles;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
-    PluginInfo, PluginKey, PluginKind, PluginScan, PresetInfo, SLOT_COUNT, Section, SlotChain,
+    MASTER_SLOT, PluginInfo, PluginKey, PluginKind, PluginScan, PresetInfo, SLOT_COUNT, Section, SlotChain,
     MAX_MIDI_INPUTS, default_plugin_search_paths, list_logical_output_devices,
 };
 use live_keys_lv2_ui::{
@@ -329,9 +330,9 @@ fn param_rows(engine: &Engine, key: PluginKey) -> Vec<ParamRow> {
         .collect()
 }
 
-/// Which slot `key` is loaded in, if any.
+/// Which slot `key` is loaded in ([`MASTER_SLOT`] for the master chain), if any.
 fn slot_of(engine: &Engine, key: PluginKey) -> Option<usize> {
-    (0..SLOT_COUNT).find(|&slot| {
+    (0..=MASTER_SLOT).find(|&slot| {
         engine
             .slot(slot)
             .is_some_and(|chain| chain.plugins().any(|meta| meta.key == key))
@@ -432,6 +433,10 @@ struct Rack {
     /// Set when the scene pane needs refreshing; the poll timer does it (most
     /// changes happen where there's no window handle).
     scenes_dirty: Cell<bool>,
+    /// The master chain's effects (`AppState.master-effects`).
+    master_effects: Rc<VecModel<EffectRow>>,
+    /// The main window, for the master chain's status line.
+    app: std::cell::OnceCell<slint::Weak<AppWindow>>,
 }
 
 impl Rack {
@@ -489,12 +494,30 @@ impl Rack {
             scene_target_name: RefCell::default(),
             session_changed_since: Cell::new(None),
             scenes_dirty: Cell::new(true),
+            master_effects: Rc::new(VecModel::default()),
+            app: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Shows the master chain's effects, and `error` (if any) as its status line.
+    fn refresh_master(&self, engine: &Engine, error: Option<String>) {
+        let rows = engine
+            .slot(MASTER_SLOT)
+            .map(|chain| chain.effects(Section::Audio).iter().map(|meta| self.plugin_row(meta)).collect())
+            .unwrap_or_default();
+        sync_model(&self.master_effects, rows);
+        if let Some(app) = self.app.get().and_then(slint::Weak::upgrade) {
+            app.global::<AppState>().set_master_status(error.unwrap_or_default().into());
         }
     }
 
     /// Recomputes `slot`'s chain and its plugins' GUI and parameter window state
     /// from the engine. `error`, if given, is shown as the slot's status line.
+    /// The master chain ([`MASTER_SLOT`]) only has its effects to show.
     fn refresh_slot(&self, engine: &Engine, slot: usize, error: Option<String>) {
+        if slot == MASTER_SLOT {
+            return self.refresh_master(engine, error);
+        }
         let empty = SlotChain::default();
         let chain = engine.slot(slot).unwrap_or(&empty);
 
@@ -618,15 +641,22 @@ impl Rack {
         }
     }
 
+    /// The master chain has no slot preset; it's ignored there.
     fn set_current_slot_preset(&self, slot: usize, current: Option<CurrentSlotPreset>) {
         self.session_changed();
-        self.current_slot_presets.borrow_mut()[slot] = current;
+        if let Some(place) = self.current_slot_presets.borrow_mut().get_mut(slot) {
+            *place = current;
+        }
     }
 
     /// Notes that `slot`'s chain changed, so its current slot preset (if any)
     /// shows as changed. Returns whether that's news.
     fn mark_slot_changed(&self, slot: usize) -> bool {
         self.session_changed();
+        if slot >= SLOT_COUNT {
+            // The master chain: only in the session.
+            return false;
+        }
         self.mark_scene_changed(slot);
         match self.current_slot_presets.borrow_mut()[slot].as_mut() {
             Some(current) if !current.changed => {
@@ -961,7 +991,7 @@ impl Rack {
     }
 
     fn refresh_all(&self, engine: &Engine) {
-        for slot in 0..SLOT_COUNT {
+        for slot in 0..=MASTER_SLOT {
             self.refresh_slot(engine, slot, None);
         }
     }
@@ -1172,6 +1202,15 @@ fn main() -> anyhow::Result<()> {
         engine.set_slot_filter(slot, slot_config.filter());
         engine.set_slot_gain(slot, slot_config.gain());
     }
+    {
+        let config = config.borrow();
+        let mut engine = engine.borrow_mut();
+        engine.set_master_gain(config.master_gain());
+        engine.set_metronome(config.metronome.settings(false, config.master_muted));
+    }
+    // Whether the metronome is playing; it always starts stopped.
+    let metronome_playing = Rc::new(Cell::new(false));
+    let tap_tempo = Rc::new(RefCell::new(metronome::TapTempo::default()));
     let midi_inputs = Rc::new(midi_inputs::MidiInputsUi::new());
     {
         let ports = engine.borrow_mut().set_midi_inputs(midi_input_devices(&config.borrow()));
@@ -1187,6 +1226,8 @@ fn main() -> anyhow::Result<()> {
     let picker = Rc::new(Picker::new());
 
     let app = AppWindow::new()?;
+    let _ = rack.app.set(app.as_weak());
+    let settings = SettingsWindow::new()?;
     let state = app.global::<AppState>();
 
     let audio_devices: Vec<String> = std::iter::once(SYSTEM_DEFAULT_LABEL.to_string())
@@ -1203,15 +1244,27 @@ fn main() -> anyhow::Result<()> {
     state.set_scene_form_slots(ModelRc::from(rack.scene_form_slots.clone()));
     state.set_max_midi_inputs(MAX_MIDI_INPUTS as i32);
 
-    state.set_default_plugin_folders(string_model(default_plugin_search_paths()));
+    settings.set_default_plugin_folders(string_model(default_plugin_search_paths()));
+    state.set_master_effects(ModelRc::from(rack.master_effects.clone()));
+    state.set_master_slot(MASTER_SLOT as i32);
+    {
+        let config = config.borrow();
+        state.set_master_volume_db(config.master_volume_db);
+        state.set_master_muted(config.master_muted);
+        state.set_metronome_signatures(string_model(metronome::signature_labels()));
+        state.set_metronome_subdivisions(string_model(metronome::subdivision_labels()));
+        show_metronome(&app, &config.metronome, false);
+        state.set_min_bpm(live_keys_engine::MIN_BPM as i32);
+        state.set_max_bpm(live_keys_engine::MAX_BPM as i32);
+    }
     state.set_slots(ModelRc::from(rack.slots.clone()));
     state.set_max_midi_effects(MAX_MIDI_EFFECTS as i32);
     state.set_max_effects(MAX_EFFECTS as i32);
     state.set_picker_rows(ModelRc::from(picker.rows.clone()));
     state.set_preset_rows(ModelRc::from(rack.preset_rows.clone()));
     state.set_param_search_rows(ModelRc::from(rack.param_search_rows.clone()));
-    refresh_plugin_folders(&app, &config.borrow());
-    refresh_plugin_list(&app, &engine.borrow(), &picker);
+    refresh_plugin_folders(&settings, &config.borrow());
+    refresh_plugin_list(&settings, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
     rack.set_all_routing(&config.borrow());
     state.set_min_volume_db(config::MIN_VOLUME_DB);
@@ -1236,6 +1289,124 @@ fn main() -> anyhow::Result<()> {
                 restart_engine(&engine, &config, &rack, &app.global::<AppLogic>());
             }
         });
+    }
+
+    // The sidebar: master output, metronome, MIDI panic.
+    {
+        let config = config.clone();
+        let config_dirty = config_dirty.clone();
+        let engine = engine.clone();
+        let app_weak = app.as_weak();
+        logic.on_set_master_volume(move |volume_db| {
+            let mut config = config.borrow_mut();
+            config.master_volume_db = volume_db.clamp(config::MIN_VOLUME_DB, config::MAX_VOLUME_DB);
+            engine.borrow_mut().set_master_gain(config.master_gain());
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_master_volume_db(config.master_volume_db);
+            }
+            // Fires on every step of a drag; the poll timer saves.
+            config_dirty.set(true);
+        });
+    }
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let app_weak = app.as_weak();
+        let playing = metronome_playing.clone();
+        logic.on_toggle_master_mute(move || {
+            let mut config = config.borrow_mut();
+            config.master_muted = !config.master_muted;
+            let mut engine = engine.borrow_mut();
+            engine.set_master_gain(config.master_gain());
+            // The click follows the mute too.
+            engine.set_metronome(config.metronome.settings(playing.get(), config.master_muted));
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_master_muted(config.master_muted);
+            }
+            log_on_err(config::save(&config));
+        });
+    }
+    // Every metronome change: the engine gets it, the sidebar shows it, the
+    // config keeps it (`save`: now, else by the poll timer).
+    let apply_metronome = {
+        let config = config.clone();
+        let config_dirty = config_dirty.clone();
+        let engine = engine.clone();
+        let app_weak = app.as_weak();
+        let playing = metronome_playing.clone();
+        Rc::new(move |change: &dyn Fn(&mut metronome::MetronomeConfig), save: bool| {
+            let mut config = config.borrow_mut();
+            change(&mut config.metronome);
+            engine.borrow_mut().set_metronome(config.metronome.settings(playing.get(), config.master_muted));
+            if let Some(app) = app_weak.upgrade() {
+                show_metronome(&app, &config.metronome, playing.get());
+            }
+            if save {
+                log_on_err(config::save(&config));
+            } else {
+                config_dirty.set(true);
+            }
+        })
+    };
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        let playing = metronome_playing.clone();
+        let apply = apply_metronome.clone();
+        logic.on_toggle_metronome(move || {
+            // The click needs the output stream, which the first plugin starts.
+            if !playing.get()
+                && let Err(err) = with_running_engine(&engine, &config.borrow(), |_| Ok(()))
+            {
+                log::error!("failed to start the metronome: {err:#}");
+                rack.refresh_master(&engine.borrow(), Some(format!("The metronome couldn't start: {err}")));
+                return;
+            }
+            playing.set(!playing.get());
+            apply(&|_| {}, false);
+        });
+    }
+    {
+        let apply = apply_metronome.clone();
+        logic.on_set_metronome_bpm(move |bpm| {
+            let bpm = (bpm as f32).clamp(live_keys_engine::MIN_BPM, live_keys_engine::MAX_BPM) as u16;
+            apply(&|metronome| metronome.bpm = bpm, false);
+        });
+    }
+    {
+        let apply = apply_metronome.clone();
+        logic.on_tap_tempo(move || {
+            if let Some(bpm) = tap_tempo.borrow_mut().tap(Instant::now()) {
+                apply(&|metronome| metronome.bpm = bpm, false);
+            }
+        });
+    }
+    {
+        let apply = apply_metronome.clone();
+        logic.on_set_metronome_volume(move |volume| {
+            apply(&|metronome| metronome.volume = volume.clamp(0.0, 1.0), false);
+        });
+    }
+    {
+        let apply = apply_metronome.clone();
+        logic.on_set_metronome_signature(move |index| {
+            if (0..metronome::SIGNATURES.len() as i32).contains(&index) {
+                apply(&|metronome| metronome.signature = index as usize, true);
+            }
+        });
+    }
+    {
+        let apply = apply_metronome.clone();
+        logic.on_set_metronome_subdivision(move |index| {
+            if (0..live_keys_engine::Subdivision::ALL.len() as i32).contains(&index) {
+                apply(&|metronome| metronome.subdivision = index as usize, true);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        logic.on_midi_panic(move || engine.borrow_mut().panic());
     }
 
     {
@@ -1325,10 +1496,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     {
-        let app_weak = app.as_weak();
+        let settings_weak = settings.as_weak();
         let config = config.clone();
-        logic.on_add_plugin_folder(move || {
-            let Some(app) = app_weak.upgrade() else {
+        settings.on_add_plugin_folder(move || {
+            let Some(settings) = settings_weak.upgrade() else {
                 return;
             };
             let Some(folder) = rfd::FileDialog::new().pick_folder() else {
@@ -1336,15 +1507,15 @@ fn main() -> anyhow::Result<()> {
             };
             config.borrow_mut().extra_plugin_dirs.push(folder);
             log_on_err(config::save(&config.borrow()));
-            refresh_plugin_folders(&app, &config.borrow());
+            refresh_plugin_folders(&settings, &config.borrow());
         });
     }
 
     {
-        let app_weak = app.as_weak();
+        let settings_weak = settings.as_weak();
         let config = config.clone();
-        logic.on_remove_plugin_folder(move |folder| {
-            let Some(app) = app_weak.upgrade() else {
+        settings.on_remove_plugin_folder(move |folder| {
+            let Some(settings) = settings_weak.upgrade() else {
                 return;
             };
             config
@@ -1352,7 +1523,16 @@ fn main() -> anyhow::Result<()> {
                 .extra_plugin_dirs
                 .retain(|dir| dir.display().to_string() != folder.as_str());
             log_on_err(config::save(&config.borrow()));
-            refresh_plugin_folders(&app, &config.borrow());
+            refresh_plugin_folders(&settings, &config.borrow());
+        });
+    }
+
+    {
+        let settings_weak = settings.as_weak();
+        logic.on_open_settings(move || {
+            if let Some(settings) = settings_weak.upgrade() {
+                log_on_err(settings.show().map_err(Into::into));
+            }
         });
     }
 
@@ -1367,6 +1547,7 @@ fn main() -> anyhow::Result<()> {
     {
         let scanner_weak = Rc::downgrade(&scanner);
         let app_weak = app.as_weak();
+        let settings_weak = settings.as_weak();
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
@@ -1374,7 +1555,9 @@ fn main() -> anyhow::Result<()> {
         let restored = restored.clone();
         let started = started.clone();
         scanner.timer.start(slint::TimerMode::Repeated, SCAN_TICK, move || {
-            let (Some(scanner), Some(app)) = (scanner_weak.upgrade(), app_weak.upgrade()) else {
+            let (Some(scanner), Some(app), Some(settings)) =
+                (scanner_weak.upgrade(), app_weak.upgrade(), settings_weak.upgrade())
+            else {
                 return;
             };
             let deadline = Instant::now() + SCAN_SLICE;
@@ -1398,11 +1581,11 @@ fn main() -> anyhow::Result<()> {
             // instance handle.
             rack.forget_all();
             engine.borrow_mut().install_plugins(scan);
-            refresh_plugin_list(&app, &engine.borrow(), &picker);
+            refresh_plugin_list(&settings, &engine.borrow(), &picker);
             // The picker may be open, waiting for the list.
             picker.refilter(&config.borrow().pinned_plugins);
             rack.refresh_all(&engine.borrow());
-            app.global::<AppState>().set_scanning(false);
+            set_scanning(&app, &settings, false);
             if !started.get() {
                 restored.set(restore_session(&engine, &config, &rack, &app.global::<AppLogic>()));
                 started.set(true);
@@ -1410,14 +1593,15 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
-    scanner.start(&app, &config.borrow().extra_plugin_dirs);
+    scanner.start(&app, &settings, &config.borrow().extra_plugin_dirs);
     {
         let app_weak = app.as_weak();
+        let settings_weak = settings.as_weak();
         let config = config.clone();
         let scanner = scanner.clone();
-        logic.on_rescan_plugins(move || {
-            if let Some(app) = app_weak.upgrade() {
-                scanner.start(&app, &config.borrow().extra_plugin_dirs);
+        settings.on_rescan_plugins(move || {
+            if let (Some(app), Some(settings)) = (app_weak.upgrade(), settings_weak.upgrade()) {
+                scanner.start(&app, &settings, &config.borrow().extra_plugin_dirs);
             }
         });
     }
@@ -2442,6 +2626,13 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app.as_weak();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             rack.poll_uis(&engine.borrow());
+            if let Some(app) = app_weak.upgrade() {
+                let beat = engine.borrow().metronome_beat().map_or(-1, |beat| beat as i32);
+                let state = app.global::<AppState>();
+                if state.get_metronome_beat() != beat {
+                    state.set_metronome_beat(beat);
+                }
+            }
             if rack.scenes_dirty.replace(false)
                 && let Some(app) = app_weak.upgrade()
             {
@@ -2536,7 +2727,7 @@ fn main() -> anyhow::Result<()> {
     app.run()?;
     drop(autosave_timer);
     if let Some(path) = mock_data::requested_path() {
-        write_mock_data(&app, &engine.borrow(), &rack, &path);
+        write_mock_data(&app, &settings, &engine.borrow(), &rack, &path);
     }
     // Always on a normal exit (some plugin settings change without the host
     // seeing it), unless startup didn't finish, or the last session wasn't
@@ -2751,7 +2942,7 @@ fn load_scene(
 /// Writes the window's state as the preview's mock data (see `mock_data`), with
 /// an open parameter window's plugin, else the first loaded plugin, for
 /// `ParamsWindow`.
-fn write_mock_data(app: &AppWindow, engine: &Engine, rack: &Rack, path: &std::path::Path) {
+fn write_mock_data(app: &AppWindow, settings: &SettingsWindow, engine: &Engine, rack: &Rack, path: &std::path::Path) {
     let params_window = match rack.param_windows.borrow().values().next() {
         Some(open) => (open.window.get_plugin_name(), ModelRc::from(open.rows.clone())),
         None => {
@@ -2761,7 +2952,7 @@ fn write_mock_data(app: &AppWindow, engine: &Engine, rack: &Rack, path: &std::pa
             (name, ModelRc::new(VecModel::from(rows)))
         }
     };
-    let text = mock_data::generate(app, params_window);
+    let text = mock_data::generate(app, settings, params_window);
     match std::fs::write(path, text) {
         Ok(()) => log::info!("wrote the preview's mock data to {}", path.display()),
         Err(err) => log::error!("writing {} failed: {err}", path.display()),
@@ -2774,7 +2965,7 @@ fn write_mock_data(app: &AppWindow, engine: &Engine, rack: &Rack, path: &std::pa
 /// Returns whether it was saved.
 fn save_session(engine: &RefCell<Engine>, rack: &Rack) -> bool {
     rack.session_changed_since.set(None);
-    let slots = (0..SLOT_COUNT)
+    let slots = (0..=MASTER_SLOT)
         .map(|slot| {
             let engine = engine.borrow();
             let chain = engine.slot(slot);
@@ -2784,7 +2975,7 @@ fn save_session(engine: &RefCell<Engine>, rack: &Rack) -> bool {
                     .collect()
             };
             session::SlotToSave {
-                slot_preset: rack.current_slot_presets.borrow()[slot].as_ref().map(|current| {
+                slot_preset: rack.current_slot_presets.borrow().get(slot).and_then(Option::as_ref).map(|current| {
                     scenes::SlotPresetRef {
                         dir: current.dir.clone(),
                         name: current.name.clone(),
@@ -2835,11 +3026,12 @@ fn restore_session(
     }
     let mut windows = Vec::new();
     for (slot, chain) in chains {
-        if slot >= SLOT_COUNT {
+        if slot > MASTER_SLOT {
             continue;
         }
         let errors = match chain {
             Ok(chain) => load_slot_preset(engine, config, rack, slot, &chain),
+            Err(err) if slot == MASTER_SLOT => vec![format!("The last session's master effects couldn't be read: {err:#}")],
             Err(err) => vec![format!("The last session's slot {} couldn't be read: {err:#}", slot + 1)],
         };
         let saved_slot = saved.slots.iter().find(|saved_slot| saved_slot.slot == slot);
@@ -3007,13 +3199,30 @@ fn string_model(items: Vec<String>) -> ModelRc<slint::SharedString> {
     ModelRc::new(VecModel::from(items))
 }
 
-fn refresh_plugin_folders(app: &AppWindow, config: &config::AppConfig) {
+fn refresh_plugin_folders(settings: &SettingsWindow, config: &config::AppConfig) {
     let folders: Vec<String> = config
         .extra_plugin_dirs
         .iter()
         .map(|dir| dir.display().to_string())
         .collect();
-    app.global::<AppState>().set_extra_plugin_folders(string_model(folders));
+    settings.set_extra_plugin_folders(string_model(folders));
+}
+
+/// Shows whether a plugin scan is running, in the plugin picker and Settings.
+fn set_scanning(app: &AppWindow, settings: &SettingsWindow, scanning: bool) {
+    app.global::<AppState>().set_scanning(scanning);
+    settings.set_scanning(scanning);
+}
+
+/// Shows the metronome's settings in the sidebar.
+fn show_metronome(app: &AppWindow, config: &metronome::MetronomeConfig, playing: bool) {
+    let state = app.global::<AppState>();
+    state.set_metronome_playing(playing);
+    state.set_metronome_bpm(config.bpm.into());
+    state.set_metronome_volume(config.volume);
+    state.set_metronome_signature(config.signature as i32);
+    state.set_metronome_beats(config.beats_per_bar().into());
+    state.set_metronome_subdivision(config.subdivision as i32);
 }
 
 /// The plugin scan in progress, if any, and the timer that runs it a slice at a
@@ -3027,19 +3236,19 @@ struct Scanner {
 impl Scanner {
     /// Starts a scan of the default plugin folders plus `extra_dirs`, unless one
     /// is running. The plugins already loaded keep playing until it's installed.
-    fn start(&self, app: &AppWindow, extra_dirs: &[std::path::PathBuf]) {
+    fn start(&self, app: &AppWindow, settings: &SettingsWindow, extra_dirs: &[std::path::PathBuf]) {
         if self.scan.borrow().is_some() {
             return;
         }
         *self.scan.borrow_mut() = Some(PluginScan::start(extra_dirs));
-        app.global::<AppState>().set_scanning(true);
+        set_scanning(app, settings, true);
         self.timer.restart();
     }
 }
 
-/// Hands the plugin picker and the Settings tab's list the plugins found by the
-/// last scan.
-fn refresh_plugin_list(app: &AppWindow, engine: &Engine, picker: &Picker) {
+/// Hands the plugin picker and the Settings window's list the plugins found by
+/// the last scan.
+fn refresh_plugin_list(settings: &SettingsWindow, engine: &Engine, picker: &Picker) {
     picker.set_plugins(engine.list_plugins());
     let names = picker
         .plugins
@@ -3047,7 +3256,7 @@ fn refresh_plugin_list(app: &AppWindow, engine: &Engine, picker: &Picker) {
         .iter()
         .map(|plugin| format!("{} — {} ({})", plugin.name, plugin.kind.label(), plugin.format.label()))
         .collect();
-    app.global::<AppState>().set_discovered_plugins(string_model(names));
+    settings.set_discovered_plugins(string_model(names));
 }
 
 fn log_on_err(result: anyhow::Result<()>) {

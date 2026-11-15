@@ -1,5 +1,6 @@
 mod audio;
 mod engine;
+mod metronome;
 mod midi;
 mod paths;
 mod rack;
@@ -7,8 +8,9 @@ mod setbfree;
 
 pub use audio::{find_output_device, is_logical_output_device, list_logical_output_devices};
 pub use engine::{
-    Engine, LoadedPluginMeta, PluginEditor, PluginKey, PluginScan, SLOT_COUNT, SlotChain, SlotSettings,
+    Engine, LoadedPluginMeta, MASTER_SLOT, PluginEditor, PluginKey, PluginScan, SLOT_COUNT, SlotChain, SlotSettings,
 };
+pub use metronome::{MAX_BPM, MIN_BPM, MetronomeSettings, Subdivision};
 pub use setbfree::SETBFREE_URI;
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};
 pub use live_keys_core::{ALL_INPUTS, MidiEvent, MidiFilter};

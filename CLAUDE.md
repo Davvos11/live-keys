@@ -57,8 +57,7 @@ cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr
 cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effects → instrument → audio
                                                # effects; each --effect goes where its kind belongs
 
-# GUI (live-keys-gui) — Settings tab (audio output, MIDI inputs + plugin folders) and Live tab, after
-# the Penpot design: a scenes pane on the left — per slot restore/clear/leave unchanged, searchable,
+# GUI (live-keys-gui) — one window after the Penpot design (no tabs): a scenes pane on the left — per slot restore/clear/leave unchanged, searchable,
 # renamable — then 6 rack slots in a 3×2 grid, each: a header (instrument photo and name, its GUI,
 # mute and ✕-clear-with-undo buttons, a volume knob, its presets), then three tabs — the instrument's
 # panel (setBfree's drawbars, then a row of five knobs/switches/levers, each picked by right-click
@@ -66,7 +65,10 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
 # channel/note-range/velocity-range filter and a transposition. Up to 8 MIDI effects → an
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
-# pinned favourites); an effect's square opens its GUI/params/presets/move/remove)
+# pinned favourites); an effect's square opens its GUI/params/presets/move/remove), then the right
+# sidebar: a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
+# signature, subdivision, Tap), the master output (volume slider, master audio effects, mute, output device), the MIDI
+# inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic
 cargo run -p live-keys-gui --release
 SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
   # the app with live reload: saving a .slint file swaps the UI in place, state kept (development
@@ -76,9 +78,10 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
   # preview (the Slint plugin's "Show Preview", slint-viewer) shows instead of empty lists;
   # the preview needs a slint-lsp at least as new as our Slint (README: "Previewing the UI")
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
-# folders, pinned plugin ids, favourite preset ids, and per slot: MIDI inputs + filter, volume), saved as
-# they change. The rack itself (every slot's chain and plugin settings, current slot preset and scene, open
-# plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
+# folders, pinned plugin ids, favourite preset ids, master volume + mute, the metronome's tempo, time
+# signature, subdivision and volume, and per slot: MIDI inputs + filter, volume), saved as they change.
+# The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
+# scene, open plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
 # once the rack is quiet, and restored on startup. Slot presets live in
 # ~/.local/share/live-keys/slot-presets/, scenes in ~/.local/share/live-keys/scenes/.
 
@@ -134,7 +137,7 @@ cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-
 
 The project is MIT (`LICENSE`; `license`/`publish = false` set once in `[workspace.package]`).
 Slint is used under its royalty-free licence, whose one condition is the "Made with Slint"
-attribution — the `AboutSlint` widget at the bottom of the Settings tab; don't remove it.
+attribution — the `AboutSlint` widget at the bottom of the Settings window; don't remove it.
 `deny.toml` makes `cargo deny --workspace check` (cargo-deny; `--workspace`, or only the CLI's
 dependencies are checked) reject any dependency licence that isn't permissive, with the Slint
 crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
@@ -503,14 +506,20 @@ behind format-agnostic cores:
   two drifting copies. It's a fixed rack of `SLOT_COUNT` (6) slots sharing one output stream;
   each slot is a serial **chain** in two `Section`s around an instrument: up to
   `MAX_MIDI_EFFECTS` (8) MIDI effects in front of it, each fed the previous one's MIDI, and up
-  to `MAX_EFFECTS` (8) audio effects after it, each fed the previous plugin's audio. Split in
-  two:
+  to `MAX_EFFECTS` (8) audio effects after it, each fed the previous plugin's audio. After
+  the slots comes the **master chain**: up to `MAX_EFFECTS` audio effects fed the slots' mix,
+  then the master gain (0 when muted), then the metronome's click. It's addressed as slot
+  `MASTER_SLOT` (= `SLOT_COUNT`) wherever a slot index goes — `add_effect` (audio effects
+  only)/`remove_effect`/`move_effect`, `Engine::slot`, `RackCommand`s — so presets, plugin
+  GUIs, lending and stream restarts work for its plugins unchanged; `load_instrument`,
+  `set_slot_filter`/`set_slot_gain` and `take_slot_peak` reject it. Split in two:
   - `rack.rs` — the audio-thread side. `Rack` owns every slot's `SlotRuntime`: the MIDI
     chain as a fixed `[Option<BoxedPlugin>; MAX_MIDI_EFFECTS]`, the audio chain as a fixed
     `[Option<BoxedPlugin>; 1 + MAX_EFFECTS]` (index 0 = instrument, effects contiguous from 1),
     the slot's `MidiRouter`, pre-allocated MIDI buffers, and its gain. `Rack::apply` takes one
     `RackCommand` (`SetInstrument`, `InsertEffect`/`RemoveEffect`/`MoveEffect` with a
-    `Section`, `Param { slot, position: ChainPosition, .. }`, `Filter`, `Gain`) —
+    `Section`, `Param { slot, position: ChainPosition, .. }`, `Filter`, `Gain`, `MasterGain`,
+    `Metronome`, `Panic`) —
     insert/remove/move are `rotate_left`/`rotate_right` on the section's slice of the fixed
     array, so no allocation; out-of-range indices are ignored rather than trusted (a panic
     would kill the audio thread). `Rack::render` drains MIDI, runs it through each slot's
@@ -528,8 +537,23 @@ behind format-agnostic cores:
     a meter. **Whenever the MIDI chain changes** (insert/remove/move), the
     instrument's next block is preceded by CC 123 (all notes off) on all 16 channels: notes a
     removed transposer shifted, or an arpeggiator started, would otherwise never get their
-    note-off — the router's note-off tracking only covers what enters the MIDI chain. Unit-tested
-    with fake plugins whose output reveals processing order.
+    note-off — the router's note-off tracking only covers what enters the MIDI chain. **MIDI
+    panic** (`RackCommand::Panic`, `Engine::panic`) sends `PANIC` — CC 64, 120, 121 and 123,
+    value 0, on all 16 channels — to every slot's instrument (and to its first MIDI effect, if
+    any) and clears the routers' held notes. After the slots, `render_master` feeds the mix
+    (interleaved, channels wrapped like `feed_inputs`) to the master chain's first effect,
+    copies the last one's output back, and ramps the master gain like a slot's. Unit-tested
+    with fake plugins whose output reveals processing order (master chain included).
+  - `metronome.rs` — the metronome: `MetronomeSettings` (playing, BPM within
+    `MIN_BPM`..=`MAX_BPM` (20–300), beats per bar, `Subdivision`, linear level) and `Click`,
+    which the rack runs after the master gain (so neither the master volume nor its effects
+    touch it; the GUI zeroes its level while the master is muted). It counts the position in
+    the bar in beats (`f64`, per sample) and starts a decaying sine on each crossing: a high
+    accented one on the bar's first beat, a lower one on the other beats, a soft one on
+    subdivision clicks (positions measured from the bar's start, so dotted and triplet
+    subdivisions realign every bar). Starting it starts a bar. The beat it's on goes to the GUI
+    through an atomic (`Engine::metronome_beat`). Allocation-free; unit-tested (click onsets).
+    Plugins don't see its tempo (see Known simplifications).
   - `midi.rs` — **MIDI inputs**: up to `MAX_MIDI_INPUTS` (8) numbered inputs, each fed by a set
     of devices remembered by `midi_device_name` (the port name minus ALSA's trailing
     `client:port` address, which changes when a device is plugged in again). `MidiInputs`
@@ -714,10 +738,10 @@ behind format-agnostic cores:
   `PluginUiHandle::window()` is an X11 UI's window (for the plugin check's resizing).
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
-  (`slint-build`) compiles `ui/app.slint`, which composes `settings_tab.slint` + `live_tab.slint`
-  via `TabWidget`/`Tab` from `std-widgets.slint`. The window opens at, and can't shrink below,
-  1200×1027 (the Live tab is 1200×995 under the tab bar, the size the design's "Live (window
-  minimum)" board is drawn for). **Look:** the Live tab follows the Penpot
+  (`slint-build`) compiles `ui/app.slint`: one window, no tabs — `live_tab.slint` (the scenes
+  and slots) with the **right sidebar** (`sidebar.slint`, 300 wide) beside it. The window
+  opens at, and can't shrink below, 1500×995 (the design's "Live (window minimum)" board is
+  1200×995, its "Right sidebar" 300×995). **Look:** the Live view and sidebar follow the Penpot
   design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
   greys in dark mode, a derived light variant otherwise — following `Palette.color-scheme` —
   with `Palette.accent-background`/`-foreground` as the primary colour, so the style's accent
@@ -730,7 +754,9 @@ behind format-agnostic cores:
   `DropdownButton`, `Select` (a ComboBox look-alike on a `PopupWindow`), `ListItem`, `TabBar`,
   `Stepper`, `FxSlot` (an 80px square: name over a compressor/filter curve — `EffectRow.graph`,
   guessed from the name by `slot_view::graph` — or a faint +) and `ScrollIndicator`; `Knob`/
-  `LabelledKnob` in `knob.slint`. The Settings tab, plugin picker and parameter window still use
+  `LabelledKnob` in `knob.slint`; `RangeSlider` and `SingleSlider` (the design's one-handle
+  Single slider, never setting its own value) in `range_slider.slint`. The Settings window,
+  plugin picker and parameter window still use
   std-widgets (with the new default font). `globals.slint` defines the host/UI interop
   contract (`AppState` = state Rust pushes in, `AppLogic` = actions the UI asks Rust to handle),
   per the project's Slint skill guidance; the structs exchanged live in `types.slint`
@@ -764,8 +790,8 @@ behind format-agnostic cores:
   shipped files parsing). `config.rs` handles settings persistence (`dirs` +
   `serde_json`). `main.rs` wires it all to `live-keys-engine`/`live-keys-lv2-ui`/
   `live-keys-vst3-ui`. **MIDI inputs** (`AppConfig.midi_inputs`, never empty; input 1 can't be
-  removed; on a first run, every device present but Midi Through becomes input 1's devices): the Settings tab lists them
-  (`MidiInputSetting` in `settings_tab.slint`), each a button summarising its devices that opens
+  removed; on a first run, every device present but Midi Through becomes input 1's devices): the sidebar lists them
+  (`MidiInputItem` in `sidebar.slint`: its number, then a dropdown summarising its devices that opens
   a `PopupWindow` checklist of every device present plus the input's remembered ones marked
   "(not connected)" (`src/midi_inputs.rs`: `MidiInputsUi`, its per-input device models refilled
   in place so an open checklist survives updates). Devices stay assigned until unticked. Every
@@ -784,8 +810,32 @@ behind format-agnostic cores:
   every search word must appear in name + format, pinned first, the first unpinned row flagged
   `after-pinned` for a divider); pins are `AppConfig.pinned_plugins`, toggled by `toggle-pin`.
   Picking calls `pick-plugin(slot, category, id)`, which loads an instrument (replacing) or
-  appends to the matching effect section. The Settings tab lists every plugin with its kind
-  and format. **Plugin scans** run after the window is up, so it shows at once: `Scanner`
+  appends to the matching effect section; for `AppState.master-slot` the picker shows audio
+  effects only (no tabs). **The sidebar** (`ui/sidebar.slint`, after the design's "Right
+  sidebar"): the metronome (`MetronomeSection`: a volume `LabelledKnob`, `BeatDots` from
+  `AppState.metronome-beats`/`-beat` — which the poll timer sets from `Engine::metronome_beat`
+  — a BPM `Stepper` (`signed: false`; Enter/Escape leave its field, and it shows values set
+  from elsewhere, like Tap's, even while focused), play/stop under the knob, then a
+  time-signature button and a subdivision button (♫) opening `MenuPopup`s, and Tap), the master output (`MasterSection`: a
+  `SingleSlider` in dB like a slot's volume, an `FxStrip` of `AppState.master-effects` with
+  its own `EffectPopup`/`PresetPopup` — exported from `slot_panel.slint` — a mute button and
+  the output device `Select`), the MIDI inputs, then Settings and MIDI panic
+  (`midi-panic` → `Engine::panic`). The metronome's settings are `AppConfig.metronome`
+  (`src/metronome.rs`: `MetronomeConfig` — BPM, time signature and subdivision as indices into
+  `SIGNATURES`/`Subdivision::ALL`, volume 0..1, squared into the click's level — plus
+  `TapTempo`: the average of up to five taps, starting over after a 2 s pause; unit-tested);
+  whether it plays isn't saved (it starts stopped), and playing starts the output stream if no
+  plugin has. Every metronome edit goes through `apply_metronome` in `main`. Master volume and
+  mute are `AppConfig.master_volume_db`/`master_muted` (`AppConfig::master_gain`). The master
+  chain lives in the session, not in scenes or slot presets. On the Rust side it's slot
+  `MASTER_SLOT` too: `slot_of` finds its plugins, and `Rack::refresh_slot` hands it to
+  `refresh_master` (its effect rows and `AppState.master-status`, through the window handle in
+  `Rack::app`); `mark_slot_changed` and `set_current_slot_preset` only note a session change
+  for it. **The Settings window** (`ui/settings_window.slint`: `SettingsWindow`, created once
+  at startup, shown by `open-settings`) has the plugin folders (add/remove), Rescan, every
+  discovered plugin with its kind and format, and the `AboutSlint` attribution; being a window
+  of its own (own globals), its properties are set and callbacks handled from Rust
+  (`refresh_plugin_folders`, `refresh_plugin_list`, `set_scanning`). **Plugin scans** run after the window is up, so it shows at once: `Scanner`
   holds the `PluginScan` and a timer that runs it in `SCAN_SLICE`s every `SCAN_TICK` (the VST3
   half is on this thread) and installs it once done — at startup with the configured extra
   folders, later from Rescan, which `AppState.scanning` replaces by a spinner meanwhile (the plugin
@@ -915,7 +965,8 @@ behind format-agnostic cores:
   `scenes_dirty` is set, since most
   changes happen where there's no window handle.
   **Session** (`src/session.rs`): the rack as last saved — per slot a complete slot preset
-  in `<data dir>/live-keys/session/slot-<n>/` (`slot_presets::write`, the folder swapped in
+  in `<data dir>/live-keys/session/slot-<n>/`, and the master chain likewise in `master/`
+  (`slot_presets::write`, the folder swapped in
   via `replace_dir`), and `session.json` with each slot's library slot preset, which plugins
   had their GUI or parameter window open (`session::Position`, from
   `SlotChain::position_of`), and the current scene with its changed flag. Routing, volumes,
@@ -1061,10 +1112,10 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   filter bug; cpal's `Display` just doesn't expose the distinguishing driver id.
 - The rack is a fixed `SLOT_COUNT` (6) parallel slots, each a serial MIDI effects → instrument
   → audio effects chain (max 8 of each kind of effect) with its own MIDI filter and volume,
-  summed into one output.
+  summed into one output, then through the master chain and gain.
   Not a general audio graph: no routing between slots, no sends/parallel branches, no
   sidechains, no per-effect bypass or dry/wet (beyond what an effect offers itself), no latency
-  compensation, no master/limiter stage (several loud slots can clip), no MIDI
+  compensation, no limiter (several loud slots can clip; the master chain can hold one), no MIDI
   velocity curves. It follows the intended **in-process** direction: every loaded plugin's audio is mixed in our own code,
   with only the final mix reaching `cpal` — not one independent OS audio stream per plugin
   (which would only work via OS-level mixing like PipeWire/JACK, isn't cross-platform,
@@ -1075,7 +1126,8 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   VST3 secondary input buses (sidechains) are still fed silence, since nothing routes to them.
   MIDI effects run in block steps on the audio thread: output events keep their frame offset
   within the block, but there's no transport (tempo-synced MIDI effects see the fixed 120 BPM,
-  not playing). Only 3-byte channel messages pass between stages (no sysex); a MIDI effect's
+  not playing — the metronome's tempo doesn't reach plugins; passing it on, as VST3's
+  `ProcessContext`, CLAP's transport and LV2's `time:Position`, is a possible next step). Only 3-byte channel messages pass between stages (no sysex); a MIDI effect's
   audio output, if any, is ignored, and so is any plugin's MIDI output outside the MIDI
   section (an instrument's MIDI out goes nowhere).
 - VST3 hosting, deliberately minimal so far: no `IMessage`/`IAttributeList` (`createInstance`

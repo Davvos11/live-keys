@@ -28,7 +28,8 @@ options. Started 2026-11-10.
   optional fixed section (drawbars), one row of at most five. The user picks which ones
   (a checklist) from the profile's pool, or from all parameters, through a context menu, and
   the choice is kept per plugin. The audio effects scroll sideways in one row. The first tab
-  never scrolls vertically; the window's minimum is 1200×1027 (2026-11-13).
+  never scrolls vertically; the window's minimum is 1500×995 with the right sidebar (the slots'
+  part is 1200×995; 2026-11-12).
 - **Cross-platform is a future goal** for the app. For our own instruments: **CLAP is the
   reference format**, and **VST3 and LV2 are built too** (see "Formats for the standalone
   instruments").
@@ -519,7 +520,7 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
 1. **Panel profiles** in the host (data model, `param` and `setbfree` targets, shipped + user
    profiles, the slot tab rendering the fixed section and up to ten knobs/switches,
    choosing a cell's control from its context menu), with setBfree's profile and a few more
-   shipped ones, and the window's minimum size (done: 1200×1027). Replaces the "first five
+   shipped ones, and the window's minimum size (done: 1200×1027, now 1500×995 with the sidebar). Replaces the "first five
    parameters" placeholder.
 2. **Customise panel** beyond the context menu (relabelling, a widget per parameter, overrides)
    for third-party plugins, and the `cc` target.

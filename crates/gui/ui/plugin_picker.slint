@@ -87,6 +87,8 @@ component PickerItem inherits Rectangle {
 export component PickerPanel inherits Rectangle {
     property <int> slot: PickerTarget.slot;
     property <int> category: PickerTarget.category;
+    // The master chain takes audio effects only.
+    property <bool> master: root.slot == AppState.master-slot;
     // After a pick, or when the close button is clicked.
     callback done();
 
@@ -109,7 +111,7 @@ export component PickerPanel inherits Rectangle {
     VerticalBox {
         HorizontalLayout {
             Text {
-                text: "Add a plugin to slot \{root.slot + 1}";
+                text: root.master ? "Add an effect to the master output" : "Add a plugin to slot \{root.slot + 1}";
                 font-size: 15px;
                 font-weight: 600;
                 vertical-alignment: center;
@@ -121,7 +123,7 @@ export component PickerPanel inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
+        if !root.master : HorizontalLayout {
             spacing: 4px;
             for label[index] in ["Instruments", "MIDI effects", "Audio effects"] : CategoryTab {
                 text: label;
@@ -137,6 +139,7 @@ export component PickerPanel inherits Rectangle {
         Text {
             text: root.category == Category.instrument ? "MIDI in → audio out. Replaces the slot's instrument."
                 : root.category == Category.midi-effect ? "MIDI in → MIDI out. Runs in front of the instrument."
+                : root.master ? "Audio in → audio out. Runs on the mix of every slot."
                 : "Audio in → audio out. Runs after the instrument.";
             font-size: 11px;
             color: gray;

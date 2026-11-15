@@ -4,7 +4,8 @@
 //! devices and the rest live in the config, which is saved as they change.)
 //!
 //! A folder `<data dir>/live-keys/session/` with `session.json` and per slot a
-//! subfolder `slot-<n>/` that is a complete slot preset (see `slot_presets`).
+//! subfolder `slot-<n>/` that is a complete slot preset (see `slot_presets`), and
+//! `master/` likewise for the master chain (its effects only).
 //! While a session is being restored, a marker file says so: if a plugin
 //! crashes the app during the restore, the next start finds the marker and
 //! skips restoring rather than crashing again.
@@ -13,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_engine::{ChainPosition, Engine, PluginKey, PresetInfo, SLOT_COUNT};
+use live_keys_engine::{ChainPosition, Engine, MASTER_SLOT, PluginKey, PresetInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::scenes::SlotPresetRef;
@@ -29,6 +30,7 @@ pub struct Session {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSlot {
+    /// The slot's index; `MASTER_SLOT` for the master chain.
     pub slot: usize,
     /// The slot's chain, as a slot preset in this subfolder.
     pub chain: String,
@@ -106,12 +108,13 @@ pub fn save(
             slots: Vec::new(),
             current_scene,
         };
-        for (slot, to_save) in slots.into_iter().enumerate().take(SLOT_COUNT) {
-            let chain = format!("slot-{}", slot + 1);
+        // The slots, then the master chain.
+        for (slot, to_save) in slots.into_iter().enumerate().take(MASTER_SLOT + 1) {
+            let chain = if slot == MASTER_SLOT { "master".to_string() } else { format!("slot-{}", slot + 1) };
             let chain_dir = temp.join(&chain);
             fs::create_dir(&chain_dir)?;
             slot_presets::write(engine, slot, "Session", &chain_dir, &plugin_preset)
-                .with_context(|| format!("slot {}", slot + 1))?;
+                .with_context(|| chain.clone())?;
             session.slots.push(SessionSlot {
                 slot,
                 chain,

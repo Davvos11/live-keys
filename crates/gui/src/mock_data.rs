@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
-    AppState, AppWindow, EffectRow, MidiDeviceRow, MidiInputRow, ParamRow, PickerRow, PresetRow,
+    AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, ParamRow, PickerRow, PresetRow,
     SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow,
 };
 
@@ -141,7 +141,7 @@ fn property(out: &mut String, ty: &str, name: &str, value: &dyn ToSlint) {
 
 /// The mock data file for the window's current state; `params_window` is a
 /// plugin's name and parameter rows, for previewing `ParamsWindow`.
-pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>)) -> String {
+pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (SharedString, ModelRc<ParamRow>)) -> String {
     let state = app.global::<AppState>();
     let mut out = String::from(
         "// Generated from a running session by `LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui`\n\
@@ -161,9 +161,9 @@ pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>
     property(&mut out, "[SceneSlotChoice]", "scene-form-slots", &state.get_scene_form_slots());
     property(&mut out, "string", "scene-status", &state.get_scene_status());
     property(&mut out, "string", "scene-target-name", &state.get_scene_target_name());
-    property(&mut out, "[string]", "default-plugin-folders", &state.get_default_plugin_folders());
-    property(&mut out, "[string]", "extra-plugin-folders", &state.get_extra_plugin_folders());
-    property(&mut out, "[string]", "discovered-plugins", &state.get_discovered_plugins());
+    property(&mut out, "[string]", "default-plugin-folders", &settings.get_default_plugin_folders());
+    property(&mut out, "[string]", "extra-plugin-folders", &settings.get_extra_plugin_folders());
+    property(&mut out, "[string]", "discovered-plugins", &settings.get_discovered_plugins());
     property(&mut out, "[PickerRow]", "picker-rows", &state.get_picker_rows());
     property(&mut out, "[SlotState]", "slots", &state.get_slots());
     property(&mut out, "int", "preset-browser-key", &state.get_preset_browser_key());
@@ -172,6 +172,9 @@ pub fn generate(app: &AppWindow, params_window: (SharedString, ModelRc<ParamRow>
     property(&mut out, "string", "preset-query", &state.get_preset_query());
     property(&mut out, "[string]", "param-search-rows", &state.get_param_search_rows());
     property(&mut out, "int", "param-search-count", &state.get_param_search_count());
+    property(&mut out, "[EffectRow]", "master-effects", &state.get_master_effects());
+    property(&mut out, "float", "master-volume-db", &state.get_master_volume_db());
+    property(&mut out, "int", "metronome-bpm", &state.get_metronome_bpm());
     property(&mut out, "string", "params-window-name", &params_window.0);
     property(&mut out, "[ParamRow]", "params-window-params", &params_window.1);
     out.push_str("}\n");

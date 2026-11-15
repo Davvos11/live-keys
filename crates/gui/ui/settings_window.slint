@@ -1,0 +1,93 @@
+// The Settings window, opened from the sidebar: plugin folders and scanning.
+// A window of its own has its own globals, so it can't use `AppState`/
+// `AppLogic`: Rust fills its properties and handles its callbacks.
+import { AboutSlint, Button, GroupBox, ListView, Palette, Spinner, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { MockData } from "mock_data.slint";
+
+export component SettingsWindow inherits Window {
+    // Fall back to `MockData` in the editor's preview, like `AppState`.
+    in property <[string]> default-plugin-folders: Platform.uses-mock-data ? MockData.default-plugin-folders : [];
+    in property <[string]> extra-plugin-folders: Platform.uses-mock-data ? MockData.extra-plugin-folders : [];
+    in property <bool> scanning;
+    // Every plugin found, as "name — kind (format)".
+    in property <[string]> discovered-plugins: Platform.uses-mock-data ? MockData.discovered-plugins : [];
+    callback add-plugin-folder();
+    callback remove-plugin-folder(string);
+    callback rescan-plugins();
+
+    title: "Live Keys — Settings";
+    preferred-width: 720px;
+    preferred-height: 900px;
+    min-width: 480px;
+    min-height: 700px;
+    default-font-family: Theme.font-family;
+    default-font-size: 16px;
+
+    VerticalBox {
+        GroupBox {
+            title: "Plugin Folders";
+            vertical-stretch: 0;
+            VerticalLayout {
+                spacing: 2px;
+                for folder in root.default-plugin-folders : Text {
+                    text: folder;
+                    color: gray;
+                }
+                for folder in root.extra-plugin-folders : HorizontalBox {
+                    Text {
+                        text: folder;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Remove";
+                        clicked => { root.remove-plugin-folder(folder); }
+                    }
+                }
+                HorizontalBox {
+                    Button {
+                        text: "Add folder...";
+                        clicked => { root.add-plugin-folder(); }
+                    }
+                    if !root.scanning: Button {
+                        text: "Rescan";
+                        clicked => { root.rescan-plugins(); }
+                    }
+                    // Stretched like the button, so "Add folder..." keeps its width.
+                    if root.scanning: HorizontalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+                        Spinner {
+                            indeterminate: true;
+                            width: 20px;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: "Scanning…";
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupBox {
+            title: "Discovered Plugins (\{root.discovered-plugins.length})";
+            vertical-stretch: 1;
+            ListView {
+                min-height: 160px;
+                for plugin in root.discovered-plugins : Text {
+                    text: plugin;
+                }
+            }
+        }
+
+        // Slint's royalty-free licence asks for this attribution.
+        HorizontalLayout {
+            alignment: center;
+            AboutSlint {}
+        }
+    }
+}

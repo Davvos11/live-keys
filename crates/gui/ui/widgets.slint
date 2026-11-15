@@ -300,10 +300,12 @@ export component Stepper inherits HorizontalLayout {
     in-out property <int> value;
     in property <int> minimum: -48;
     in property <int> maximum: 48;
+    // Shows positive values with a + (a transposition), or not (a tempo).
+    in property <bool> signed: true;
     callback changed(/* value */ int);
 
     function shown(value: int) -> string {
-        return value > 0 ? "+\{value}" : "\{value}";
+        return value > 0 && root.signed ? "+\{value}" : "\{value}";
     }
     function set(value: int) {
         root.value = Math.clamp(value, root.minimum, root.maximum);
@@ -311,11 +313,9 @@ export component Stepper inherits HorizontalLayout {
         root.changed(root.value);
     }
 
-    // Set from outside (a recalled scene): show it, unless it's being typed.
+    // Set from outside (a recalled scene, Tap): show it, even while focused.
     changed value => {
-        if (!input.has-focus) {
-            input.text = root.shown(root.value);
-        }
+        input.text = input.has-focus ? "\{root.value}" : root.shown(root.value);
     }
 
     spacing: 4px;
@@ -344,12 +344,12 @@ export component Stepper inherits HorizontalLayout {
             vertical-alignment: center;
             // Editing starts from the plain number; leaving shows it signed.
             changed has-focus => { self.text = self.has-focus ? "\{root.value}" : root.shown(root.value); }
+            // Enter and Escape leave the field (showing the value, signed).
             accepted => {
                 if (self.text.is-float()) {
                     root.set(Math.round(self.text.to-float()));
-                } else {
-                    self.text = "\{root.value}";
                 }
+                self.clear-focus();
             }
             key-pressed(event) => {
                 if (event.text == Key.UpArrow) {
@@ -361,7 +361,7 @@ export component Stepper inherits HorizontalLayout {
                     return accept;
                 }
                 if (event.text == Key.Escape) {
-                    self.text = "\{root.value}";
+                    self.clear-focus();
                     return accept;
                 }
                 reject

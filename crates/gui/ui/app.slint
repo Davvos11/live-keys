@@ -1,47 +1,45 @@
-import { Palette, Spinner, TabWidget } from "std-widgets.slint";
-import { SettingsTab } from "settings_tab.slint";
+import { Palette, Spinner } from "std-widgets.slint";
 import { LiveTab } from "live_tab.slint";
+import { Sidebar } from "sidebar.slint";
 import { PickerTarget, PluginPicker } from "plugin_picker.slint";
-import { AppState, AppLogic } from "globals.slint";
+import { AppState, AppLogic, Category } from "globals.slint";
 import { ParamsWindow } from "params_window.slint";
+import { SettingsWindow } from "settings_window.slint";
 import { Theme } from "theme.slint";
 
-export { AppState, AppLogic, ParamsWindow }
+export { AppState, AppLogic, ParamsWindow, SettingsWindow }
 
+// The Live view (scenes and slots, 1200×995 in the Penpot design's "Live
+// (window minimum)") and the right sidebar (300 wide) beside it.
 export component AppWindow inherits Window {
     title: "Live Keys";
-    // The size the window opened at before the Live tab's slots had a minimum
-    // (the Settings tab's contents made it this tall): the Live tab, 1200×995
-    // under the tab bar, is designed for it (Penpot: "Live (window minimum)").
-    min-width: 1200px;
-    min-height: 1027px;
-    preferred-width: 1200px;
-    preferred-height: 1027px;
+    min-width: 1500px;
+    min-height: 995px;
+    preferred-width: 1500px;
+    preferred-height: 995px;
     default-font-family: Theme.font-family;
     default-font-size: 16px;
 
-    TabWidget {
-        Tab {
-            title: "Settings";
-            SettingsTab { }
-        }
-        Tab {
-            title: "Live";
+    function choose-plugin(slot: int, category: int) {
+        AppLogic.filter-picker(category, "");
+        PickerTarget.slot = slot;
+        PickerTarget.category = category;
+        picker.show();
+    }
+
+    HorizontalLayout {
+        Rectangle {
+            horizontal-stretch: 1;
             LiveTab {
-                choose-plugin(slot, category) => {
-                    AppLogic.filter-picker(category, "");
-                    PickerTarget.slot = slot;
-                    PickerTarget.category = category;
-                    picker.show();
-                }
+                choose-plugin(slot, category) => { root.choose-plugin(slot, category); }
             }
-            // Over the tab, rather than instead of it, so the window still sizes
-            // itself to the tab's contents.
+            // Over the slots, rather than instead of them, so the window still
+            // sizes itself to them.
             if AppState.starting : Rectangle {
                 width: 100%;
                 height: 100%;
                 background: Palette.background;
-                // Takes the clicks meant for the tab underneath.
+                // Takes the clicks meant for the slots underneath.
                 TouchArea { }
                 VerticalLayout {
                     alignment: center;
@@ -61,6 +59,9 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+        Sidebar {
+            choose-effect => { root.choose-plugin(AppState.master-slot, Category.audio-effect); }
         }
     }
 

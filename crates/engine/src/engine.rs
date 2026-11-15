@@ -10,13 +10,14 @@ use live_keys_clap_host::{ClapController, ClapHost, ClapScan};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
 use crate::midi::{MidiInputs, RoutedMidi};
 use crate::paths::build_lv2_path;
+use crate::metronome::{Click, MetronomeSettings};
 use crate::setbfree::Setbfree;
 use crate::rack::{
     BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section, SlotPeaks,
@@ -28,13 +29,16 @@ use crate::rack::{
 /// audio effects), and the slots' outputs are summed, each at its own gain, into
 /// the one output stream.
 pub const SLOT_COUNT: usize = 6;
+/// The master chain's index wherever a slot index goes ([`Engine::slot`],
+/// [`Engine::add_effect`] etc.): audio effects only, fed the slots' mix.
+pub const MASTER_SLOT: usize = SLOT_COUNT;
 
 const MIDI_RING_CAPACITY: usize = 1024;
 const COMMAND_RING_CAPACITY: usize = 256;
 /// Plugins taken out of a chain, waiting to be dropped off the audio thread.
 /// Drained on every structural change, so it only needs room for a few in flight;
 /// sized so even clearing every chain at once fits.
-const RETIRED_RING_CAPACITY: usize = SLOT_COUNT * (MAX_MIDI_EFFECTS + 1 + MAX_EFFECTS) * 2;
+const RETIRED_RING_CAPACITY: usize = (SLOT_COUNT + 1) * (MAX_MIDI_EFFECTS + 1 + MAX_EFFECTS) * 2;
 /// Plugins lent to the control thread at once — one at a time in practice.
 const LENT_RING_CAPACITY: usize = 4;
 /// How long to wait for the audio thread to hand over a lent plugin: a few
@@ -190,6 +194,8 @@ struct RunningStream {
     sample_rate: f64,
     command_tx: Producer<RackCommand>,
     peaks: SlotPeaks,
+    /// The metronome's beat plus one, 0 while stopped (see [`Click`]).
+    beat: Arc<AtomicU32>,
     retired_rx: Consumer<BoxedPlugin>,
     lent_rx: Consumer<BoxedPlugin>,
     /// Where a lent plugin goes back to that arrived too late (see
@@ -294,8 +300,12 @@ pub struct Engine {
     /// `None` until the first [`PluginScan`] is installed.
     hosts: Option<Hosts>,
     max_block_size: usize,
-    slots: [SlotChain; SLOT_COUNT],
+    /// The slots' chains, then the master chain ([`MASTER_SLOT`]).
+    slots: [SlotChain; SLOT_COUNT + 1],
     settings: [SlotSettings; SLOT_COUNT],
+    /// Linear; 0 when muted.
+    master_gain: f32,
+    metronome: MetronomeSettings,
     next_key: PluginKey,
     /// setBfree plugins whose reported values changed, for
     /// [`Engine::take_setbfree_changes`].
@@ -325,6 +335,8 @@ impl Engine {
             midi_inputs: MidiInputs::new(),
             slots: Default::default(),
             settings: Default::default(),
+            master_gain: 1.0,
+            metronome: MetronomeSettings::default(),
             next_key: 0,
             setbfree_changed: Vec::new(),
         }
@@ -417,6 +429,34 @@ impl Engine {
             self.settings[slot].gain = gain;
             self.push_command(RackCommand::Gain { slot, gain });
         }
+    }
+
+    /// Sets the master output's linear gain (0 to mute), after the master
+    /// chain. Kept across restarts. The metronome's click isn't affected.
+    pub fn set_master_gain(&mut self, gain: f32) {
+        self.master_gain = gain;
+        self.push_command(RackCommand::MasterGain(gain));
+    }
+
+    /// Sets what the metronome plays; starting it starts a new bar. Kept
+    /// across restarts (a new stream starts it from its first beat).
+    pub fn set_metronome(&mut self, settings: MetronomeSettings) {
+        self.metronome = settings;
+        self.push_command(RackCommand::Metronome(settings));
+    }
+
+    /// The beat the metronome is on (0 = a bar's first), `None` while it's
+    /// stopped or no stream runs.
+    pub fn metronome_beat(&self) -> Option<u32> {
+        let beat = self.running.as_ref()?.beat.load(Ordering::Relaxed);
+        beat.checked_sub(1)
+    }
+
+    /// MIDI panic: every slot's plugins (MIDI effects and instrument) get
+    /// sustain off, all sound off, reset all controllers and all notes off on
+    /// every channel, and the slots forget which notes are held.
+    pub fn panic(&mut self) {
+        self.push_command(RackCommand::Panic);
     }
 
     /// Plays a MIDI event as if it came from every MIDI input (an on-screen
@@ -1040,9 +1080,13 @@ impl Engine {
     }
 
     /// Instantiates `plugin_id` and appends it to the end of `slot`'s `section`
-    /// chain.
+    /// chain. [`MASTER_SLOT`] takes audio effects only.
     pub fn add_effect(&mut self, slot: usize, section: Section, plugin_id: &str) -> Result<PluginKey> {
-        anyhow::ensure!(slot < SLOT_COUNT, "slot {slot} out of range");
+        anyhow::ensure!(slot <= MASTER_SLOT, "slot {slot} out of range");
+        anyhow::ensure!(
+            slot != MASTER_SLOT || section == Section::Audio,
+            "the master chain takes audio effects only"
+        );
         let index = self.slots[slot].effects(section).len();
         let capacity = section.capacity();
         anyhow::ensure!(index < capacity, "slot already has {capacity} effects there");
@@ -1053,11 +1097,8 @@ impl Engine {
             index,
             plugin,
         })?;
-        log::info!(
-            "Added {} {section:?} effect to slot {slot}: {}",
-            meta.format.label(),
-            meta.name
-        );
+        let place = if slot == MASTER_SLOT { "the master chain".to_string() } else { format!("slot {slot}") };
+        log::info!("Added {} {section:?} effect to {place}: {}", meta.format.label(), meta.name);
         let key = meta.key;
         self.slots[slot].effects_mut(section).push(meta);
         Ok(key)
@@ -1124,12 +1165,15 @@ impl Engine {
 
         let (midi_tx, midi_rx) = ring_buffer::<RoutedMidi>(MIDI_RING_CAPACITY);
         let peaks = SlotPeaks::default();
+        let beat = Arc::new(AtomicU32::new(0));
         let (command_tx, command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
         let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
 
         let rack = Rack::new(
             &self.settings,
+            self.master_gain,
+            Click::new(self.metronome, sample_rate, beat.clone()),
             retired_tx,
             lent_tx,
             channels,
@@ -1157,6 +1201,7 @@ impl Engine {
             sample_rate,
             command_tx,
             peaks,
+            beat,
             retired_rx,
             lent_rx,
             overdue_lend: None,

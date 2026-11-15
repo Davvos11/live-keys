@@ -8,7 +8,7 @@ import { PresetPopup } from "preset_bar.slint";
 import { SlotPresets } from "slot_presets.slint";
 
 // A popup's frame: the background, an outline and a shadow.
-component PopupFrame inherits Rectangle {
+export component PopupFrame inherits Rectangle {
     background: Theme.background;
     border-radius: 4px;
     border-width: 1px;
@@ -19,7 +19,7 @@ component PopupFrame inherits Rectangle {
 
 // What can be done with one effect, opened by clicking its FX square: its own
 // GUI, its parameter window, its presets, moving it and removing it.
-component EffectPopup inherits PopupWindow {
+export component EffectPopup inherits PopupWindow {
     in property <EffectRow> plugin;
     in property <int> slot-index;
     // As `AppLogic`'s `section`.
@@ -162,7 +162,7 @@ component FxGrid inherits Rectangle {
 // The audio effects in one row of FX squares, then a + to add one while
 // there's room, scrolling sideways (drag, the mouse wheel, or the scrollbar
 // under it) when they don't fit; three fit a slot, spaced like `FxGrid`'s.
-component FxStrip inherits Rectangle {
+export component FxStrip inherits Rectangle {
     in property <[EffectRow]> effects;
     in property <bool> can-add;
     in property <int> selected: -1;

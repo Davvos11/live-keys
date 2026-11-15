@@ -111,3 +111,69 @@ export component RangeSlider inherits Rectangle {
         }
     }
 }
+
+// The one-handle version of `RangeSlider` (the design's Single slider): the
+// track filled up to the handle. It never sets `value` itself, only reports
+// the new one, so `value` keeps following its binding.
+export component SingleSlider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> value;
+    // Where a double-click puts it.
+    in property <float> default-value: root.minimum;
+    callback changed(/* value */ float);
+
+    private property <length> handle-size: 18px;
+    private property <length> track-width: root.width - root.handle-size;
+    private property <length> track-y: (root.height - 4px) / 2;
+    private property <length> handle-x: root.track-width * (Math.clamp(root.value, root.minimum, root.maximum) - root.minimum) / max(0.0001, root.maximum - root.minimum);
+
+    function value-at(x: length) -> float {
+        return Math.clamp(root.minimum + (x - root.handle-size / 2) / root.track-width * (root.maximum - root.minimum), root.minimum, root.maximum);
+    }
+
+    min-width: 60px;
+    min-height: 28px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+
+    Rectangle {
+        x: root.handle-size / 2;
+        y: root.track-y;
+        width: root.track-width;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.control-border;
+    }
+    Rectangle {
+        x: root.handle-size / 2;
+        y: root.track-y;
+        width: root.handle-x;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Handle {
+        x: root.handle-x;
+        active: touch.pressed;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.changed(root.value-at(self.mouse-x));
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.changed(root.value-at(self.mouse-x));
+            }
+        }
+        double-clicked => { root.changed(root.default-value); }
+        scroll-event(event) => {
+            let step = (root.maximum - root.minimum) / 66;
+            root.changed(Math.clamp(root.value + (event.delta-y > 0 ? step : -step), root.minimum, root.maximum));
+            accept
+        }
+    }
+}

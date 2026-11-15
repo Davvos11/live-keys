@@ -64,6 +64,6 @@ Live Keys is licensed under the [MIT License](LICENSE).
 
 It's built with [Slint](https://slint.dev), used under the
 [Slint Royalty-free Desktop, Mobile, and Web Applications License](https://slint.dev/terms-and-conditions#royalty-free),
-which asks for the "Made with Slint" attribution shown on the Settings tab. Dependencies'
+which asks for the "Made with Slint" attribution shown in the Settings window. Dependencies'
 licences are checked with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
 (`cargo install cargo-deny`, then `cargo deny --workspace check`; see `deny.toml`).

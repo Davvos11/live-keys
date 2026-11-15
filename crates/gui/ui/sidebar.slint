@@ -1,0 +1,394 @@
+// The right sidebar, after the Penpot design ("Right sidebar"): the metronome,
+// the master output, the MIDI inputs, then Settings and MIDI panic.
+import { CheckBox } from "std-widgets.slint";
+import { AppState, AppLogic, Category, EffectRow, MidiInputRow } from "globals.slint";
+import { Theme, Icons, KButton, DropdownButton, ListItem, Select, Stepper } from "widgets.slint";
+import { LabelledKnob } from "knob.slint";
+import { SingleSlider } from "range_slider.slint";
+import { EffectPopup, FxStrip, PopupFrame } from "slot_panel.slint";
+import { PresetPopup } from "preset_bar.slint";
+
+// A horizontal line between sections.
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.divider;
+}
+
+component SectionTitle inherits Text {
+    color: Theme.text;
+    font-size: Theme.font-size;
+    font-weight: 600;
+}
+
+// A list of options under a button; picking one closes it.
+component MenuPopup inherits PopupWindow {
+    in property <[string]> model;
+    in property <int> current-index;
+    callback selected(/* index */ int);
+
+    close-policy: PopupClosePolicy.close-on-click-outside;
+    height: root.model.length * 30px + 8px;
+
+    PopupFrame {
+        for option[index] in root.model : ListItem {
+            x: 4px;
+            y: 4px + index * 30px;
+            width: parent.width - 8px;
+            height: 28px;
+            text: option;
+            selected: index == root.current-index;
+            clicked => {
+                root.selected(index);
+                root.close();
+            }
+        }
+    }
+}
+
+// The beats of a bar as dots, the current one filled.
+component BeatDots inherits Rectangle {
+    in property <int> beats;
+    in property <int> current;
+
+    property <length> pitch: root.width / max(1, root.beats);
+    property <length> size: min(20px, root.pitch - 6px);
+
+    for beat in root.beats : Rectangle {
+        x: beat * root.pitch + (root.pitch - root.size) / 2;
+        y: (root.height - root.size) / 2;
+        width: root.size;
+        height: root.size;
+        border-radius: self.width / 2;
+        border-width: 1.5px;
+        border-color: Theme.text-muted;
+        background: beat == root.current ? (beat == 0 ? Theme.accent : Theme.text) : transparent;
+    }
+}
+
+component MetronomeSection inherits VerticalLayout {
+    vertical-stretch: 0;
+    padding: 5px;
+    padding-top: 10px;
+    spacing: 6px;
+
+    HorizontalLayout {
+        // The knob's column and the stepper's, as in the design.
+        VerticalLayout {
+            width: 118px;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                volume := LabelledKnob {
+                    width: 80px;
+                    label: "Metronome";
+                    value-text: Math.round(AppState.metronome-volume * 100) + "%";
+                    minimum: 0;
+                    maximum: 1;
+                    default-value: 0.5;
+                    value: AppState.metronome-volume;
+                    // Turning sets the knob's own value, replacing its binding.
+                    property <float> source: AppState.metronome-volume;
+                    changed source => { self.value = self.source; }
+                    changed(value) => { AppLogic.set-metronome-volume(value); }
+                }
+            }
+        }
+        VerticalLayout {
+            padding-top: 7px;
+            spacing: 6px;
+            alignment: start;
+            HorizontalLayout {
+                alignment: center;
+                BeatDots {
+                    width: 128px;
+                    height: 30px;
+                    beats: AppState.metronome-beats;
+                    current: AppState.metronome-beat;
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                Stepper {
+                    signed: false;
+                    minimum: AppState.min-bpm;
+                    maximum: AppState.max-bpm;
+                    value: AppState.metronome-bpm;
+                    // Stepping sets its own value, replacing the binding (Tap
+                    // changes it from elsewhere).
+                    property <int> source: AppState.metronome-bpm;
+                    changed source => { self.value = self.source; }
+                    changed(value) => { AppLogic.set-metronome-bpm(value); }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        padding-bottom: 10px;
+        HorizontalLayout {
+            width: 118px;
+            alignment: center;
+            KButton {
+                icon: AppState.metronome-playing ? Icons.stop : Icons.play;
+                active: AppState.metronome-playing;
+                clicked => { AppLogic.toggle-metronome(); }
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            signature := KButton {
+                text: AppState.metronome-signatures[AppState.metronome-signature];
+                active: signature-menu.is-open;
+                clicked => { signature-menu.show(); }
+            }
+            subdivision := KButton {
+                icon: Icons.music;
+                active: subdivision-menu.is-open;
+                clicked => { subdivision-menu.show(); }
+            }
+            KButton {
+                text: "Tap";
+                clicked => { AppLogic.tap-tempo(); }
+            }
+        }
+    }
+
+    signature-menu := MenuPopup {
+        x: signature.absolute-position.x - root.absolute-position.x;
+        y: signature.absolute-position.y - root.absolute-position.y + signature.height + 2px;
+        width: 90px;
+        model: AppState.metronome-signatures;
+        current-index: AppState.metronome-signature;
+        selected(index) => { AppLogic.set-metronome-signature(index); }
+    }
+    subdivision-menu := MenuPopup {
+        x: root.width - self.width - 5px;
+        y: subdivision.absolute-position.y - root.absolute-position.y + subdivision.height + 2px;
+        width: 180px;
+        model: AppState.metronome-subdivisions;
+        current-index: AppState.metronome-subdivision;
+        selected(index) => { AppLogic.set-metronome-subdivision(index); }
+    }
+}
+
+component MasterSection inherits VerticalLayout {
+    callback choose-effect();
+    callback open-effect(/* index */ int);
+    in property <int> selected-effect: -1;
+
+    vertical-stretch: 0;
+    padding: 5px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    spacing: 3px;
+
+    SectionTitle { text: "Master out:"; }
+    SingleSlider {
+        height: 32px;
+        minimum: AppState.min-volume-db;
+        maximum: AppState.max-volume-db;
+        default-value: 0;
+        value: AppState.master-volume-db;
+        changed(value) => { AppLogic.set-master-volume(value); }
+    }
+    FxStrip {
+        effects: AppState.master-effects;
+        can-add: AppState.master-effects.length < AppState.max-effects;
+        selected: root.selected-effect;
+        open(index) => { root.open-effect(index); }
+        add => { root.choose-effect(); }
+    }
+    if AppState.master-status != "" : Text {
+        text: AppState.master-status;
+        color: Theme.text-faint;
+        font-size: Theme.small-font-size;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        padding-top: 5px;
+        spacing: 5px;
+        KButton {
+            icon: AppState.master-muted ? Icons.muted : Icons.volume;
+            active: AppState.master-muted;
+            clicked => { AppLogic.toggle-master-mute(); }
+        }
+        Select {
+            horizontal-stretch: 1;
+            model: AppState.audio-devices;
+            current-index: AppState.selected-audio-index;
+            // Choosing sets its own index, replacing the binding.
+            property <int> source: AppState.selected-audio-index;
+            changed source => { self.current-index = self.source; }
+            selected(index) => { AppLogic.select-audio-device(AppState.audio-devices[index]); }
+        }
+    }
+}
+
+// One MIDI input: its number, its devices (a checklist of every device
+// present and the ones it remembers) and a remove button (not for the first).
+component MidiInputItem inherits HorizontalLayout {
+    in property <int> index;
+    in property <MidiInputRow> input;
+
+    spacing: 5px;
+    padding-top: 5px;
+    padding-bottom: 6px;
+
+    // A number, not a button.
+    Rectangle {
+        width: Theme.control-height;
+        height: Theme.control-height;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        background: Theme.control;
+        Text {
+            text: root.index + 1;
+            color: Theme.text-muted;
+            font-size: Theme.font-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    devices := DropdownButton {
+        horizontal-stretch: 1;
+        text: root.input.summary;
+        open: popup.is-open;
+        clicked => { popup.show(); }
+    }
+    KButton {
+        icon: Icons.close;
+        enabled: root.index > 0;
+        clicked => { AppLogic.remove-midi-input(root.index); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: devices.absolute-position.y - root.absolute-position.y + devices.height + 2px;
+        width: root.width;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        PopupFrame {
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                for device in root.input.devices : CheckBox {
+                    text: device.available ? device.name : device.name + " (not connected)";
+                    checked: device.checked;
+                    // Clicking sets `checked` itself, replacing the binding above.
+                    property <bool> source: device.checked;
+                    changed source => { self.checked = self.source; }
+                    toggled => { AppLogic.toggle-midi-device(root.index, device.name); }
+                }
+                if root.input.devices.length == 0 : Text {
+                    text: "No MIDI devices found";
+                    color: Theme.text-faint;
+                }
+            }
+        }
+    }
+}
+
+component MidiSection inherits VerticalLayout {
+    vertical-stretch: 0;
+    padding: 5px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    spacing: 3px;
+
+    SectionTitle { text: "MIDI inputs:"; }
+    VerticalLayout {
+        for input[index] in AppState.midi-inputs : MidiInputItem {
+            index: index;
+            input: input;
+        }
+    }
+    if AppState.midi-inputs.length < AppState.max-midi-inputs : ListItem {
+        text: "+ Add input";
+        action: true;
+        clicked => { AppLogic.add-midi-input(); }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    // Asks for the plugin picker, for an audio effect on the master chain.
+    callback choose-effect();
+
+    property <int> fx-index: -1;
+    property <EffectRow> fx-plugin: AppState.master-effects[root.fx-index];
+
+    width: 300px;
+    background: Theme.background;
+
+    // The line between it and the slots.
+    Rectangle {
+        x: 0;
+        width: 1px;
+        background: Theme.divider;
+    }
+
+    VerticalLayout {
+        MetronomeSection { }
+        Divider { }
+        master := MasterSection {
+            selected-effect: effect-popup.is-open ? root.fx-index : -1;
+            choose-effect => { root.choose-effect(); }
+            open-effect(index) => {
+                root.fx-index = index;
+                effect-popup.show();
+            }
+        }
+        Divider { }
+        Rectangle { vertical-stretch: 1; }
+        Divider { }
+        MidiSection { }
+        Divider { }
+        VerticalLayout {
+            vertical-stretch: 0;
+            padding-top: 11px;
+            padding-bottom: 11px;
+            spacing: 9px;
+            HorizontalLayout {
+                alignment: center;
+                KButton {
+                    width: 124px;
+                    icon: Icons.settings-2;
+                    text: "Settings";
+                    clicked => { AppLogic.open-settings(); }
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                KButton {
+                    width: 124px;
+                    icon: Icons.alert;
+                    text: "MIDI panic";
+                    clicked => { AppLogic.midi-panic(); }
+                }
+            }
+        }
+    }
+
+    effect-popup := EffectPopup {
+        x: 5px;
+        y: master.y + 160px;
+        width: root.width - 10px;
+        plugin: root.fx-plugin;
+        slot-index: AppState.master-slot;
+        section: 1;
+        index: root.fx-index;
+        count: AppState.master-effects.length;
+        browse-presets => {
+            AppLogic.open-preset-browser(root.fx-plugin.key);
+            preset-popup.show();
+        }
+    }
+
+    preset-popup := PresetPopup {
+        x: 5px;
+        y: master.y + 40px;
+        width: root.width - 10px;
+        height: min(380px, max(200px, root.height - self.y - 10px));
+        plugin: root.fx-plugin;
+    }
+}

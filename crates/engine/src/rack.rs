@@ -9,7 +9,8 @@ use live_keys_core::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::engine::{SLOT_COUNT, SlotSettings};
+use crate::engine::{MASTER_SLOT, SLOT_COUNT, SlotSettings};
+use crate::metronome::{Click, MetronomeSettings};
 use crate::midi::RoutedMidi;
 
 /// Each slot's output peak (absolute sample value, after its gain, as `f32`
@@ -31,6 +32,23 @@ const ALL_NOTES_OFF: [[u8; 3]; 16] = {
     let mut channel = 0;
     while channel < 16 {
         events[channel][0] |= channel as u8;
+        channel += 1;
+    }
+    events
+};
+
+/// Sent to every slot by [`RackCommand::Panic`], on every channel: sustain off,
+/// all sound off, reset all controllers, all notes off.
+const PANIC: [[u8; 3]; 64] = {
+    let mut events = [[0xB0, 0, 0]; 64];
+    let mut channel = 0;
+    while channel < 16 {
+        let mut message = 0;
+        while message < 4 {
+            let controller = [64, 120, 121, 123][message];
+            events[channel * 4 + message] = [0xB0 | channel as u8, controller, 0];
+            message += 1;
+        }
         channel += 1;
     }
     events
@@ -85,6 +103,11 @@ pub(crate) enum RackCommand {
     Lend { slot: usize, position: ChainPosition },
     /// Puts a lent plugin back in its place.
     Return { slot: usize, position: ChainPosition, plugin: BoxedPlugin },
+    /// The master output's linear gain (0 when muted).
+    MasterGain(f32),
+    Metronome(MetronomeSettings),
+    /// Every slot's plugins get [`PANIC`], and their routers forget held notes.
+    Panic,
     /// Hands the whole rack back to the control thread, for a new output
     /// stream (handled by the callback, not [`Rack::apply`]).
     Detach,
@@ -101,9 +124,11 @@ struct SlotRuntime {
     midi: Vec<MidiEvent>,
     /// The MIDI chain's output for the current block.
     midi_scratch: Vec<MidiEvent>,
-    /// Set when the MIDI chain changed: the instrument gets `ALL_NOTES_OFF` with
-    /// the next block.
-    reset_notes: bool,
+    /// What the instrument gets ahead of the next block: `ALL_NOTES_OFF` when
+    /// the MIDI chain changed, `PANIC` on a panic, else nothing.
+    reset_notes: &'static [[u8; 3]],
+    /// Set by a panic: the MIDI chain's first stage gets `PANIC` too.
+    panic: bool,
     /// Gain applied at the end of the last rendered block; each block ramps from
     /// here to `target_gain` so fader moves don't click.
     gain: f32,
@@ -111,6 +136,14 @@ struct SlotRuntime {
 }
 
 impl SlotRuntime {
+    /// Sends `ALL_NOTES_OFF` ahead of the next block if `reset` (a pending
+    /// `PANIC` already covers it).
+    fn reset_notes_if(&mut self, reset: bool) {
+        if reset && self.reset_notes.is_empty() {
+            self.reset_notes = &ALL_NOTES_OFF;
+        }
+    }
+
     fn section_mut(&mut self, section: Section) -> &mut [Option<BoxedPlugin>] {
         match section {
             Section::Midi => &mut self.midi_chain,
@@ -133,13 +166,13 @@ impl SlotRuntime {
 
 /// Runs `input` through every MIDI effect in `chain` in order, and returns what
 /// comes out of the last one (`input` itself if there are none), preceded by
-/// `ALL_NOTES_OFF` if `reset`. MIDI effects run every block, not only ones with
+/// the `reset` events. MIDI effects run every block, not only ones with
 /// input, since some (arpeggiators, delays) produce MIDI on their own.
 fn process_midi_chain<'a>(
     chain: &mut [Option<BoxedPlugin>; MAX_MIDI_EFFECTS],
     input: &'a [MidiEvent],
     scratch: &'a mut Vec<MidiEvent>,
-    reset: bool,
+    reset: &[[u8; 3]],
     frames: usize,
 ) -> &'a [MidiEvent] {
     let mut in_scratch = false;
@@ -150,29 +183,31 @@ fn process_midi_chain<'a>(
         scratch.extend(stage.midi_output().iter().take(room));
         in_scratch = true;
     }
-    if !reset {
+    if reset.is_empty() {
         let scratch: &'a Vec<MidiEvent> = scratch;
         return if in_scratch { scratch } else { input };
     }
     if !in_scratch {
         scratch.clear();
-        let room = scratch.capacity() - ALL_NOTES_OFF.len();
+        let room = scratch.capacity() - reset.len();
         scratch.extend(input.iter().take(room));
     } else {
-        scratch.truncate(scratch.capacity() - ALL_NOTES_OFF.len());
+        scratch.truncate(scratch.capacity() - reset.len());
     }
     let events = scratch.len();
-    scratch.extend(ALL_NOTES_OFF.iter().filter_map(|bytes| MidiEvent::from_raw(0, bytes)));
+    scratch.extend(reset.iter().filter_map(|bytes| MidiEvent::from_raw(0, bytes)));
     let added = scratch.len() - events;
     scratch.rotate_right(added);
     scratch.as_slice()
 }
 
 /// Runs every plugin in `chain` in order, each fed the previous one's output (the
-/// first one silence), and returns the index of the last one — whose output is the
-/// slot's — or `None` if the chain is empty.
+/// first one `first`: interleaved audio and its channel count, or silence), and
+/// returns the index of the last one — whose output is the slot's — or `None` if
+/// the chain is empty.
 fn process_chain(
     chain: &mut [Option<BoxedPlugin>; CHAIN_LEN],
+    first: Option<(&[f32], usize)>,
     midi: &[MidiEvent],
     frames: usize,
 ) -> Option<usize> {
@@ -182,8 +217,13 @@ fn process_chain(
         let Some(stage) = rest[0].as_deref_mut() else {
             continue;
         };
-        let source = previous.and_then(|previous| before[previous].as_deref());
-        feed_inputs(stage, source, frames);
+        match previous {
+            Some(previous) => feed_inputs(stage, before[previous].as_deref(), frames),
+            None => match first {
+                Some((audio, channels)) => feed_interleaved(stage, audio, channels),
+                None => feed_inputs(stage, None, frames),
+            },
+        }
         // Effects get the slot's MIDI too: most ignore it, but some (vocoders,
         // MIDI-triggered gates) need it.
         stage.process(midi, frames);
@@ -208,9 +248,27 @@ fn feed_inputs(stage: &mut dyn HostedPlugin, source: Option<&dyn HostedPlugin>, 
     }
 }
 
+/// Copies interleaved `audio` (`channels` wide) into `stage`'s inputs, wrapping
+/// channels around like [`feed_inputs`].
+fn feed_interleaved(stage: &mut dyn HostedPlugin, audio: &[f32], channels: usize) {
+    for channel in 0..stage.audio_input_count() {
+        let input = stage.audio_input_mut(channel);
+        let source = audio.iter().skip(channel % channels).step_by(channels);
+        for (sample, source) in input.iter_mut().zip(source) {
+            *sample = *source;
+        }
+    }
+}
+
 /// Every slot's chain and mixer state, owned by the audio callback.
 pub(crate) struct Rack {
-    slots: [SlotRuntime; SLOT_COUNT],
+    /// The slots, then the master chain ([`MASTER_SLOT`]: audio effects only,
+    /// fed the slots' mix).
+    slots: [SlotRuntime; SLOT_COUNT + 1],
+    /// The master gain at the end of the last block, and where it's heading.
+    master_gain: f32,
+    master_target: f32,
+    click: Click,
     midi_batch: Vec<RoutedMidi>,
     /// Plugins taken out of a chain, handed back to the control thread to drop —
     /// a plugin's teardown can deallocate or block.
@@ -223,8 +281,11 @@ pub(crate) struct Rack {
 }
 
 impl Rack {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: &[SlotSettings; SLOT_COUNT],
+        master_gain: f32,
+        click: Click,
         retired_tx: Producer<BoxedPlugin>,
         lent_tx: Producer<BoxedPlugin>,
         channels: usize,
@@ -233,17 +294,24 @@ impl Rack {
         peaks: SlotPeaks,
     ) -> Self {
         Self {
-            slots: std::array::from_fn(|slot| SlotRuntime {
-                midi_chain: Default::default(),
-                chain: Default::default(),
-                router: MidiRouter::new(settings[slot].filter),
-                midi: Vec::with_capacity(midi_capacity),
-                // Room for a full callback's input plus `ALL_NOTES_OFF`.
-                midi_scratch: Vec::with_capacity(midi_capacity + ALL_NOTES_OFF.len()),
-                reset_notes: false,
-                gain: settings[slot].gain,
-                target_gain: settings[slot].gain,
+            slots: std::array::from_fn(|slot| {
+                let settings = settings.get(slot).copied().unwrap_or_default();
+                SlotRuntime {
+                    midi_chain: Default::default(),
+                    chain: Default::default(),
+                    router: MidiRouter::new(settings.filter),
+                    // Room for a full callback's input plus `PANIC`.
+                    midi: Vec::with_capacity(midi_capacity + PANIC.len()),
+                    midi_scratch: Vec::with_capacity(midi_capacity + PANIC.len()),
+                    reset_notes: &[],
+                    panic: false,
+                    gain: settings.gain,
+                    target_gain: settings.gain,
+                }
             }),
+            master_gain,
+            master_target: master_gain,
+            click,
             midi_batch: Vec::with_capacity(midi_capacity),
             retired_tx,
             lent_tx,
@@ -284,6 +352,15 @@ impl Rack {
                 let old = std::mem::replace(&mut runtime.chain[0], plugin);
                 self.retire(old);
             }
+            RackCommand::MasterGain(gain) => self.master_target = gain,
+            RackCommand::Metronome(settings) => self.click.set(settings),
+            RackCommand::Panic => {
+                for runtime in &mut self.slots[..SLOT_COUNT] {
+                    runtime.router.clear_held();
+                    runtime.reset_notes = &PANIC;
+                    runtime.panic = true;
+                }
+            }
             RackCommand::InsertEffect {
                 slot,
                 section,
@@ -297,7 +374,7 @@ impl Rack {
                 if index < chain.len() && chain[chain.len() - 1].is_none() {
                     chain[index..].rotate_right(1);
                     chain[index] = Some(plugin);
-                    runtime.reset_notes |= section == Section::Midi;
+                    runtime.reset_notes_if(section == Section::Midi);
                 } else {
                     self.retire(Some(plugin));
                 }
@@ -316,7 +393,7 @@ impl Rack {
                 }
                 let old = chain[index].take();
                 chain[index..].rotate_left(1);
-                runtime.reset_notes |= section == Section::Midi;
+                runtime.reset_notes_if(section == Section::Midi);
                 self.retire(old);
             }
             RackCommand::MoveEffect {
@@ -335,7 +412,7 @@ impl Rack {
                     } else {
                         chain[to..=from].rotate_right(1);
                     }
-                    runtime.reset_notes |= section == Section::Midi;
+                    runtime.reset_notes_if(section == Section::Midi);
                 }
             }
             RackCommand::Param {
@@ -382,7 +459,7 @@ impl Rack {
                     return self.retire(Some(plugin));
                 };
                 // Notes that ended while it was away never reached it.
-                runtime.reset_notes |= position == ChainPosition::Instrument;
+                runtime.reset_notes_if(position == ChainPosition::Instrument);
                 match runtime.place_mut(position) {
                     Some(place) if place.is_none() => *place = Some(plugin),
                     _ => self.retire(Some(plugin)),
@@ -398,10 +475,17 @@ impl Rack {
         while let Ok(event) = midi_rx.pop() {
             self.midi_batch.push(event);
         }
-        for runtime in &mut self.slots {
+        for runtime in &mut self.slots[..SLOT_COUNT] {
             runtime.midi.clear();
+            // The MIDI effects get a panic too (an arpeggiator holding notes);
+            // without any, the instrument gets it through `reset_notes`.
+            if std::mem::take(&mut runtime.panic) && runtime.midi_chain[0].is_some() {
+                runtime.midi.extend(PANIC.iter().filter_map(|bytes| MidiEvent::from_raw(0, bytes)));
+            }
             for routed in &self.midi_batch {
-                if let Some(event) = runtime.router.route(routed.inputs, &routed.event) {
+                if runtime.midi.len() < runtime.midi.capacity()
+                    && let Some(event) = runtime.router.route(routed.inputs, &routed.event)
+                {
                     runtime.midi.push(event);
                 }
             }
@@ -419,7 +503,7 @@ impl Rack {
         {
             let frames = data_chunk.len() / channels;
             data_chunk.fill(0.0);
-            for (slot, runtime) in self.slots.iter_mut().enumerate() {
+            for (slot, runtime) in self.slots[..SLOT_COUNT].iter_mut().enumerate() {
                 let input: &[MidiEvent] = if chunk_index == 0 { &runtime.midi } else { &[] };
                 let midi = process_midi_chain(
                     &mut runtime.midi_chain,
@@ -428,7 +512,7 @@ impl Rack {
                     std::mem::take(&mut runtime.reset_notes),
                     frames,
                 );
-                let Some(last) = process_chain(&mut runtime.chain, midi, frames) else {
+                let Some(last) = process_chain(&mut runtime.chain, None, midi, frames) else {
                     continue;
                 };
                 let output_stage = runtime.chain[last].as_deref().unwrap();
@@ -451,7 +535,35 @@ impl Rack {
                 }
                 runtime.gain = runtime.target_gain;
             }
+            self.render_master(data_chunk, frames);
+            self.click.render(data_chunk, channels);
         }
+    }
+
+    /// Runs the slots' mix in `data` through the master chain, if any, and
+    /// applies the master gain.
+    fn render_master(&mut self, data: &mut [f32], frames: usize) {
+        let channels = self.channels;
+        let master = &mut self.slots[MASTER_SLOT];
+        if let Some(last) = process_chain(&mut master.chain, Some((data, channels)), &[], frames) {
+            let output_stage = master.chain[last].as_deref().unwrap();
+            let output_channels = output_stage.audio_output_count();
+            for channel in 0..channels {
+                let samples = data.iter_mut().skip(channel).step_by(channels);
+                if output_channels == 0 {
+                    samples.for_each(|sample| *sample = 0.0);
+                } else {
+                    let rendered = output_stage.audio_output(channel % output_channels);
+                    samples.zip(rendered).for_each(|(sample, rendered)| *sample = *rendered);
+                }
+            }
+        }
+        let gain_step = (self.master_target - self.master_gain) / frames as f32;
+        for (frame_index, frame) in data.chunks_mut(channels).enumerate() {
+            let gain = self.master_gain + gain_step * frame_index as f32;
+            frame.iter_mut().for_each(|sample| *sample *= gain);
+        }
+        self.master_gain = self.master_target;
     }
 }
 
@@ -509,7 +621,8 @@ mod tests {
     fn rack() -> Rack {
         let (retired_tx, _retired_rx) = ring_buffer(64);
         let (lent_tx, _lent_rx) = ring_buffer(4);
-        Rack::new(&Default::default(), retired_tx, lent_tx, 2, BLOCK, 16, Default::default())
+        let click = Click::new(Default::default(), 48_000.0, Arc::default());
+        Rack::new(&Default::default(), 1.0, click, retired_tx, lent_tx, 2, BLOCK, 16, Default::default())
     }
 
     /// Renders one block and returns slot 0's first output sample (every slot but
@@ -564,6 +677,26 @@ mod tests {
 
         insert(&mut rack, 0, TIMES_TWO);
         assert_eq!(render(&mut rack), 3.0); // 1 * 2 + 1
+    }
+
+    #[test]
+    fn master_chain_processes_the_mix() {
+        let mut rack = rack();
+        for slot in [0, 1] {
+            rack.apply(RackCommand::SetInstrument { slot, plugin: Some(fake(ONE)) });
+        }
+        rack.apply(RackCommand::InsertEffect {
+            slot: MASTER_SLOT,
+            section: Section::Audio,
+            index: 0,
+            plugin: fake(TIMES_TWO),
+        });
+        assert_eq!(render(&mut rack), 4.0); // (1 + 1) * 2
+        rack.apply(RackCommand::MasterGain(0.5));
+        // One block ramps to it.
+        let (_midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(1);
+        rack.render(&mut midi_rx, &mut [0.0; 2 * BLOCK]);
+        assert_eq!(render(&mut rack), 2.0);
     }
 
     #[test]

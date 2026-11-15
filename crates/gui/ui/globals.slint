@@ -31,8 +31,6 @@ export global AppState {
     // The name of the scene being saved over, edited or deleted (for saving:
     // the current scene's, "" if none).
     in property <string> scene-target-name: Platform.uses-mock-data ? MockData.scene-target-name : "";
-    in property <[string]> default-plugin-folders: Platform.uses-mock-data ? MockData.default-plugin-folders : [];
-    in property <[string]> extra-plugin-folders: Platform.uses-mock-data ? MockData.extra-plugin-folders : [];
     // Until the first plugin scan is installed and the last session restored:
     // nothing is loaded or playing yet, so the Live tab shows a spinner instead.
     // Off in the preview, which shows the tab with `MockData`.
@@ -40,8 +38,6 @@ export global AppState {
     // Whether a plugin scan is running (from startup, or Rescan); not in
     // `MockData`, since the app never exits mid-scan.
     in property <bool> scanning: false;
-    // Every plugin found, as "name — kind (format)", for the Settings tab.
-    in property <[string]> discovered-plugins: Platform.uses-mock-data ? MockData.discovered-plugins : [];
     // The plugin picker's list for its current category and search, pinned
     // plugins first; refilled by `AppLogic.filter-picker`.
     in property <[PickerRow]> picker-rows: Platform.uses-mock-data ? MockData.picker-rows : [];
@@ -65,6 +61,28 @@ export global AppState {
     // has in all. Filled by `AppLogic.open-param-search`/`filter-param-search`.
     in property <[string]> param-search-rows: Platform.uses-mock-data ? MockData.param-search-rows : [];
     in property <int> param-search-count: Platform.uses-mock-data ? MockData.param-search-count : 0;
+    // The master chain's index wherever a slot index goes (`pick-plugin`,
+    // `remove-effect`, `move-effect`): audio effects only.
+    in property <int> master-slot: 6;
+    in property <[EffectRow]> master-effects: Platform.uses-mock-data ? MockData.master-effects : [];
+    in property <float> master-volume-db: Platform.uses-mock-data ? MockData.master-volume-db : 0;
+    in property <bool> master-muted: false;
+    // The master chain's last error; empty if none.
+    in property <string> master-status;
+    // The metronome. `metronome-beat` is the beat it's on (0 = a bar's first),
+    // -1 while stopped; `metronome-volume` is 0..1.
+    in property <bool> metronome-playing: false;
+    in property <int> metronome-bpm: Platform.uses-mock-data ? MockData.metronome-bpm : 120;
+    in property <int> min-bpm: 20;
+    in property <int> max-bpm: 300;
+    in property <float> metronome-volume: 0.5;
+    in property <int> metronome-beats: 4;
+    in property <int> metronome-beat: -1;
+    // Its time signature and subdivision, as indices into the lists of each.
+    in property <[string]> metronome-signatures;
+    in property <int> metronome-signature;
+    in property <[string]> metronome-subdivisions;
+    in property <int> metronome-subdivision;
 }
 
 // Plugin categories, as the picker's tabs and `category` arguments number them.
@@ -87,9 +105,6 @@ export global AppLogic {
     callback toggle-midi-device(/* input */ int, /* device name */ string);
     // Makes the slot listen to the input, or stop listening.
     callback toggle-slot-input(/* slot */ int, /* input */ int);
-    callback add-plugin-folder();
-    callback remove-plugin-folder(string);
-    callback rescan-plugins();
     // Refills `AppState.picker-rows` with `category`'s plugins matching `query`.
     callback filter-picker(/* category */ int, /* query */ string);
     callback toggle-pin(/* plugin id */ string);
@@ -178,4 +193,18 @@ export global AppLogic {
     callback duplicate-scene(/* index */ int);
     // Moves the scene at row `from` to row `to`.
     callback move-scene(/* from */ int, /* to */ int);
+    // The right sidebar: master output, metronome, MIDI panic, Settings.
+    callback set-master-volume(/* dB */ float);
+    callback toggle-master-mute();
+    callback toggle-metronome();
+    callback set-metronome-bpm(int);
+    // A tap on Tap: after a few, the tempo follows the taps.
+    callback tap-tempo();
+    callback set-metronome-volume(/* 0..1 */ float);
+    callback set-metronome-signature(/* index */ int);
+    callback set-metronome-subdivision(/* index */ int);
+    // All notes off and controllers reset, on every slot and channel.
+    callback midi-panic();
+    // Opens the Settings window (plugin folders and scanning).
+    callback open-settings();
 }

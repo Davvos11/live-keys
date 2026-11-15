@@ -22,6 +22,26 @@ pub struct AppConfig {
     /// window's preset browser. Unique across plugins (a preset URI or file path).
     #[serde(default)]
     pub pinned_presets: Vec<String>,
+    /// The master output's volume in dB (at or below [`MIN_VOLUME_DB`]:
+    /// silent), and whether it's muted.
+    #[serde(default)]
+    pub master_volume_db: f32,
+    #[serde(default)]
+    pub master_muted: bool,
+    #[serde(default)]
+    pub metronome: crate::metronome::MetronomeConfig,
+}
+
+impl AppConfig {
+    /// The master output's linear gain.
+    pub fn master_gain(&self) -> f32 {
+        gain(self.master_volume_db, self.master_muted)
+    }
+}
+
+/// Linear gain for `volume_db`, or silence while muted or at the bottom.
+fn gain(volume_db: f32, muted: bool) -> f32 {
+    if muted || volume_db <= MIN_VOLUME_DB { 0.0 } else { 10f32.powf(volume_db / 20.0) }
 }
 
 /// One MIDI input: the devices feeding it.
@@ -132,11 +152,7 @@ impl SlotConfig {
 
     /// Linear gain for [`SlotConfig::volume_db`], or silence while muted.
     pub fn gain(&self) -> f32 {
-        if self.muted || self.volume_db <= MIN_VOLUME_DB {
-            0.0
-        } else {
-            10f32.powf(self.volume_db / 20.0)
-        }
+        gain(self.volume_db, self.muted)
     }
 }
 
