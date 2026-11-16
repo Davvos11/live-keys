@@ -327,6 +327,15 @@ impl Synth {
         }
     }
 
+    /// Selects a keyswitch (`sw_last`) directly, as if its key had been played.
+    pub fn set_keyswitch(&mut self, key: Option<u8>) {
+        self.keyswitch = key;
+    }
+
+    pub fn keyswitch(&self) -> Option<u8> {
+        self.keyswitch
+    }
+
     /// −8192..=8191.
     pub fn pitch_bend(&mut self, value: i32) {
         self.bend = (value as f32 / 8192.0).clamp(-1.0, 1.0);
@@ -374,7 +383,7 @@ impl Synth {
             }
             // SAFETY: streamed data stays allocated while the voice counts as a user.
             let stream = unsafe { voice.stream.0.as_ref() };
-            let underrun = render_voice(voice, region, sample, stream, &live, *sample_rate, left, right);
+            let underrun = render_voice(voice, sample, stream, &live, *sample_rate, left, right);
             if underrun && let Some(streams) = streams.as_ref() {
                 streams.count_underrun();
             }
@@ -649,6 +658,8 @@ struct Live {
     /// Cents added to the voice's cutoff.
     cutoff: f32,
     resonance: f32,
+    /// dB.
+    fil_gain: f32,
     fileg_depth: f32,
     pitcheg_depth: f32,
     amplfo_depth: f32,
@@ -667,6 +678,7 @@ fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], v
         pitch: 0.0,
         cutoff: 0.0,
         resonance: region.resonance,
+        fil_gain: region.fil_gain,
         fileg_depth: region.fileg_depth,
         pitcheg_depth: region.pitcheg_depth,
         amplfo_depth: region.amplfo.depth,
@@ -690,6 +702,7 @@ fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], v
             Target::Pitch => live.pitch += value,
             Target::Cutoff => live.cutoff += value,
             Target::Resonance => live.resonance += value,
+            Target::FilGain => live.fil_gain += value,
             Target::FilEgDepth => live.fileg_depth += value,
             Target::PitchEgDepth => live.pitcheg_depth += value,
             Target::AmpLfoDepth => live.amplfo_depth += value,
@@ -743,7 +756,6 @@ fn stop(voice: &mut Voice, streams: &Option<StreamClient>) {
 #[allow(clippy::too_many_arguments)]
 fn render_voice(
     voice: &mut Voice,
-    region: &Region,
     sample: Option<&Sample>,
     stream: Option<&StreamData>,
     live: &Live,
@@ -764,9 +776,11 @@ fn render_voice(
         let n = CONTROL_BLOCK.min(frames - start);
         let cents = live.pitch + voice.pitcheg.level() * live.pitcheg_depth + voice.pitchlfo.value() * live.pitchlfo_depth;
         let step = voice.step * (cents as f64 / 1200.0).exp2();
+        let mut filtering = false;
         if let Some(filter) = &mut voice.filter {
             let cents = live.cutoff + voice.fileg.level() * live.fileg_depth + voice.fillfo.value() * live.fillfo_depth;
-            filter.set(voice.cutoff * cents_to_ratio(cents), live.resonance, region.fil_gain, sample_rate);
+            filter.set(voice.cutoff * cents_to_ratio(cents), live.resonance, live.fil_gain, sample_rate);
+            filtering = !filter.is_identity();
         }
         let lfo_target = if live.amplfo_depth == 0.0 { 1.0 } else { db_to_gain(voice.amplfo.value() * live.amplfo_depth) };
         let lfo_step = (lfo_target - voice.lfo_gain) / n as f32;
@@ -782,7 +796,7 @@ fn render_voice(
                 *m += d;
             }
             let (mut l, mut r) = next_frame(voice, sample, stream, step, &mut underrun);
-            if let Some(filter) = &mut voice.filter {
+            if filtering && let Some(filter) = &mut voice.filter {
                 l = filter.process(0, l);
                 r = if voice.mono { l } else { filter.process(1, r) };
             }

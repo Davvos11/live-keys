@@ -19,6 +19,7 @@
 //! Not yet: SFZ v2's numbered LFOs/envelopes (`lfoN_*`, `egN_*`), a second
 //! filter, effects.
 
+pub mod controls;
 mod curve;
 mod instrument;
 pub mod parse;
@@ -27,6 +28,7 @@ mod sample;
 mod stream;
 mod synth;
 
+pub use controls::{Control, ControlTarget};
 pub use curve::Curve;
 pub use instrument::{CC_COUNT, DEFAULT_HEAD_FRAMES, Instrument, Preload};
 pub use region::{Generator, LfoSettings, LoopMode, Region, Trigger};

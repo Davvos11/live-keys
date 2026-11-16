@@ -4,7 +4,8 @@
 // (https://github.com/sfzinstruments/SalamanderGrandPiano): samples by Alexander Holm,
 // retuned version by Markus Fiedler, SFZ reconstructed by kinwie. Licensed under
 // CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/), like the original.
-// Changes: the key-release noises use trigger=release_key (marked "live-keys:").
+// Changes (marked "live-keys:"): the key-release noises use trigger=release_key;
+// controllers for brightness (a high shelf), tuning and stereo width.
 // Includes and samples resolve against the downloaded sample folder.
 
 // --------------------------------------
@@ -26,6 +27,10 @@
 #define $RELEASE 72
 #define $OFFSET 98
 #define $VELTRACK 99
+// live-keys: our own controls
+#define $BRIGHT 23
+#define $TUNE 24
+#define $WIDTH 25
 
 //keyswitch
 #define $NATURAL C0
@@ -48,6 +53,9 @@ label_cc$PEDAL=Pedal Noise
 label_cc$RELEASE=Release
 label_cc$OFFSET=Offset
 label_cc$VELTRACK=Veltrack
+label_cc$BRIGHT=Brightness
+label_cc$TUNE=Tune
+label_cc$WIDTH=Width
 
 set_cc7=100
 set_hdcc10=0.5
@@ -57,10 +65,17 @@ set_hdcc$PEDAL=0.5
 set_hdcc$RELEASE=0.5
 set_hdcc$OFFSET=0
 set_hdcc$VELTRACK=0.73
+set_hdcc$BRIGHT=0.5
+set_hdcc$TUNE=0.5
+set_hdcc$WIDTH=1
 
 
 //========================
 <global>
+// live-keys: brightness ±12 dB above 1.5 kHz, tuning ±100 cents, width 0–100 %
+fil_type=hsh cutoff=1500 fil_gain_oncc$BRIGHT=12 fil_gain_curvecc$BRIGHT=1
+pitch_oncc$TUNE=100 pitch_curvecc$TUNE=1
+width=0 width_oncc$WIDTH=100
 amplitude_oncc7=100
 amplitude_curvecc7=4
 pan_oncc10=100
@@ -91,6 +106,10 @@ sw_label=Retuned
 
 //========================
 <global>
+// live-keys: brightness ±12 dB above 1.5 kHz, tuning ±100 cents, width 0–100 %
+fil_type=hsh cutoff=1500 fil_gain_oncc$BRIGHT=12 fil_gain_curvecc$BRIGHT=1
+pitch_oncc$TUNE=100 pitch_curvecc$TUNE=1
+width=0 width_oncc$WIDTH=100
 amplitude_oncc7=100
 amplitude_curvecc7=4
 pan_oncc10=100
@@ -114,6 +133,10 @@ trigger=release_key
 
 //========================
 <global>
+// live-keys: brightness ±12 dB above 1.5 kHz, tuning ±100 cents, width 0–100 %
+fil_type=hsh cutoff=1500 fil_gain_oncc$BRIGHT=12 fil_gain_curvecc$BRIGHT=1
+pitch_oncc$TUNE=100 pitch_curvecc$TUNE=1
+width=0 width_oncc$WIDTH=100
 amplitude_oncc7=100
 amplitude_curvecc7=4
 pan_oncc10=100

@@ -73,6 +73,8 @@ pub enum Target {
     Cutoff,
     /// dB, added.
     Resonance,
+    /// dB, added to `fil_gain` (shelves and peaking filters).
+    FilGain,
     /// Cents, added to the envelope's depth.
     FilEgDepth,
     PitchEgDepth,
@@ -120,6 +122,7 @@ impl Target {
             "ampeg_release" => Target::EgRelease,
             "cutoff" => Target::Cutoff,
             "resonance" => Target::Resonance,
+            "fil_gain" => Target::FilGain,
             "fileg_depth" => Target::FilEgDepth,
             "pitcheg_depth" => Target::PitchEgDepth,
             "amplfo_depth" => Target::AmpLfoDepth,

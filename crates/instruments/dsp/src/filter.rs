@@ -113,6 +113,19 @@ impl Filter {
         }
     }
 
+    /// Whether the filter passes its input through unchanged as set (a bell or
+    /// shelf at 0 dB), so processing it can be skipped. Its state is cleared
+    /// then, so it starts clean when it changes.
+    pub fn is_identity(&mut self) -> bool {
+        let identity = self.stages[..self.count]
+            .iter()
+            .all(|stage| matches!(*stage, Stage::Svf { m0, m1, m2, .. } if m0 == 1.0 && m1 == 0.0 && m2 == 0.0));
+        if identity {
+            self.reset();
+        }
+        identity
+    }
+
     /// Filters one sample of `channel` (0 or 1).
     #[inline]
     pub fn process(&mut self, channel: usize, x: f32) -> f32 {
@@ -184,6 +197,20 @@ mod tests {
         near(response(FilterMode::HighPass2, 1000.0, 0.0, 0.0, 1000.0), -3.0, 0.2);
         near(response(FilterMode::HighPass4, 1000.0, 0.0, 0.0, 250.0), -48.0, 2.0);
         near(response(FilterMode::HighPass1, 1000.0, 0.0, 0.0, 10000.0), 0.0, 0.2);
+    }
+
+    #[test]
+    fn flat_bells_and_shelves_are_identities() {
+        for mode in [FilterMode::Bell, FilterMode::LowShelf, FilterMode::HighShelf] {
+            let mut filter = Filter::new(mode);
+            filter.set(1500.0, 0.0, 0.0, RATE);
+            assert!(filter.is_identity(), "{mode:?}");
+            filter.set(1500.0, 0.0, 0.5, RATE);
+            assert!(!filter.is_identity(), "{mode:?}");
+        }
+        let mut filter = Filter::new(FilterMode::LowPass2);
+        filter.set(20000.0, 0.0, 0.0, RATE);
+        assert!(!filter.is_identity());
     }
 
     #[test]

@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 live-keys-sfz = { path = "../sfz" }
 anyhow = "1"
+dirs = "7"
