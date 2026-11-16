@@ -2941,6 +2941,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "live-keys-builtin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "live-keys-core",
+ "live-keys-piano",
+ "live-keys-sfz",
+ "log",
+]
+
+[[package]]
 name = "live-keys-clap-host"
 version = "0.1.0"
 dependencies = [
@@ -2985,6 +2997,7 @@ dependencies = [
  "cpal",
  "dirs",
  "env_logger",
+ "live-keys-builtin",
  "live-keys-clap-host",
  "live-keys-core",
  "live-keys-lv2-host",

@@ -49,6 +49,7 @@ const SHIPPED: &[(&str, &str)] = &[
     ("helm.json", include_str!("../profiles/helm.json")),
     ("surge-xt.json", include_str!("../profiles/surge-xt.json")),
     ("vital.json", include_str!("../profiles/vital.json")),
+    ("piano.json", include_str!("../profiles/piano.json")),
 ];
 
 /// The user's rows, in the user's profile folder.

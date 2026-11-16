@@ -2,6 +2,15 @@
 
 Plugin host (LV2, VST3 and CLAP) focussed on playing keyboard live.
 
+It also has instruments of its own. The first is a sampled grand piano ("Grand Piano" in the
+plugin picker) on the [Salamander Grand Piano](https://github.com/sfzinstruments/SalamanderGrandPiano)
+samples by Alexander Holm (CC BY 3.0). Its samples (~720 MB) aren't included yet; download them
+into the folder it reads them from:
+
+```shell
+git clone --depth 1 https://github.com/sfzinstruments/SalamanderGrandPiano ~/.local/share/live-keys/samples/salamander
+```
+
 ## Dev dependencies
 
 ```shell

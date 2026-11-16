@@ -65,6 +65,19 @@ const NO_WAIT: Duration = Duration::ZERO;
 
 pub const CASES: &[Case] = &[
     Case {
+        name: "builtin-piano",
+        plugin: "builtin:piano",
+        quirks: "our own instrument (live-keys-builtin): streamed samples, no GUI of its own, \
+                 needs the Salamander samples downloaded",
+        role: Role::Instrument,
+        sound: true,
+        param: param("Brightness", Target::Min, None),
+        resize: Resize::NoGui,
+        atoms: false,
+        inline_display: false,
+        warmup: NO_WAIT,
+    },
+    Case {
         name: "lv2-plain",
         plugin: "http://drobilla.net/plugins/mda/EPiano",
         quirks: "LV2 baseline: control ports only, no state, no GUI",

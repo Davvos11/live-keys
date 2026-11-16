@@ -1,0 +1,16 @@
+{
+  "plugin": "builtin:piano",
+  "controls": [
+    { "id": "dynamics", "label": "Touch", "name": "Dynamics", "target": { "param": "dynamics" } },
+    { "id": "brightness", "label": "Bright", "name": "Brightness", "target": { "param": "brightness" } },
+    { "id": "release", "label": "Release", "target": { "param": "release" } },
+    { "id": "resonance", "label": "Strings", "name": "String resonance", "target": { "param": "resonance" } },
+    { "id": "key-noise", "label": "Key noise", "target": { "param": "key_noise" } },
+    { "id": "pedal-noise", "label": "Pedal", "name": "Pedal noise", "target": { "param": "pedal_noise" } },
+    { "id": "width", "label": "Width", "name": "Stereo width", "target": { "param": "width" } },
+    { "id": "tune", "label": "Tune", "target": { "param": "tune" } },
+    { "id": "tuning", "label": "Tuning", "widget": "lever", "choices": ["Nat.", "Ret."],
+      "target": { "param": "tuning" } }
+  ],
+  "row": ["dynamics", "brightness", "release", "resonance", "key-noise", "pedal-noise", "width", "tune", "tuning"]
+}

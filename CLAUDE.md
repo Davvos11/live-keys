@@ -129,10 +129,11 @@ cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # lis
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz -p live-keys-dsp
+cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz -p live-keys-dsp -p live-keys-piano -p live-keys-builtin
   # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
   # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels,
-  # SFZ parsing, curves, voice logic and streaming; filter responses, LFOs, envelopes)
+  # SFZ parsing, curves, voice logic and streaming; filter responses, LFOs, envelopes;
+  # instrument state files and presets)
 
 # The SFZ engine on its own (not part of the app yet). Salamander, for testing, lives in
 # ~/.local/share/live-keys/samples/salamander/ (git clone of sfzinstruments/SalamanderGrandPiano)
@@ -247,7 +248,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with thirteen crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with fourteen crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -267,11 +268,11 @@ behind format-agnostic cores:
     host with nothing to feed must zero them). `midi_output()` (default: empty) is the MIDI
     the last `process` produced — a MIDI effect's output, fed to the next chain stage.
     `set_param` applies one `ParamChange`.
-  - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`/`Clap`),
+  - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`/`Clap`/`Builtin`),
     `PluginKind` (`Instrument` = MIDI → audio, `MidiEffect` = MIDI → MIDI, `AudioEffect` =
     audio → audio and anything else), `PluginInfo` (`id`, name, format, kind — `id` is unique
-    across formats: an LV2 URI, `vst3:` + the VST3 class ID in hex, or `clap:` + the CLAP
-    plugin id), and `ParamInfo` (`id`, `symbol` — a stable reference for panel profiles: the
+    across formats: an LV2 URI, `vst3:` + the VST3 class ID in hex, `clap:` + the CLAP
+    plugin id, or `builtin:` + one of our instruments' id), and `ParamInfo` (`id`, `symbol` — a stable reference for panel profiles: the
     LV2 port symbol, or the VST3/CLAP id in decimal —
     name, default/min/max, `kind: ParamKind`, `steps`, `logarithmic`, `unit`, `choices`).
     A `ParamInfo`'s id and values are in the format's own terms — an LV2 control-input port
@@ -654,9 +655,10 @@ behind format-agnostic cores:
   simplification below). Getting this wrong previously left the tail of any oversized callback
   buffer unwritten — heard as short bursts of correct audio cutting to stale/silent output on
   outputs with a large negotiated period. All buffers involved are pre-allocated before
-  `stream.play()`, never inside the callback. `Engine::list_plugins` merges every format (LV2,
-  then VST3, then CLAP); instantiation dispatches on the id (`vst3:` prefix → `Vst3Host`,
-  `clap:` → `ClapHost`, else `Lv2Host`).
+  `stream.play()`, never inside the callback. `Engine::list_plugins` merges every format (our
+  built-in instruments, then LV2, VST3, CLAP); instantiation dispatches on the id (`builtin:`
+  prefix → `BuiltinHost`, `vst3:` → `Vst3Host`, `clap:` → `ClapHost`, else `Lv2Host`). The
+  `BuiltinHost` needs no scan; it's made with the others when a scan is installed.
   Scanning is a `PluginScan`: `PluginScan::start(extra_dirs)` sets `LV2_PATH` to the default
   folders plus the extra ones (see `paths.rs`), builds the LV2 world on a thread of its own and
   starts a `Vst3Scan` and a `ClapScan` with the same folders, which `step` advances (VST3,
@@ -671,7 +673,11 @@ behind format-agnostic cores:
   `ParamInfo`s for a parameter-editor UI — and `editor: PluginEditor`, all captured at load time
   since the running plugin itself lives in the audio callback). `PluginEditor` is what opening
   the plugin's own GUI or handling its presets needs, per format: `Lv2 { plugin, features,
-  raw_handle, instance }`, `Vst3(Vst3Controller)` or `Clap(ClapController)`. The meta also
+  raw_handle, instance }`, `Vst3(Vst3Controller)`, `Clap(ClapController)` or `Builtin` (no
+  GUI of its own — `gui_supported` is false, so the parameter window and the slot's panel are
+  its UI; presets and state files through `BuiltinHost`: loading queues every parameter's
+  value as a param change, saving writes `Engine::param_value`s — no lending, the recorded
+  values are its whole state). The meta also
   records the last value sent per parameter (`Engine::param_value`, falling back to the
   default) — every value change goes through `send_param_change`/`set_param`, and preset loads
   record theirs — since the running plugin can't be asked (a CLAP one can, on the main thread:
@@ -827,7 +833,7 @@ behind format-agnostic cores:
   through `slot_view::position`/`knob_value` —, `On`, or `Index`: the nearest choice, or a
   drawbar's level 0..=8; setBfree's drawbars are inverted, `level = rint((127 − v)·8/127)`), and
   `value_text` shows it. Shipped profiles are `crates/gui/profiles/*.json` (setBfree, mda
-  EPiano, Helm, Surge XT and Vital — the CLAP builds), compiled in (`SHIPPED`; add new ones
+  EPiano, Helm, Surge XT and Vital — the CLAP builds — and our piano, `builtin:piano`), compiled in (`SHIPPED`; add new ones
   there); a control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
   out if the plugin lacks it. User profiles are `<data dir>/live-keys/profiles/*.json` (same
   format, replacing a shipped one wholesale), and `rows.json` there is the user's row per
@@ -1172,6 +1178,14 @@ behind format-agnostic cores:
   (`sample=*sine`, `*saw`, `*noise`…) are the hook for modelled layers. Not yet: SFZ v2's
   numbered `lfoN_*`/`egN_*`, a second filter, effects, loop points from the file.
 
+- **`crates/instruments/sfz` controls** — `controls.rs`: `Control` (symbol, name, range,
+  default, unit, choices, `ControlTarget::Cc(n)` — scaled linearly onto 0..1 — or
+  `Keyswitch(keys)`), `Control::apply(synth, value)` (real-time safe), and the instruments'
+  state format: `write_state`/`read_state`, `symbol = value` lines, `#` comments, unknown
+  symbols ignored, missing ones at their defaults. `Synth::set_keyswitch` selects a keyswitch
+  directly; `fil_gain` is a CC target too. A bell or shelf at 0 dB is skipped
+  (`Filter::is_identity`).
+
 - **`crates/instruments/dsp`** (`live-keys-dsp`) — DSP building blocks for our instruments,
   shared by the SFZ engine and any synth later; no dependencies, nothing SFZ-specific, all
   `Copy` and real-time safe. `filter.rs`: `Filter` — Simper's trapezoidal SVF (stable under
@@ -1184,11 +1198,26 @@ behind format-agnostic cores:
   given time, done at −80 dB; `tick` per sample, `advance(n)` for modulation). `convert.rs`: dB,
   cents, note ↔ Hz. Unit-tested (filter responses measured on sines, LFO timing, envelope).
 
-- **`crates/instruments/piano`** (`live-keys-piano`) — the Salamander piano: its own SFZ
-  (`salamander.sfz`, compiled in as `SFZ`; Salamander's file with the key-release noises on
-  `release_key`) and `load(sample_dir)`, which reads it against the downloaded samples
-  (`Instrument::from_sfz` with the sample folder as base). The panel and the built-in
-  front-end come here later.
+- **`crates/instruments/piano`** (`live-keys-piano`) — the Salamander piano, host-agnostic: its
+  own SFZ (`salamander.sfz`, compiled in as `SFZ`; Salamander's file with the key-release noises
+  on `release_key`, plus controllers 23–25 for brightness — a ±12 dB high shelf at 1.5 kHz —,
+  tune and width, neutral by default), `CONTROLS` (nine `live_keys_sfz::Control`s, each an SFZ
+  controller of that file or the natural/retuned keyswitch; their defaults equal the SFZ's
+  `set_hdcc`s, unit-tested), `PRESETS` (shipped: name + the controls that differ from their
+  defaults), `default_sample_dir()` (`<data dir>/live-keys/samples/salamander/`) and
+  `load(sample_dir)` (an error saying the samples aren't installed if they aren't).
+
+- **`crates/builtin`** (`live-keys-builtin`) — our instruments as plugins of the built-in format
+  (`PluginFormat::Builtin`), the only crate that knows both an instrument core and live-keys'
+  plugin API. `DEFINITIONS` lists the cores (id, name, controls, presets, voices, loader);
+  `BuiltinHost` lists them (`builtin:` + id), instantiates a `BuiltinPlugin` (a `HostedPlugin`
+  around a `Synth`: renders between MIDI events' frame offsets; `set_param` = the control's
+  `apply`), loading an instrument once and sharing it (a `Weak` per core) while any instance
+  holds it, and handles presets: shipped ones (`shipped\t<name>` ids) and user ones as files in
+  the core's state format (`<data dir>/live-keys/presets/<core id>/<name>.lkpreset`, `file\t<path>`
+  ids); state files (`.lkstate`, for slot presets and the session) are the same format.
+  Parameters are the controls: id = index, symbol = the control's symbol, values in its range
+  (a choice: 0, 1, …).
 
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
   around `live-keys-engine` (loads its one `--plugin` into slot 0), then loops calling
@@ -1354,7 +1383,8 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
    deprecated/unlicensable for new distribution, mainly for loading legacy plugins.
 
 Each format gets its own adapter crate implementing `HostedPlugin`, keeping per-format unsafe/FFI
-code isolated from the core audio graph and MIDI routing.
+code isolated from the core audio graph and MIDI routing. Our own instruments are a format of
+their own, `Builtin` (`crates/builtin`), plain Rust with no FFI.
 
 Plans beyond the formats — integrated first-party plugins, per-plugin panel profiles, user
 mapping of third-party plugins, and inline effect views (Ardour's LV2 inline-display

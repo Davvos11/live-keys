@@ -623,7 +623,8 @@ Open:
 4. **The truce spike** (can run in parallel with 1–3).
 5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (the Salamander
    piano, see `own-plugins.md`) with its built-in front-end, its standalone build and shipped
-   presets.
+   presets. (Done, 2026-11-16, but the standalone build: `crates/builtin`, the SFZ engine and
+   the piano in `crates/instruments/`.)
 6. First built-in effect (a compressor) with the effect popup and its interactive graph.
 7. **Recommended plugins** (Part D): the `.deb`'s `Recommends` (any time), then the install
    window (needed by 5 for the piano's samples).

@@ -8,6 +8,7 @@ use live_keys_lv2_host::{
     GuiLeases, InlineDisplay, InlinePicture, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw,
 };
 use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
+use live_keys_builtin::BuiltinHost;
 use live_keys_clap_host::{ClapController, ClapHost, ClapScan};
 
 use std::collections::HashMap;
@@ -96,6 +97,9 @@ pub enum PluginEditor {
     /// The plugin's main-thread half, which [`Engine::idle_plugins`] pumps. Its
     /// GUI is created from it.
     Clap(ClapController),
+    /// One of our own instruments: no GUI of its own (the slot's panel and the
+    /// parameter window are its UI); presets from `live-keys-builtin`.
+    Builtin,
 }
 
 /// The main-thread view of one loaded plugin, captured at load time since the
@@ -241,11 +245,13 @@ impl StateSource<'_> {
 /// (CLI, GUI) shares one implementation instead of drifting apart.
 const NOT_SCANNED: &str = "plugins haven't been scanned yet";
 
-/// Every format's host, from one [`PluginScan`].
+/// Every format's host, from one [`PluginScan`] (plus our own instruments,
+/// which need no scan).
 struct Hosts {
     lv2: Lv2Host,
     vst3: Vst3Host,
     clap: ClapHost,
+    builtin: BuiltinHost,
 }
 
 /// A plugin scan in progress: LV2 on a thread of its own, VST3 and CLAP a step
@@ -289,7 +295,7 @@ impl PluginScan {
             Ok(scan) => scan,
             Err(panic) => std::panic::resume_unwind(panic),
         };
-        Hosts { lv2: Lv2Host::from_scan(lv2, max_block_size), vst3, clap }
+        Hosts { lv2: Lv2Host::from_scan(lv2, max_block_size), vst3, clap, builtin: BuiltinHost::new() }
     }
 }
 
@@ -347,10 +353,12 @@ impl Engine {
         }
     }
 
-    /// Every plugin found by the last scan, LV2 first, then VST3, then CLAP.
+    /// Our own instruments, then every plugin found by the last scan: LV2, then
+    /// VST3, then CLAP.
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
         let Some(hosts) = &self.hosts else { return Vec::new() };
-        let mut plugins = hosts.lv2.list_plugins();
+        let mut plugins = hosts.builtin.list_plugins();
+        plugins.extend(hosts.lv2.list_plugins());
         plugins.extend(hosts.vst3.list_plugins());
         plugins.extend(hosts.clap.list_plugins());
         plugins
@@ -829,6 +837,7 @@ impl Engine {
                 (Some(hosts), PluginFormat::Lv2) => hosts.lv2.presets(&meta.id),
                 (Some(hosts), PluginFormat::Vst3) => hosts.vst3.presets(&meta.id),
                 (Some(hosts), PluginFormat::Clap) => hosts.clap.presets(&meta.id),
+                (Some(hosts), PluginFormat::Builtin) => hosts.builtin.presets(&meta.id),
                 (None, _) => Vec::new(),
             },
             None => Vec::new(),
@@ -906,8 +915,26 @@ impl Engine {
                 let meta = self.plugin_mut(key).context("plugin isn't loaded")?;
                 meta.values.extend(values);
             }
+            PluginEditor::Builtin => {
+                let builtin = &self.hosts()?.builtin;
+                let values = match source {
+                    StateSource::Preset(id) => builtin.preset_values(&plugin_id, id)?,
+                    StateSource::File(path) => builtin.load_file(&plugin_id, path)?,
+                };
+                // Plain parameters: queued like any change, no gap.
+                for (id, value) in values {
+                    self.send_param_change(key, id, value);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// The current value of every parameter of the plugin with `key`, by id.
+    fn current_values(&self, key: PluginKey) -> HashMap<u32, f32> {
+        self.plugin(key)
+            .map(|meta| meta.params.iter().map(|p| (p.id, self.param_value(key, p.id).unwrap_or(p.default_value))).collect())
+            .unwrap_or_default()
     }
 
     /// Saves the current settings of the plugin with `key` as user preset `name`,
@@ -922,6 +949,10 @@ impl Engine {
             }),
             PluginEditor::Vst3(controller) => self.hosts()?.vst3.save_preset(controller, &plugin_id, name),
             PluginEditor::Clap(controller) => self.hosts()?.clap.save_preset(controller, &plugin_id, name),
+            PluginEditor::Builtin => {
+                let values = self.current_values(key);
+                self.hosts()?.builtin.save_preset(&plugin_id, name, &|id| values.get(&id).copied().unwrap_or_default())
+            }
         }
     }
 
@@ -948,6 +979,12 @@ impl Engine {
             PluginEditor::Clap(controller) => {
                 let path = dir.join(format!("{stem}.{}", live_keys_clap_host::STATE_FILE_EXTENSION));
                 self.hosts()?.clap.save_file(controller, &plugin_id, &path)?;
+                Ok(path)
+            }
+            PluginEditor::Builtin => {
+                let path = dir.join(format!("{stem}.{}", live_keys_builtin::STATE_FILE_EXTENSION));
+                let values = self.current_values(key);
+                self.hosts()?.builtin.save_file(&plugin_id, &path, &|id| values.get(&id).copied().unwrap_or_default())?;
                 Ok(path)
             }
         }
@@ -990,6 +1027,7 @@ impl Engine {
             PluginFormat::Lv2 => self.hosts()?.lv2.delete_preset(preset_id),
             PluginFormat::Vst3 => self.hosts()?.vst3.delete_preset(preset_id),
             PluginFormat::Clap => self.hosts()?.clap.delete_preset(&meta.id, preset_id),
+            PluginFormat::Builtin => self.hosts()?.builtin.delete_preset(&meta.id, preset_id),
         }
     }
 
@@ -1004,7 +1042,23 @@ impl Engine {
         let key = self.next_key;
         self.next_key += 1;
 
-        if plugin_id.starts_with(live_keys_vst3_host::ID_PREFIX) {
+        if plugin_id.starts_with(live_keys_builtin::ID_PREFIX) {
+            let builtin = &self.hosts()?.builtin;
+            let plugin = builtin
+                .instantiate(plugin_id, sample_rate, self.max_block_size)
+                .with_context(|| format!("failed to load built-in plugin '{plugin_id}'"))?;
+            let meta = LoadedPluginMeta {
+                key,
+                id: plugin_id.to_string(),
+                name: live_keys_core::HostedPlugin::name(&plugin).to_string(),
+                format: PluginFormat::Builtin,
+                params: builtin.params(plugin_id)?,
+                editor: PluginEditor::Builtin,
+                values: HashMap::new(),
+                setbfree: None,
+            };
+            Ok((Box::new(plugin), meta))
+        } else if plugin_id.starts_with(live_keys_vst3_host::ID_PREFIX) {
             let (plugin, controller) = self
                 .hosts()?
                 .vst3

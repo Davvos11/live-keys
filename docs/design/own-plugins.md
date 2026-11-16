@@ -62,9 +62,14 @@ Next steps, roughly in order:
   them for `fil_type`/`cutoff`/`resonance` with tracking, `fileg_*`/`pitcheg_*` and SFZ v1's
   `amplfo_*`/`fillfo_*`/`pitchlfo_*`, all controllable by CCs (Brightness can be `cutoff_onccN`
   on a gentle low-pass or shelf).
-- **The built-in front-end** (`PluginFormat::Builtin`) with the panel, mapping each control
-  onto an SFZ controller — Salamander already exposes string resonance, hammer noise, pedal
-  noise, release, offset and velocity tracking as CCs 20–22, 72, 98, 99.
+- **The built-in front-end** (done, 2026-11-16): `PluginFormat::Builtin` (`crates/builtin`),
+  the piano as `builtin:piano` ("Grand Piano") in the plugin picker, with a panel profile.
+  Each control drives one SFZ controller of our SFZ (Salamander's own: string resonance, key
+  noise, pedal noise, release, velocity tracking; ours: brightness, tune, width) or the
+  natural/retuned keyswitch. Five shipped presets; user presets and state files in the
+  core's own text format (`symbol = value`). Next: the install window for the samples (until
+  then, loading the piano without them says where they're expected), and the standalone
+  build (truce), which should read the same state files.
 - SFZ v2's numbered LFOs and envelopes (`lfoN_*`, `egN_*`) if an instrument needs them; loop
   points read from the file (`smpl` chunk) for instruments that loop; OGG samples.
 
@@ -74,6 +79,10 @@ synthesised next to sampled ones. That's the hook for modelled sound: our own ge
 (a tine, a reed, sympathetic resonance) with per-voice state, chosen per region like a sample.
 The e-piano could be a sampled attack with a modelled sustain; the piano's sympathetic
 resonance could be modelled instead of sampled.
+
+**Panel (built, 2026-11-16):** Touch (dynamics), Release, Key noise, Width and a
+Natural/Retuned lever on top; Brightness, String resonance, Pedal noise and Tune below. No
+reverb or EQ of its own: those are the slot's effects. The first ideas were:
 
 **Panel (first ideas, for the slot's first tab).** No drawbars, so up to ten controls:
 

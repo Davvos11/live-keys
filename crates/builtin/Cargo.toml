@@ -1,0 +1,15 @@
+[package]
+name = "live-keys-builtin"
+description = "live-keys' own instruments as plugins of the built-in format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+live-keys-core = { path = "../core" }
+live-keys-sfz = { path = "../instruments/sfz" }
+live-keys-piano = { path = "../instruments/piano" }
+anyhow = "1"
+dirs = "7"
+log = "0.4"

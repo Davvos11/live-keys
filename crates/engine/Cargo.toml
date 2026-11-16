@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+live-keys-builtin = { path = "../builtin" }
 live-keys-core = { path = "../core" }
 live-keys-lv2-host = { path = "../lv2-host" }
 live-keys-vst3-host = { path = "../vst3-host" }

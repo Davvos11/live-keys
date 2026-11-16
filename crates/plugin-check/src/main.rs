@@ -460,6 +460,7 @@ fn open_editor(engine: &Engine, key: PluginKey, tx: mpsc::Sender<Edit>) -> Resul
             }
             Ok((Editor::Clap(ClapEditor::open(controller, &meta.name)?), "CLAP GUI"))
         }
+        PluginEditor::Builtin => Err(skip("built in: no GUI of its own")),
     }
 }
 

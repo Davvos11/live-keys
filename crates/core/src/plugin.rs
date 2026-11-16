@@ -7,6 +7,8 @@ pub enum PluginFormat {
     Lv2,
     Vst3,
     Clap,
+    /// live-keys' own instruments (`live-keys-builtin`).
+    Builtin,
 }
 
 impl PluginFormat {
@@ -15,6 +17,7 @@ impl PluginFormat {
             PluginFormat::Lv2 => "LV2",
             PluginFormat::Vst3 => "VST3",
             PluginFormat::Clap => "CLAP",
+            PluginFormat::Builtin => "Built-in",
         }
     }
 }
@@ -45,8 +48,8 @@ impl PluginKind {
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     /// Identifies the plugin across scans and app restarts, unique across formats:
-    /// an LV2 plugin's URI, `vst3:` + a VST3 class ID in hex, or `clap:` + a CLAP
-    /// plugin id.
+    /// an LV2 plugin's URI, `vst3:` + a VST3 class ID in hex, `clap:` + a CLAP
+    /// plugin id, or `builtin:` + one of our own instruments' id.
     pub id: String,
     pub name: String,
     pub format: PluginFormat,

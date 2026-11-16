@@ -101,6 +101,8 @@ fn gui_supported(meta: &LoadedPluginMeta) -> bool {
         }
         PluginEditor::Vst3(_) => true,
         PluginEditor::Clap(controller) => controller.has_gui(),
+        // Our own instruments' UI is the slot's panel and the parameter window.
+        PluginEditor::Builtin => false,
     }
 }
 
@@ -1875,6 +1877,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Its edits come through `Engine::idle_plugins`.
                 PluginEditor::Clap(controller) => ClapEditor::open(controller, &meta.name).map(OpenEditor::Clap),
+                PluginEditor::Builtin => Err(anyhow::anyhow!("it has no GUI of its own")),
             };
             let error = match opened {
                 Ok(editor) => {
