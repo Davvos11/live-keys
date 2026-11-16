@@ -62,6 +62,7 @@ jobs:
           cp crates/gui/ui/assets/fonts/OFL.txt "$name/licenses/SourceSans3-OFL.txt"
           cp crates/gui/ui/assets/icons/LICENSE "$name/licenses/Lucide-LICENSE.txt"
           cp crates/gui/ui/assets/photos/CREDITS.md "$name/licenses/photo-credits.md"
+          cp crates/instruments/piano/CREDITS.md "$name/licenses/piano-credits.md"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"

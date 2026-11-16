@@ -51,6 +51,7 @@ assets = [
     ["ui/assets/fonts/OFL.txt", "usr/share/doc/live-keys/SourceSans3-OFL.txt", "644"],
     ["ui/assets/icons/LICENSE", "usr/share/doc/live-keys/Lucide-LICENSE.txt", "644"],
     ["ui/assets/photos/CREDITS.md", "usr/share/doc/live-keys/photo-credits.md", "644"],
+    ["../instruments/piano/CREDITS.md", "usr/share/doc/live-keys/piano-credits.md", "644"],
 ]
 
 # The same package, plus the APT repository as a source (and its key), so later releases come

@@ -176,8 +176,9 @@ Our own instruments' sample sets aren't compiled in or shipped: they're download
 (see `docs/design/own-plugins.md`). Their licence is CC0 or CC BY (no NonCommercial or
 ShareAlike), credited. The piano's SFZ (`crates/instruments/piano/salamander.sfz`, compiled
 into `live-keys-piano`) is adapted from sfzinstruments' Salamander SFZ, CC BY 3.0: its header
-credits the authors and says what changed. Once the piano ships in the app, that credit goes
-into the app's credits and `licenses/`, like the assets above.
+credits the authors and says what changed; `crates/instruments/piano/CREDITS.md` ships with
+the release tarball (`licenses/piano-credits.md`) and the `.deb`
+(`usr/share/doc/live-keys/piano-credits.md`), like the assets above.
 
 There is no lint/format/test CI in this repo yet (the only workflow builds releases, see below).
 Run `cargo clippy --workspace --all-targets` once a feature/request is otherwise complete and fix
