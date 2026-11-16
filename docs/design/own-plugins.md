@@ -56,12 +56,17 @@ Next steps, roughly in order:
   rendering at real-time pace, even with heads of 64 frames (on an NVMe disk); peak ~190 MB
   for the test passage. Details in CLAUDE.md. Later, if disks turn out slower: decode only
   what's ahead of each voice instead of whole files.
-- **Filters** (`fil_type`, `cutoff`, `resonance`, `fil_veltrack`, `_oncc`), for Brightness.
+- **Filters, modulation envelopes, LFOs** (done, 2026-11-16): reusable building blocks in
+  `crates/instruments/dsp` (`live-keys-dsp`) — state-variable filters in every mode, LFOs,
+  DAHDSR envelopes — for the SFZ engine now and our own synthesis later. The SFZ engine uses
+  them for `fil_type`/`cutoff`/`resonance` with tracking, `fileg_*`/`pitcheg_*` and SFZ v1's
+  `amplfo_*`/`fillfo_*`/`pitchlfo_*`, all controllable by CCs (Brightness can be `cutoff_onccN`
+  on a gentle low-pass or shelf).
 - **The built-in front-end** (`PluginFormat::Builtin`) with the panel, mapping each control
   onto an SFZ controller — Salamander already exposes string resonance, hammer noise, pedal
   noise, release, offset and velocity tracking as CCs 20–22, 72, 98, 99.
-- LFOs and the pitch/filter envelopes, if an instrument needs them; loop points read from the
-  file (`smpl` chunk) for instruments that loop; OGG samples.
+- SFZ v2's numbered LFOs and envelopes (`lfoN_*`, `egN_*`) if an instrument needs them; loop
+  points read from the file (`smpl` chunk) for instruments that loop; OGG samples.
 
 **Sampled and modelled together.** SFZ's generators (`sample=*sine`, `*saw`, `*noise`) already
 play through the same regions, envelopes and controllers as samples, so a layer can be

@@ -4,17 +4,21 @@
 //! made. Voices come from a fixed pool; regions and samples are read through the
 //! shared, immutable instrument.
 
-use crate::envelope::Envelope;
 use crate::instrument::{CC_COUNT, Instrument};
-use crate::region::{Generator, LoopMode, OffMode, Region, Source, Target, Trigger};
+use crate::region::{Generator, LfoSettings, LoopMode, OffMode, Region, Source, Target, Trigger};
 use crate::sample::Sample;
 use crate::stream::{StreamClient, StreamData};
+use live_keys_dsp::convert::{cents_to_ratio, db_to_gain};
+use live_keys_dsp::{Envelope, Filter, Lfo, Waveform};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::sync::Arc;
 
 /// Fade for voices cut by `off_mode=fast` (and stolen ones), in seconds.
 const FAST_OFF: f32 = 0.006;
 const SUSTAIN_PEDAL: u16 = 64;
+/// Frames between updates of modulation (envelopes other than amplitude, LFOs,
+/// filter cutoff, pitch).
+const CONTROL_BLOCK: usize = 32;
 
 /// A voice's view of its sample's streamed data (null until loaded).
 #[derive(Clone, Copy)]
@@ -58,6 +62,18 @@ struct Voice {
     env: Envelope,
     /// Velocity, crossfades, key tracking, release decay.
     base_gain: f32,
+    /// One channel of source (mono samples, generators): filtered once.
+    mono: bool,
+    filter: Option<Filter>,
+    /// Hz, with key and velocity tracking; modulated from there.
+    cutoff: f32,
+    fileg: Envelope,
+    pitcheg: Envelope,
+    amplfo: Lfo,
+    fillfo: Lfo,
+    pitchlfo: Lfo,
+    /// The amplitude LFO's gain, ramped between control blocks.
+    lfo_gain: f32,
     /// Output = [ll·L + rl·R, lr·L + rr·R], ramped per block towards the target.
     matrix: [f32; 4],
 }
@@ -85,6 +101,15 @@ impl Voice {
         stream: StreamPtr(std::ptr::null()),
         env: Envelope::IDLE,
         base_gain: 0.0,
+        mono: true,
+        filter: None,
+        cutoff: 0.0,
+        fileg: Envelope::IDLE,
+        pitcheg: Envelope::IDLE,
+        amplfo: Lfo::OFF,
+        fillfo: Lfo::OFF,
+        pitchlfo: Lfo::OFF,
+        lfo_gain: 1.0,
         matrix: [0.0; 4],
     };
 
@@ -92,7 +117,9 @@ impl Voice {
         if !self.released {
             self.released = true;
             self.sustained = false;
-            self.env.release(self.release_time);
+            self.env.release();
+            self.fileg.release();
+            self.pitcheg.release();
         }
     }
 
@@ -107,7 +134,7 @@ impl Voice {
             OffMode::Normal => self.release_time,
             OffMode::Time => region.off_time,
         };
-        self.env.release(seconds);
+        self.env.release_in(seconds);
     }
 }
 
@@ -331,12 +358,11 @@ impl Synth {
         let (left, right) = (&mut left[..frames], &mut right[..frames]);
         left.fill(0.0);
         right.fill(0.0);
-        let Synth { instrument, voices, cc, bend, streams, .. } = self;
+        let Synth { instrument, voices, cc, bend, streams, sample_rate, .. } = self;
         for voice in voices.iter_mut().filter(|v| v.active) {
             let region = &instrument.regions[voice.region as usize];
-            let (matrix, pitch_cents) = live_values(instrument, region, cc, voice);
-            let bend_cents = if *bend >= 0.0 { *bend * region.bend_up } else { -*bend * region.bend_down };
-            let step = voice.step * 2f64.powf(((pitch_cents + bend_cents) / 1200.0) as f64);
+            let mut live = live_values(instrument, region, cc, voice);
+            live.pitch += if *bend >= 0.0 { *bend * region.bend_up } else { -*bend * region.bend_down };
             let sample = match region.source {
                 Source::Sample(i) => Some(&instrument.samples[i as usize]),
                 _ => None,
@@ -348,7 +374,7 @@ impl Synth {
             }
             // SAFETY: streamed data stays allocated while the voice counts as a user.
             let stream = unsafe { voice.stream.0.as_ref() };
-            let underrun = render_voice(voice, sample, stream, step, matrix, left, right);
+            let underrun = render_voice(voice, region, sample, stream, &live, *sample_rate, left, right);
             if underrun && let Some(streams) = streams.as_ref() {
                 streams.count_underrun();
             }
@@ -469,6 +495,7 @@ impl Synth {
         let ratio = 2f64.powf(semitones as f64 / 12.0);
 
         let mut times = region.ampeg;
+        let seed = self.rng;
         times.delay += modulation(Target::EgDelay);
         times.attack += modulation(Target::EgAttack);
         times.hold += modulation(Target::EgHold);
@@ -477,6 +504,11 @@ impl Synth {
         times.release = (times.release + modulation(Target::EgRelease)).max(0.0);
 
         let loop_mode = region.effective_loop_mode();
+        let filter = region.cutoff.map(|cutoff| {
+            let key = key.unwrap_or(region.fil_keycenter) as f32 - region.fil_keycenter as f32;
+            let cents = key * region.fil_keytrack + vel * region.fil_veltrack;
+            (Filter::new(region.fil_type), cutoff * cents_to_ratio(cents))
+        });
         let mut voice = Voice {
             active: true,
             id: self.next_id,
@@ -489,7 +521,14 @@ impl Synth {
             release_time: times.release,
             env: Envelope::start(&times, sample_rate),
             base_gain,
+            fileg: Envelope::start(&region.fileg, sample_rate),
+            pitcheg: Envelope::start(&region.pitcheg, sample_rate),
+            amplfo: lfo(&region.amplfo, seed, sample_rate),
+            fillfo: lfo(&region.fillfo, seed.rotate_left(8), sample_rate),
+            pitchlfo: lfo(&region.pitchlfo, seed.rotate_left(16), sample_rate),
             noise: self.rng | 1,
+            filter: filter.map(|f| f.0),
+            cutoff: filter.map_or(0.0, |f| f.1),
             ..Voice::IDLE
         };
         match region.source {
@@ -501,6 +540,7 @@ impl Synth {
                     voice.stream_slot = Some(sample.slot);
                     voice.stream = StreamPtr(streams.acquire(sample.slot));
                 }
+                voice.mono = sample.channels() == 1;
                 let frames = sample.frames() as f64;
                 voice.step = ratio * sample.rate() as f64 / sample_rate as f64;
                 voice.end = region.end.map_or(frames, |e| (e as f64 + 1.0).min(frames));
@@ -523,7 +563,9 @@ impl Synth {
         }
         self.next_id += 1;
         // Start at the target gains rather than ramping up from silence.
-        voice.matrix = live_values(instrument, region, &self.cc, &voice).0;
+        let live = live_values(instrument, region, &self.cc, &voice);
+        voice.matrix = live.matrix;
+        voice.lfo_gain = db_to_gain(voice.amplfo.value() * live.amplfo_depth);
         self.voices[index] = voice;
     }
 
@@ -574,8 +616,8 @@ fn xorshift(mut x: u32) -> u32 {
     x
 }
 
-fn db_to_gain(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
+fn lfo(settings: &LfoSettings, seed: u32, sample_rate: f32) -> Lfo {
+    Lfo::new(Waveform::Sine, settings.freq, settings.delay, settings.fade, 0.0, seed, sample_rate)
 }
 
 fn crossfade_in(velocity: u8, lo: u8, hi: u8) -> f32 {
@@ -598,12 +640,42 @@ fn crossfade_out(velocity: u8, lo: u8, hi: u8) -> f32 {
     }
 }
 
-/// The voice's output matrix and pitch offset (cents) for the current
-/// controller values: what follows the controllers while it plays.
-fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], voice: &Voice) -> ([f32; 4], f32) {
+/// What follows the controllers while a voice plays, read once per block.
+struct Live {
+    /// Output = [ll·L + rl·R, lr·L + rr·R].
+    matrix: [f32; 4],
+    /// Cents (bend added by the caller).
+    pitch: f32,
+    /// Cents added to the voice's cutoff.
+    cutoff: f32,
+    resonance: f32,
+    fileg_depth: f32,
+    pitcheg_depth: f32,
+    amplfo_depth: f32,
+    amplfo_freq: f32,
+    fillfo_depth: f32,
+    fillfo_freq: f32,
+    pitchlfo_depth: f32,
+    pitchlfo_freq: f32,
+}
+
+fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], voice: &Voice) -> Live {
     let mut amplitude = region.amplitude / 100.0;
-    let (mut volume, mut pan, mut width, mut position, mut pitch) =
-        (region.volume, region.pan, region.width, region.position, 0.0);
+    let (mut volume, mut pan, mut width, mut position) = (region.volume, region.pan, region.width, region.position);
+    let mut live = Live {
+        matrix: [0.0; 4],
+        pitch: 0.0,
+        cutoff: 0.0,
+        resonance: region.resonance,
+        fileg_depth: region.fileg_depth,
+        pitcheg_depth: region.pitcheg_depth,
+        amplfo_depth: region.amplfo.depth,
+        amplfo_freq: region.amplfo.freq,
+        fillfo_depth: region.fillfo.depth,
+        fillfo_freq: region.fillfo.freq,
+        pitchlfo_depth: region.pitchlfo.depth,
+        pitchlfo_freq: region.pitchlfo.freq,
+    };
     for m in &region.mods {
         if !m.target.is_live() {
             continue;
@@ -615,7 +687,17 @@ fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], v
             Target::Pan => pan += value,
             Target::Width => width += value,
             Target::Position => position += value,
-            Target::Pitch => pitch += value,
+            Target::Pitch => live.pitch += value,
+            Target::Cutoff => live.cutoff += value,
+            Target::Resonance => live.resonance += value,
+            Target::FilEgDepth => live.fileg_depth += value,
+            Target::PitchEgDepth => live.pitcheg_depth += value,
+            Target::AmpLfoDepth => live.amplfo_depth += value,
+            Target::AmpLfoFreq => live.amplfo_freq += value,
+            Target::FilLfoDepth => live.fillfo_depth += value,
+            Target::FilLfoFreq => live.fillfo_freq += value,
+            Target::PitchLfoDepth => live.pitchlfo_depth += value,
+            Target::PitchLfoFreq => live.pitchlfo_freq += value,
             _ => {}
         }
     }
@@ -627,7 +709,8 @@ fn live_values(instrument: &Instrument, region: &Region, cc: &[f32; CC_COUNT], v
     let p = ((pan + position) / 100.0).clamp(-1.0, 1.0);
     let angle = (p + 1.0) * FRAC_PI_4;
     let (pl, pr) = (angle.cos() * SQRT_2 * gain, angle.sin() * SQRT_2 * gain);
-    ([pl * a, pl * b, pr * b, pr * a], pitch)
+    live.matrix = [pl * a, pl * b, pr * b, pr * a];
+    live
 }
 
 /// 4-point, 3rd-order Hermite interpolation between `x0` and `x1`.
@@ -652,90 +735,132 @@ fn stop(voice: &mut Voice, streams: &Option<StreamClient>) {
 
 /// Renders a voice into the buffers (adding); returns whether it ran out of
 /// streamed data (and played silence for that part).
+///
+/// Per control block: pitch (bend, controllers, pitch envelope and LFO), filter
+/// cutoff (controllers, filter envelope and LFO) and the amplitude LFO are
+/// updated; then per frame: source → filter → amplitude envelope × LFO → the
+/// output matrix (ramped across the whole block).
+#[allow(clippy::too_many_arguments)]
 fn render_voice(
     voice: &mut Voice,
+    region: &Region,
     sample: Option<&Sample>,
     stream: Option<&StreamData>,
-    step: f64,
-    target: [f32; 4],
+    live: &Live,
+    sample_rate: f32,
     left: &mut [f32],
     right: &mut [f32],
 ) -> bool {
     let mut underrun = false;
     let frames = left.len();
     let ramp = 1.0 / frames.max(1) as f32;
-    let delta: [f32; 4] = std::array::from_fn(|i| (target[i] - voice.matrix[i]) * ramp);
+    let delta: [f32; 4] = std::array::from_fn(|i| (live.matrix[i] - voice.matrix[i]) * ramp);
     let mut m = voice.matrix;
-    for i in 0..frames {
-        let env = voice.env.next();
-        if voice.env.is_done() {
-            voice.active = false;
-            break;
+    voice.amplfo.set_frequency(live.amplfo_freq);
+    voice.fillfo.set_frequency(live.fillfo_freq);
+    voice.pitchlfo.set_frequency(live.pitchlfo_freq);
+    let mut start = 0;
+    while start < frames && voice.active {
+        let n = CONTROL_BLOCK.min(frames - start);
+        let cents = live.pitch + voice.pitcheg.level() * live.pitcheg_depth + voice.pitchlfo.value() * live.pitchlfo_depth;
+        let step = voice.step * (cents as f64 / 1200.0).exp2();
+        if let Some(filter) = &mut voice.filter {
+            let cents = live.cutoff + voice.fileg.level() * live.fileg_depth + voice.fillfo.value() * live.fillfo_depth;
+            filter.set(voice.cutoff * cents_to_ratio(cents), live.resonance, region.fil_gain, sample_rate);
         }
-        for (m, d) in m.iter_mut().zip(&delta) {
-            *m += d;
+        let lfo_target = if live.amplfo_depth == 0.0 { 1.0 } else { db_to_gain(voice.amplfo.value() * live.amplfo_depth) };
+        let lfo_step = (lfo_target - voice.lfo_gain) / n as f32;
+        let mut lfo_gain = voice.lfo_gain;
+
+        for i in start..start + n {
+            let env = voice.env.tick();
+            if voice.env.is_done() {
+                voice.active = false;
+                break;
+            }
+            for (m, d) in m.iter_mut().zip(&delta) {
+                *m += d;
+            }
+            let (mut l, mut r) = next_frame(voice, sample, stream, step, &mut underrun);
+            if let Some(filter) = &mut voice.filter {
+                l = filter.process(0, l);
+                r = if voice.mono { l } else { filter.process(1, r) };
+            }
+            lfo_gain += lfo_step;
+            let gain = env * lfo_gain;
+            left[i] += gain * (m[0] * l + m[1] * r);
+            right[i] += gain * (m[2] * l + m[3] * r);
+            if !voice.active {
+                break;
+            }
         }
-        let (l, r) = match sample {
-            Some(sample) => {
-                let index = voice.pos as usize;
-                let t = (voice.pos - index as f64) as f32;
-                let looping = match voice.loop_mode {
-                    LoopMode::Continuous => true,
-                    LoopMode::Sustain => !voice.released,
-                    _ => false,
-                };
-                let frame = match sample.window(index, stream) {
-                    Some(w) if sample.channels() == 2 => {
-                        (hermite(w[0], w[2], w[4], w[6], t), hermite(w[1], w[3], w[5], w[7], t))
-                    }
-                    Some(w) => {
-                        let s = hermite(w[0], w[1], w[2], w[3], t);
-                        (s, s)
-                    }
-                    None => {
-                        underrun = true;
-                        (0.0, 0.0)
-                    }
-                };
-                voice.pos += step;
-                if looping && voice.pos >= voice.loop_end {
-                    voice.pos -= voice.loop_end - voice.loop_start;
-                } else if voice.pos >= voice.end {
-                    voice.active = false;
+
+        voice.lfo_gain = lfo_target;
+        voice.fileg.advance(n);
+        voice.pitcheg.advance(n);
+        voice.amplfo.advance(n);
+        voice.fillfo.advance(n);
+        voice.pitchlfo.advance(n);
+        start += n;
+    }
+    voice.matrix = live.matrix;
+    underrun
+}
+
+/// The voice's next source frame (left, right), advancing its position.
+#[inline]
+fn next_frame(voice: &mut Voice, sample: Option<&Sample>, stream: Option<&StreamData>, step: f64, underrun: &mut bool) -> (f32, f32) {
+    match sample {
+        Some(sample) => {
+            let index = voice.pos as usize;
+            let t = (voice.pos - index as f64) as f32;
+            let looping = match voice.loop_mode {
+                LoopMode::Continuous => true,
+                LoopMode::Sustain => !voice.released,
+                _ => false,
+            };
+            let frame = match sample.window(index, stream) {
+                Some(w) if sample.channels() == 2 => (hermite(w[0], w[2], w[4], w[6], t), hermite(w[1], w[3], w[5], w[7], t)),
+                Some(w) => {
+                    let s = hermite(w[0], w[1], w[2], w[3], t);
+                    (s, s)
                 }
-                frame
+                None => {
+                    *underrun = true;
+                    (0.0, 0.0)
+                }
+            };
+            voice.pos += step;
+            if looping && voice.pos >= voice.loop_end {
+                voice.pos -= voice.loop_end - voice.loop_start;
+            } else if voice.pos >= voice.end {
+                voice.active = false;
             }
-            None => {
-                let phase = voice.pos as f32;
-                let s = match voice.generator {
-                    Some(Generator::Sine) => (phase * std::f32::consts::TAU).sin(),
-                    Some(Generator::Triangle) => 1.0 - 4.0 * (phase - 0.5).abs(),
-                    Some(Generator::Saw) => 2.0 * phase - 1.0,
-                    Some(Generator::Square) => {
-                        if phase < 0.5 {
-                            1.0
-                        } else {
-                            -1.0
-                        }
+            frame
+        }
+        None => {
+            let phase = voice.pos as f32;
+            let s = match voice.generator {
+                Some(Generator::Sine) => (phase * std::f32::consts::TAU).sin(),
+                Some(Generator::Triangle) => 1.0 - 4.0 * (phase - 0.5).abs(),
+                Some(Generator::Saw) => 2.0 * phase - 1.0,
+                Some(Generator::Square) => {
+                    if phase < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
                     }
-                    Some(Generator::Noise) => {
-                        voice.noise = xorshift(voice.noise);
-                        voice.noise as f32 / u32::MAX as f32 * 2.0 - 1.0
-                    }
-                    Some(Generator::Silence) | None => 0.0,
-                };
-                voice.pos = (voice.pos + step).fract();
-                (s, s)
-            }
-        };
-        left[i] += env * (m[0] * l + m[1] * r);
-        right[i] += env * (m[2] * l + m[3] * r);
-        if !voice.active {
-            break;
+                }
+                Some(Generator::Noise) => {
+                    voice.noise = xorshift(voice.noise);
+                    voice.noise as f32 / u32::MAX as f32 * 2.0 - 1.0
+                }
+                Some(Generator::Silence) | None => 0.0,
+            };
+            voice.pos = (voice.pos + step).fract();
+            (s, s)
         }
     }
-    voice.matrix = target;
-    underrun
 }
 
 #[cfg(test)]
@@ -816,6 +941,59 @@ mod tests {
         s.control_change(0, 64, 127);
         s.control_change(0, 64, 127);
         assert_eq!(s.active_voices(), 1);
+    }
+
+    /// RMS level (dB) of `frames` frames after `skip`, from a fresh note.
+    fn level(sfz: &str, key: u8, skip: usize, frames: usize) -> f32 {
+        let instrument = Arc::new(Instrument::from_sfz(sfz, None).unwrap());
+        let mut s = Synth::new(instrument, 48000.0, 4);
+        s.note_on(0, key, 127);
+        let (mut l, mut r) = (vec![0.0; skip + frames], vec![0.0; skip + frames]);
+        s.render(&mut l, &mut r);
+        let power: f32 = l[skip..].iter().map(|x| x * x).sum::<f32>() / frames as f32;
+        10.0 * power.log10()
+    }
+
+    #[test]
+    fn filter_cutoff_and_envelope() {
+        // A 55 Hz sine two octaves under a 12 dB high-pass: about −24 dB.
+        let low = |extra: &str| level(&format!("<region> sample=*sine {extra}"), 33, 9600, 9600);
+        let cut = low("cutoff=220 fil_type=hpf_2p") - low("");
+        assert!((cut + 24.0).abs() < 1.5, "{cut}");
+        // A sine an octave above a 1 kHz cutoff: about −24 dB.
+        let sine = |extra: &str| level(&format!("<region> sample=*sine pitch_keycenter=84 {extra}"), 96, 4800, 4800);
+        let cut = sine("cutoff=1000 fil_type=lpf_4p") - sine("");
+        assert!((cut + 24.0).abs() < 2.0, "{cut}");
+        // The filter envelope opens the same filter two octaves (−24 → ~0 dB).
+        let opened = sine("cutoff=1000 fil_type=lpf_4p fileg_depth=2400 fileg_sustain=100") - sine("");
+        assert!(opened.abs() < 1.0, "{opened}");
+        // Key tracking does the same, from the key played.
+        let tracked = sine("cutoff=1000 fil_type=lpf_4p fil_keytrack=100 fil_keycenter=72") - sine("");
+        assert!(tracked.abs() < 1.0, "{tracked}");
+    }
+
+    #[test]
+    fn amplitude_lfo_and_vibrato() {
+        let instrument = Arc::new(Instrument::from_sfz("<region> sample=*square amplfo_depth=6 amplfo_freq=10", None).unwrap());
+        let mut s = Synth::new(instrument, 48000.0, 4);
+        s.note_on(0, 60, 127);
+        // Peaks per 1 ms over one LFO cycle swing between +6 and −6 dB.
+        let peaks: Vec<f32> = (0..100).map(|_| peak(&mut s, 48)).collect();
+        let (lo, hi) = peaks.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+        assert!((20.0 * hi.log10() - 6.0).abs() < 0.5 && (20.0 * lo.log10() + 6.0).abs() < 0.5, "{lo} {hi}");
+
+        // Vibrato on the mod wheel: no pitch change without it.
+        let crossings = |wheel: u8| {
+            let instrument = Arc::new(Instrument::from_sfz("<region> sample=*sine pitchlfo_freq=5 pitchlfo_depthcc1=1200", None).unwrap());
+            let mut s = Synth::new(instrument, 48000.0, 4);
+            s.control_change(0, 1, wheel);
+            s.note_on(0, 69, 127);
+            let (mut l, mut r) = (vec![0.0; 2400], vec![0.0; 2400]);
+            s.render(&mut l, &mut r); // the first 50 ms: the LFO's first quarter cycle, rising
+            l.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
+        };
+        assert_eq!(crossings(0), 21); // 440 Hz for 50 ms, from phase 0
+        assert!(crossings(127) > 25, "{}", crossings(127));
     }
 
     #[test]

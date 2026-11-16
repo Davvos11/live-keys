@@ -12,12 +12,14 @@
 //! keyswitches, release triggers with `rt_decay`, controller-triggered regions
 //! (pedal noises), groups with `off_by` and (note) polyphony, velocity curves
 //! and crossfades, controller modulation with curves, and the amplitude
-//! envelope. Generators (`sample=*sine`…) are the hook for modelled layers.
+//! envelope; a filter with key/velocity tracking, filter and pitch envelopes, and
+//! SFZ v1's amplitude, filter and pitch LFOs (all from `live-keys-dsp`).
+//! Generators (`sample=*sine`…) are the hook for modelled layers.
 //! Samples are streamed from disk: only each one's head stays in memory.
-//! Not yet: filters, LFOs and other envelopes, effects.
+//! Not yet: SFZ v2's numbered LFOs/envelopes (`lfoN_*`, `egN_*`), a second
+//! filter, effects.
 
 mod curve;
-mod envelope;
 mod instrument;
 pub mod parse;
 mod region;
@@ -27,6 +29,6 @@ mod synth;
 
 pub use curve::Curve;
 pub use instrument::{CC_COUNT, DEFAULT_HEAD_FRAMES, Instrument, Preload};
-pub use region::{Generator, LoopMode, Region, Trigger};
+pub use region::{Generator, LfoSettings, LoopMode, Region, Trigger};
 pub use sample::Sample;
 pub use synth::Synth;

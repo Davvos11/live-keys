@@ -2974,6 +2974,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "live-keys-dsp"
+version = "0.1.0"
+
+[[package]]
 name = "live-keys-engine"
 version = "0.1.0"
 dependencies = [
@@ -3069,6 +3073,7 @@ dependencies = [
  "cpal",
  "env_logger",
  "hound",
+ "live-keys-dsp",
  "log",
  "midir",
  "rtrb",

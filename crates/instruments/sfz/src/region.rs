@@ -2,6 +2,8 @@
 //! it sounds, built from the opcodes of its `<global>`, `<master>`, `<group>` and
 //! `<region>` headers, in that order.
 
+use live_keys_dsp::{Dahdsr, FilterMode};
+
 /// What makes a region play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
@@ -67,13 +69,37 @@ pub enum Target {
     EgDecay,
     EgSustain,
     EgRelease,
+    /// Cents, added to the filter cutoff.
+    Cutoff,
+    /// dB, added.
+    Resonance,
+    /// Cents, added to the envelope's depth.
+    FilEgDepth,
+    PitchEgDepth,
+    /// Added to an LFO's depth (dB for amplitude, cents otherwise) or rate (Hz).
+    AmpLfoDepth,
+    AmpLfoFreq,
+    FilLfoDepth,
+    FilLfoFreq,
+    PitchLfoDepth,
+    PitchLfoFreq,
 }
 
 impl Target {
     /// Whether a change is followed while the voice plays, rather than read once
     /// at note-on.
     pub fn is_live(self) -> bool {
-        matches!(self, Target::Amplitude | Target::Volume | Target::Pan | Target::Width | Target::Position | Target::Pitch)
+        !matches!(
+            self,
+            Target::AmpVeltrack
+                | Target::Offset
+                | Target::EgDelay
+                | Target::EgAttack
+                | Target::EgHold
+                | Target::EgDecay
+                | Target::EgSustain
+                | Target::EgRelease
+        )
     }
 
     fn from_name(name: &str) -> Option<Target> {
@@ -92,6 +118,16 @@ impl Target {
             "ampeg_decay" => Target::EgDecay,
             "ampeg_sustain" => Target::EgSustain,
             "ampeg_release" => Target::EgRelease,
+            "cutoff" => Target::Cutoff,
+            "resonance" => Target::Resonance,
+            "fileg_depth" => Target::FilEgDepth,
+            "pitcheg_depth" => Target::PitchEgDepth,
+            "amplfo_depth" => Target::AmpLfoDepth,
+            "amplfo_freq" => Target::AmpLfoFreq,
+            "fillfo_depth" => Target::FilLfoDepth,
+            "fillfo_freq" => Target::FilLfoFreq,
+            "pitchlfo_depth" => Target::PitchLfoDepth,
+            "pitchlfo_freq" => Target::PitchLfoFreq,
             _ => return None,
         })
     }
@@ -120,22 +156,20 @@ impl CcRange {
     }
 }
 
-/// The amplitude envelope (DAHDSR), in seconds; sustain 0..=1.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EnvelopeTimes {
+/// An SFZ v1 LFO (`amplfo_*`, `fillfo_*`, `pitchlfo_*`): a sine per voice.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LfoSettings {
+    /// dB for amplitude, cents for filter and pitch.
+    pub depth: f32,
+    /// Hz.
+    pub freq: f32,
+    /// Seconds before it starts, and to fade in after that.
     pub delay: f32,
-    pub attack: f32,
-    pub hold: f32,
-    pub decay: f32,
-    pub sustain: f32,
-    pub release: f32,
+    pub fade: f32,
 }
 
-impl Default for EnvelopeTimes {
-    fn default() -> Self {
-        EnvelopeTimes { delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 1.0, release: 0.001 }
-    }
-}
+/// The filter and pitch envelopes' defaults: SFZ starts them with no sustain.
+const MOD_EG: Dahdsr = Dahdsr { delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 0.0, release: 0.001 };
 
 /// A sound source that isn't a sample file: SFZ's `*sine`, `*saw`… The hook for
 /// modelled sounds layered with samples.
@@ -256,7 +290,29 @@ pub struct Region {
     pub xfout_hivel: u8,
     /// Equal-power (the default) rather than linear velocity crossfades.
     pub xf_power: bool,
-    pub ampeg: EnvelopeTimes,
+    pub ampeg: Dahdsr,
+
+    // Filter: active when `cutoff` is given.
+    pub fil_type: FilterMode,
+    /// Hz.
+    pub cutoff: Option<f32>,
+    /// dB.
+    pub resonance: f32,
+    /// dB, for peaking and shelving types.
+    pub fil_gain: f32,
+    /// Cents per key from `fil_keycenter`.
+    pub fil_keytrack: f32,
+    pub fil_keycenter: u8,
+    /// Cents at full velocity.
+    pub fil_veltrack: f32,
+    pub fileg: Dahdsr,
+    /// Cents at full envelope.
+    pub fileg_depth: f32,
+    pub pitcheg: Dahdsr,
+    pub pitcheg_depth: f32,
+    pub amplfo: LfoSettings,
+    pub fillfo: LfoSettings,
+    pub pitchlfo: LfoSettings,
 
     pub mods: Vec<CcMod>,
 }
@@ -317,7 +373,21 @@ impl Default for Region {
             xfout_lovel: 127,
             xfout_hivel: 127,
             xf_power: true,
-            ampeg: EnvelopeTimes::default(),
+            ampeg: Dahdsr::default(),
+            fil_type: FilterMode::LowPass2,
+            cutoff: None,
+            resonance: 0.0,
+            fil_gain: 0.0,
+            fil_keytrack: 0.0,
+            fil_keycenter: 60,
+            fil_veltrack: 0.0,
+            fileg: MOD_EG,
+            fileg_depth: 0.0,
+            pitcheg: MOD_EG,
+            pitcheg_depth: 0.0,
+            amplfo: LfoSettings::default(),
+            fillfo: LfoSettings::default(),
+            pitchlfo: LfoSettings::default(),
             mods: Vec::new(),
         }
     }
@@ -484,12 +554,38 @@ impl Region {
                 _ => None,
             }
             .map(|p| self.xf_power = p)),
-            ("ampeg_delay", None) => ok(float(value).map(|v| self.ampeg.delay = v.max(0.0))),
-            ("ampeg_attack", None) => ok(float(value).map(|v| self.ampeg.attack = v.max(0.0))),
-            ("ampeg_hold", None) => ok(float(value).map(|v| self.ampeg.hold = v.max(0.0))),
-            ("ampeg_decay", None) => ok(float(value).map(|v| self.ampeg.decay = v.max(0.0))),
-            ("ampeg_sustain", None) => ok(float(value).map(|v| self.ampeg.sustain = (v / 100.0).clamp(0.0, 1.0))),
-            ("ampeg_release", None) => ok(float(value).map(|v| self.ampeg.release = v.max(0.0))),
+            ("fil_type" | "filtype", None) => ok(filter_mode(value).map(|m| self.fil_type = m)),
+            ("cutoff", None) => ok(float(value).map(|v| self.cutoff = Some(v.max(0.0)))),
+            ("resonance", None) => ok(float(value).map(|v| self.resonance = v)),
+            ("fil_gain", None) => ok(float(value).map(|v| self.fil_gain = v)),
+            ("fil_keytrack", None) => ok(float(value).map(|v| self.fil_keytrack = v)),
+            ("fil_keycenter", None) => ok(note(value, ctx).map(|k| self.fil_keycenter = k)),
+            ("fil_veltrack", None) => ok(float(value).map(|v| self.fil_veltrack = v)),
+            ("fileg_depth", None) => ok(float(value).map(|v| self.fileg_depth = v)),
+            ("pitcheg_depth", None) => ok(float(value).map(|v| self.pitcheg_depth = v)),
+            (name, None) if eg_stage(name).is_some() => {
+                let (eg, stage) = eg_stage(name).unwrap();
+                let eg = match eg {
+                    "ampeg" => &mut self.ampeg,
+                    "fileg" => &mut self.fileg,
+                    _ => &mut self.pitcheg,
+                };
+                ok(float(value).map(|v| set_eg_stage(eg, stage, v)))
+            }
+            (name, None) if lfo_param(name).is_some() => {
+                let (lfo, param) = lfo_param(name).unwrap();
+                let lfo = match lfo {
+                    "amplfo" => &mut self.amplfo,
+                    "fillfo" => &mut self.fillfo,
+                    _ => &mut self.pitchlfo,
+                };
+                ok(float(value).map(|v| match param {
+                    "depth" => lfo.depth = v,
+                    "freq" => lfo.freq = v.max(0.0),
+                    "delay" => lfo.delay = v.max(0.0),
+                    _ => lfo.fade = v.max(0.0),
+                }))
+            }
 
             (base, Some(cc)) => self.apply_modulation(base, cc, value),
             _ => Applied::Unknown,
@@ -537,6 +633,53 @@ impl Region {
         }
         note(value, ctx).map(Some)
     }
+}
+
+/// `ampeg_attack` → (`ampeg`, `attack`), for the three envelopes' stages.
+fn eg_stage(name: &str) -> Option<(&str, &str)> {
+    let (eg, stage) = name.split_once('_')?;
+    let known_eg = matches!(eg, "ampeg" | "fileg" | "pitcheg");
+    let known_stage = matches!(stage, "delay" | "attack" | "hold" | "decay" | "sustain" | "release");
+    (known_eg && known_stage).then_some((eg, stage))
+}
+
+fn set_eg_stage(eg: &mut Dahdsr, stage: &str, value: f32) {
+    match stage {
+        "delay" => eg.delay = value.max(0.0),
+        "attack" => eg.attack = value.max(0.0),
+        "hold" => eg.hold = value.max(0.0),
+        "decay" => eg.decay = value.max(0.0),
+        "sustain" => eg.sustain = (value / 100.0).clamp(0.0, 1.0),
+        _ => eg.release = value.max(0.0),
+    }
+}
+
+/// `pitchlfo_freq` → (`pitchlfo`, `freq`).
+fn lfo_param(name: &str) -> Option<(&str, &str)> {
+    let (lfo, param) = name.split_once('_')?;
+    let known = matches!(lfo, "amplfo" | "fillfo" | "pitchlfo") && matches!(param, "depth" | "freq" | "delay" | "fade");
+    known.then_some((lfo, param))
+}
+
+/// SFZ's filter type names.
+fn filter_mode(value: &str) -> Option<FilterMode> {
+    Some(match value {
+        "lpf_1p" => FilterMode::LowPass1,
+        "hpf_1p" => FilterMode::HighPass1,
+        "lpf_2p" | "lpf_2p_sv" => FilterMode::LowPass2,
+        "hpf_2p" | "hpf_2p_sv" => FilterMode::HighPass2,
+        "bpf_1p" | "bpf_2p" | "bpf_2p_sv" => FilterMode::BandPass2,
+        "brf_1p" | "brf_2p" | "brf_2p_sv" => FilterMode::Notch2,
+        "apf_1p" | "apf_2p" => FilterMode::AllPass2,
+        "lpf_4p" => FilterMode::LowPass4,
+        "hpf_4p" => FilterMode::HighPass4,
+        "lpf_6p" => FilterMode::LowPass6,
+        "hpf_6p" => FilterMode::HighPass6,
+        "pkf_2p" | "peq" => FilterMode::Bell,
+        "lsh" => FilterMode::LowShelf,
+        "hsh" => FilterMode::HighShelf,
+        _ => return None,
+    })
 }
 
 fn cc_range(ranges: &mut Vec<CcRange>, cc: u16) -> &mut CcRange {
@@ -636,7 +779,7 @@ mod tests {
         assert_eq!(r.apply("amplitude_oncc7", "100", &ctx), Applied::Yes);
         assert_eq!(r.apply("ampeg_releasecc72", "2", &ctx), Applied::Yes);
         assert_eq!(r.apply("pan_cc10", "100", &ctx), Applied::Yes);
-        assert_eq!(r.apply("cutoff_oncc74", "1200", &ctx), Applied::Unknown);
+        assert_eq!(r.apply("bitred_oncc74", "1200", &ctx), Applied::Unknown);
         assert_eq!(
             r.mods,
             [
@@ -645,6 +788,30 @@ mod tests {
                 CcMod { target: Target::Pan, cc: 10, depth: 100.0, curve: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn filter_envelope_and_lfo_opcodes() {
+        let mut r = Region::default();
+        let ctx = ParseContext::default();
+        for (name, value) in [
+            ("fil_type", "lpf_4p"),
+            ("cutoff", "800"),
+            ("fileg_attack", "0.2"),
+            ("fileg_sustain", "50"),
+            ("fileg_depth", "2400"),
+            ("pitchlfo_freq", "5.5"),
+            ("pitchlfo_depthcc1", "50"),
+            ("ampeg_release", "0.3"),
+        ] {
+            assert_eq!(r.apply(name, value, &ctx), Applied::Yes, "{name}");
+        }
+        assert_eq!((r.fil_type, r.cutoff), (FilterMode::LowPass4, Some(800.0)));
+        assert_eq!((r.fileg.attack, r.fileg.sustain, r.fileg_depth), (0.2, 0.5, 2400.0));
+        assert_eq!(r.pitchlfo.freq, 5.5);
+        assert_eq!(r.mods, [CcMod { target: Target::PitchLfoDepth, cc: 1, depth: 50.0, curve: 0 }]);
+        assert_eq!(r.ampeg.release, 0.3);
+        assert_eq!(r.apply("fil_type", "lpf_9p", &ctx), Applied::BadValue);
     }
 
     #[test]

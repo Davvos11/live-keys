@@ -129,10 +129,10 @@ cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # lis
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz
+cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz -p live-keys-dsp
   # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
   # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels,
-  # SFZ parsing, curves, envelopes and voice logic)
+  # SFZ parsing, curves, voice logic and streaming; filter responses, LFOs, envelopes)
 
 # The SFZ engine on its own (not part of the app yet). Salamander, for testing, lives in
 # ~/.local/share/live-keys/samples/salamander/ (git clone of sfzinstruments/SalamanderGrandPiano)
@@ -142,6 +142,8 @@ cargo run -p live-keys-sfz --example play --release -- <file.sfz> [midi port fil
   # plays it live from every MIDI input (or the matching ones) on the default output
 # render streams with --stream (at real-time pace; reports underruns and streamed memory) or
 # --head <frames> (a smaller head, to stress the loaders); without, samples load whole.
+# crates/instruments/sfz/examples/saw-pad.sfz needs no samples: a test patch for the filter,
+# envelopes and LFOs (mod wheel = vibrato, CC 74 = cutoff).
 # Both take --samples <dir>: resolve includes and samples there (an SFZ kept apart from its
 # samples). The piano: crates/instruments/piano/salamander.sfz --samples ~/.local/share/live-keys/samples/salamander
 ```
@@ -245,7 +247,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with twelve crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with thirteen crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -1158,10 +1160,29 @@ behind format-agnostic cores:
   play at key-up regardless. `off_by`, `polyphony` (per group) and `note_polyphony` (per key and group) fade the
   oldest voices (`off_mode`/`off_time`); a full pool steals the oldest fading, then released,
   then sounding voice. Gains: velocity curve with `amp_veltrack` (sfizz's formula), velocity
-  crossfades, `amp_keytrack`, then a 2×2 width/pan matrix ramped per block. `envelope.rs`:
-  DAHDSR, linear attack, exponential decay/release (−60 dB at the given time; the voice ends at
-  −80 dB). Generators (`sample=*sine`, `*saw`, `*noise`…) are the hook for modelled layers. Not
-  yet: filters, LFOs/other envelopes, effects, loop points from the file.
+  crossfades, `amp_keytrack`, then a 2×2 width/pan matrix ramped per block. **Modulation**
+  (from `live-keys-dsp`): one filter per voice when `cutoff` is given (`fil_type`, `resonance`,
+  `fil_gain`, key/velocity tracking), the filter and pitch envelopes (`fileg_*`/`pitcheg_*`,
+  depth in cents; sustain defaults to 0 as in SFZ) and SFZ v1's three LFOs (`amplfo_*` in dB,
+  `fillfo_*`/`pitchlfo_*` in cents; sine, per voice; `freq`, `delay`, `fade`), with CC targets
+  for cutoff, resonance, the envelopes' depths and the LFOs' depths and rates. `render_voice`
+  works in `CONTROL_BLOCK`s (32 frames): pitch, cutoff and the amplitude LFO (ramped) are set
+  per block from `Live` (what follows the controllers, read once per `render`), then per
+  frame source (`next_frame`) → filter → amplitude envelope × LFO → matrix. Generators
+  (`sample=*sine`, `*saw`, `*noise`…) are the hook for modelled layers. Not yet: SFZ v2's
+  numbered `lfoN_*`/`egN_*`, a second filter, effects, loop points from the file.
+
+- **`crates/instruments/dsp`** (`live-keys-dsp`) — DSP building blocks for our instruments,
+  shared by the SFZ engine and any synth later; no dependencies, nothing SFZ-specific, all
+  `Copy` and real-time safe. `filter.rs`: `Filter` — Simper's trapezoidal SVF (stable under
+  modulation) with every mode as a mix of its outputs (low/high/band-pass, notch, all-pass,
+  bell, shelves), one-pole low/high-pass, and 4-/6-pole cascades (Butterworth Qs, resonance on
+  the last stage); `set(cutoff, resonance_db, gain_db, rate)` each control block, `process(channel,
+  x)` per sample, two channels of state. `lfo.rs`: `Lfo` (sine, triangle, saws, square,
+  sample-and-hold; delay, fade-in, start phase; `advance(n)` at control rate). `envelope.rs`:
+  `Dahdsr` settings and `Envelope` (linear attack, exponential decay/release to −60 dB in the
+  given time, done at −80 dB; `tick` per sample, `advance(n)` for modulation). `convert.rs`: dB,
+  cents, note ↔ Hz. Unit-tested (filter responses measured on sines, LFO timing, envelope).
 
 - **`crates/instruments/piano`** (`live-keys-piano`) — the Salamander piano: its own SFZ
   (`salamander.sfz`, compiled in as `SFZ`; Salamander's file with the key-release noises on

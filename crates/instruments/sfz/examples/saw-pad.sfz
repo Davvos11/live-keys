@@ -1,0 +1,17 @@
+// A test patch for the filter, modulation envelopes and LFOs, with no samples:
+// two detuned saws through a resonant 24 dB low-pass that the filter envelope
+// and velocity open; vibrato on the mod wheel (CC 1), filter on CC 74.
+//
+// cargo run -p live-keys-sfz --example play --release -- crates/instruments/sfz/examples/saw-pad.sfz
+
+<global>
+sample=*saw
+volume=-12
+ampeg_attack=0.2 ampeg_decay=1 ampeg_sustain=80 ampeg_release=0.8
+fil_type=lpf_4p cutoff=300 resonance=6 fil_keytrack=50 fil_veltrack=1200
+cutoff_oncc74=4800
+fileg_attack=0.4 fileg_decay=1.5 fileg_sustain=30 fileg_depth=3600
+pitchlfo_freq=5.5 pitchlfo_delay=0.2 pitchlfo_fade=0.5 pitchlfo_depthcc1=50
+
+<region> tune=-7 pan=-60
+<region> tune=7 pan=60

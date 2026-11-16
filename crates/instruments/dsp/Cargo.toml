@@ -1,0 +1,9 @@
+[package]
+name = "live-keys-dsp"
+description = "DSP building blocks for live-keys' own instruments: filters, LFOs, envelopes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

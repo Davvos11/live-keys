@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/lv2-host", "crates/vst3-host", "crates/vst3-ui-host", "crates/clap-host", "crates/clap-ui-host", "crates/engine", "crates/gui", "crates/lv2-ui-host", "crates/plugin-check", "crates/instruments/sfz", "crates/instruments/piano"]
+members = ["crates/core", "crates/lv2-host", "crates/vst3-host", "crates/vst3-ui-host", "crates/clap-host", "crates/clap-ui-host", "crates/engine", "crates/gui", "crates/lv2-ui-host", "crates/plugin-check", "crates/instruments/sfz", "crates/instruments/piano", "crates/instruments/dsp"]
 resolver = "2"
 # A path dependency, not a member: not linted or tested as ours.
 exclude = ["vendor/livi"]
