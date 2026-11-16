@@ -33,17 +33,41 @@ the repo or compiled in: the app downloads them on request into
 `plugins.md`, "Installing recommended plugins and samples"). A `.deb` of the samples (in our own
 APT repository) could come later. The standalone plugin build looks in the same folder.
 
-**Engine (open).** Two options:
+**Engine: our own SFZ engine in Rust** (decided 2026-11-16; `crates/instruments/sfz`,
+`live-keys-sfz`). Not only the piano's: the base for every sampled instrument here (the
+e-pianos, the sampler library of section 4), and for instruments that mix samples with
+modelled sound (see "Sampled and modelled together" below). Plain, testable, MIT, no FFI.
+sfizz (BSD-2, C++ via FFI) was the alternative; reading SFZ ourselves keeps the panel's
+controls a plain mapping onto SFZ controllers and the core free of a C++ build.
 
-- **Our own sampler core in Rust** (`crates/instruments/piano`). Only the features a piano
-  needs: pitch-shift between sampled notes (at most ±1 semitone for minor thirds), velocity
-  layers with crossfades, release samples, the sustain pedal (half-pedal later), resonance and
-  pedal noise layers. Plain, testable, MIT, no FFI.
-- **sfizz's C library** (BSD-2, passes `cargo deny`) with a Salamander SFZ. Proven sample
-  streaming, but FFI, a C++ build, and the panel's controls would have to map onto SFZ CCs.
+First step, done (2026-11-16): the parser and player, enough for the whole Salamander SFZ
+(sfzinstruments' version, see below) — `#define`/`#include`, the header hierarchy, curves,
+key/velocity/controller/random/round-robin conditions, keyswitches, release triggers with
+`rt_decay`, controller-triggered pedal noises, `off_by` and (note) polyphony, velocity curves
+and crossfades, controller modulation, the amplitude envelope, sustain pedal. Loads in ~1.4 s
+(641 FLACs decoded on all cores), plays at ~85× real time with 60+ voices. Two examples:
+offline render to WAV, and live play from MIDI. Details in CLAUDE.md.
 
-Either way: **stream from disk**, keeping only each sample's start in memory (like sfizz and
-HISE do). Fully decoded, the whole set takes several GB of RAM.
+Next steps, roughly in order:
+
+- **Streaming from disk.** Everything is decoded into memory for now: 2.6 GB for Salamander,
+  fine for development, not for shipping. Keep each sample's first part in memory (sfizz:
+  ~8k frames; enough to cover disk latency) and stream the rest per voice from a loader
+  thread into ring buffers; FLAC decoding has to happen there too (or samples are cached
+  decoded on disk on first use).
+- **Filters** (`fil_type`, `cutoff`, `resonance`, `fil_veltrack`, `_oncc`), for Brightness.
+- **The built-in front-end** (`PluginFormat::Builtin`) with the panel, mapping each control
+  onto an SFZ controller — Salamander already exposes string resonance, hammer noise, pedal
+  noise, release, offset and velocity tracking as CCs 20–22, 72, 98, 99.
+- LFOs and the pitch/filter envelopes, if an instrument needs them; loop points read from the
+  file (`smpl` chunk) for instruments that loop; OGG samples.
+
+**Sampled and modelled together.** SFZ's generators (`sample=*sine`, `*saw`, `*noise`) already
+play through the same regions, envelopes and controllers as samples, so a layer can be
+synthesised next to sampled ones. That's the hook for modelled sound: our own generators
+(a tine, a reed, sympathetic resonance) with per-voice state, chosen per region like a sample.
+The e-piano could be a sampled attack with a modelled sustain; the piano's sympathetic
+resonance could be modelled instead of sampled.
 
 **Panel (first ideas, for the slot's first tab).** No drawbars, so up to ten controls:
 
@@ -55,8 +79,14 @@ HISE do). Fully decoded, the whole set takes several GB of RAM.
 
 Presets ship in the core's own state format (so the standalone build sees them, see Part A).
 
-**Open questions.** Which Salamander release to start from (the original v3, sfzinstruments'
-remap, or Accurate-Salamander, also CC-BY), and how close the sound should be to OT P1ANO S's
+**Samples, as found.** Development uses sfzinstruments' version (716 MB of FLAC, 48 kHz
+24-bit stereo, kept in `~/.local/share/live-keys/samples/salamander/`): 30 notes (every minor
+third) × 16 velocity layers, 88 key-release noises, 30 release string-resonance (harmonics)
+samples, pedal-down/up noises with two variations each, and two tunings behind a keyswitch
+(natural, retuned).
+
+**Open questions.** Whether to stay on sfzinstruments' remap or move to Accurate-Salamander
+(also CC-BY), and how close the sound should be to OT P1ANO S's
 (it adds EQ, compression and convolution reverb).
 
 ## 2. A modelled electric piano

@@ -1,0 +1,19 @@
+[package]
+name = "live-keys-sfz"
+description = "An SFZ sampler engine: the sound core shared by live-keys' own sampled instruments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+claxon = "0.4"
+hound = "3.5"
+
+[dev-dependencies]
+env_logger = "0.11"
+cpal = "0.18"
+midir = "0.11"
+rtrb = "0.4"

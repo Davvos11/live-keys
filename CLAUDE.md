@@ -129,9 +129,17 @@ cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # lis
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui
+cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz
   # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
-  # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels)
+  # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels,
+  # SFZ parsing, curves, envelopes and voice logic)
+
+# The SFZ engine on its own (not part of the app yet). Salamander, for testing, lives in
+# ~/.local/share/live-keys/samples/salamander/ (git clone of sfzinstruments/SalamanderGrandPiano)
+cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav]
+  # loads it (time, memory), plays a fixed passage offline, writes a WAV, reports render speed
+cargo run -p live-keys-sfz --example play --release -- <file.sfz> [midi port filter]
+  # plays it live from every MIDI input (or the matching ones) on the default output
 ```
 
 ## Licensing
@@ -226,7 +234,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with ten crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with eleven crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -1097,6 +1105,37 @@ behind format-agnostic cores:
   plugin's widget, distinct colours in a pixel sample — at most 2 means a blank window). The
   GUI side is pumped like the app's poll timer (edits forwarded, `drain_ui_events` to the GUI,
   `idle_plugins` for CLAP). A CLAP case's parameter check also asks the plugin for the value.
+
+- **`crates/instruments/sfz`** (`live-keys-sfz`) — our own SFZ sampler engine, the sound core
+  for our sampled (and partly modelled) instruments; see `docs/design/own-plugins.md`. No host
+  code and no dependency on the other crates: a front-end (the built-in `PluginFormat`, a
+  standalone plugin) wraps it. `parse.rs` preprocesses (`#define`s applied in order — Salamander
+  redefines `$VEL` between includes —, `#include` relative to the root file, also mid-line;
+  comments) and tokenizes into `Section`s (a value runs to the next opcode, header or line end,
+  so paths can have spaces). `region.rs`: `Region` with typed fields, built by applying the
+  `<global>`, `<master>`, `<group>` and `<region>` opcodes in order (`Region::apply`; unknown
+  opcodes are collected and logged once, not fatal); `*_onccN`/`*_ccN`/`*ccN`/`*_curveccN`
+  become `CcMod`s (`Target`: amplitude multiplies, the rest add; pitch/volume/pan/width/position
+  follow the controller live, the rest are read at note-on). `curve.rs`: built-in curves 0–6
+  and `<curve>`s. `sample.rs`: FLAC (claxon) and WAV (hound) decoded whole into `f32`,
+  interleaved, with zero padding around it for 4-point interpolation — **no streaming yet**
+  (Salamander takes 2.6 GB). `instrument.rs`: `Instrument::load` (samples loaded once each,
+  on all cores; regions whose sample fails are dropped with a warning), per-key indexes of
+  attack and release regions, controller-triggered regions, keyswitch range, initial CCs (MIDI
+  defaults, then `set_cc`/`set_hdcc`). `synth.rs`: `Synth` — real-time safe (fixed voice
+  pool, no allocation): `midi`/`note_on`/`note_off`/`control_change`/`set_cc`/`pitch_bend`,
+  `render(left, right)` (overwrites). Conditions: key, velocity, channel, `locc`/`hicc`,
+  `lorand`/`hirand`, round robin, keyswitches (`sw_last`); `trigger` attack/release/first/legato;
+  `on_loccN` regions fire when the controller *enters* the range (pedal noises; played at full
+  velocity). **Sustain pedal:** a key let go while it's down keeps sounding, and its release
+  (and its release-trigger regions, with `rt_decay` over the time held) come when the pedal
+  lifts. `off_by`, `polyphony` (per group) and `note_polyphony` (per key and group) fade the
+  oldest voices (`off_mode`/`off_time`); a full pool steals the oldest fading, then released,
+  then sounding voice. Gains: velocity curve with `amp_veltrack` (sfizz's formula), velocity
+  crossfades, `amp_keytrack`, then a 2×2 width/pan matrix ramped per block. `envelope.rs`:
+  DAHDSR, linear attack, exponential decay/release (−60 dB at the given time; the voice ends at
+  −80 dB). Generators (`sample=*sine`, `*saw`, `*noise`…) are the hook for modelled layers. Not
+  yet: filters, LFOs/other envelopes, effects, streaming, loop points from the file.
 
 - **`src/main.rs`** (binary crate `live-keys`) — the original headless CLI, now a thin wrapper
   around `live-keys-engine` (loads its one `--plugin` into slot 0), then loops calling
