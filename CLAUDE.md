@@ -1262,8 +1262,10 @@ code isolated from the core audio graph and MIDI routing.
 
 Plans beyond the formats — integrated first-party plugins, per-plugin panel profiles, user
 mapping of third-party plugins, and inline effect views (Ardour's LV2 inline-display
-extension) — are in `docs/design/plugins.md` (a draft; check it before working on any of these,
-and keep it in step with what's decided).
+extension), recommended third-party plugins and their install window — are in
+`docs/design/plugins.md` (a draft; check it before working on any of these, and keep it in step
+with what's decided). Ideas for our own instruments (the Salamander piano first) are in
+`docs/design/own-plugins.md`.
 
 ## GUI
 

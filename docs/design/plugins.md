@@ -40,6 +40,14 @@ options. Started 2026-11-10.
 - **Cross-platform is a future goal** for the app. For our own instruments: **CLAP is the
   reference format**, and **VST3 and LV2 are built too** (see "Formats for the standalone
   instruments").
+- **Our first instrument is a sampled grand piano** built on the Salamander Grand Piano samples
+  (CC-BY 3.0), in our own code (2026-11-16). It rebuilds the concept of OT P1ANO S (which is
+  Salamander too) rather than porting it: OT P1ANO S is GPL-3. Ideas for this and later
+  instruments are in `own-plugins.md`.
+- **Third-party plugins are recommended, not bundled** (2026-11-16): the `.deb` lists the ones
+  with profiles as `Recommends`, and an install window in the app installs whatever is missing,
+  including plugins only available as a `.deb` of their own, and our instruments' samples. See
+  Part D.
 
 ## Goals
 
@@ -201,9 +209,9 @@ The built-in and standalone builds of one instrument have to be treated as the s
   `.vstpreset` files, wherever truce installs them) and saves new ones there, so both builds
   share one preset list. Depends on the state-format check above.
 
-Candidates for a first integrated instrument: a **drawbar organ** (the design's drawbars; nine
-sine partials plus percussion and a simple rotary is small enough to own), an **electric
-piano**, a **pad**.
+**The first integrated instrument is a Salamander-based piano** (decided 2026-11-16; the
+organ is covered by setBfree's profile for now). Later ones: a modelled electric piano, a pad,
+sampled instruments from freely licensed SFZ/SF2 sets. See `own-plugins.md`.
 
 ## Part B — setting up third-party plugins
 
@@ -544,6 +552,63 @@ native, interactive Slint views — so they never go through the extension. **Le
 host the Ardour extension for third-party LV2 effects (cheap, and LSP/x42 look great
 immediately); a plain fallback (name, or a guessed curve) for everything else.
 
+## Part D — recommended plugins and the install window
+
+Decided 2026-11-16. live-keys doesn't copy third-party plugins into its own packages. The
+plugins it has profiles for are **recommended**, and the app can install them.
+
+### Licences
+
+| Plugin | Licence | Where it comes from on Ubuntu 24.04 |
+|---|---|---|
+| setBfree | GPL-2+ | Ubuntu (`setbfree`, 0.8.13: the version the profile was verified with) |
+| mda-lv2 (EPiano) | GPL-3+ | Ubuntu (`mda-lv2`) |
+| x42-plugins | GPL-2+ | Ubuntu (`x42-plugins`; inline displays) |
+| lsp-plugins | LGPL-3+ | Ubuntu (`lsp-plugins-lv2`; inline displays) |
+| Surge XT | GPL-3 | Not in Ubuntu; a `.deb` on Surge's GitHub releases |
+| Helm | GPL-3 | Not in Ubuntu; an old (2014–2019) `.deb` from the developer |
+| Vital | The free binary is **proprietary**; its 1.0.6 source is GPL-3 under a trademark condition | Not redistributable; only a renamed fork (Vitalium, Vial) could be |
+
+Copying a GPL plugin into our packages would be allowed (live-keys is MIT, which is
+GPL-compatible, so even the FSF's view that an in-process plugin forms a combined work causes
+no conflict), but it brings the duty to ship or offer each plugin's source, and versions to
+keep up. Recommending them avoids both.
+
+### The `.deb`'s `Recommends`
+
+`[package.metadata.deb]` in `crates/gui/Cargo.toml` gets a `recommends` line with the plugins
+in Ubuntu: `setbfree, mda-lv2, x42-plugins, lsp-plugins-lv2`. apt installs recommended packages
+by default, so a normal install brings them along, and a user can still leave them out
+(`--no-install-recommends`) or remove them.
+
+### Installing recommended plugins and samples (a window in the app)
+
+A window (from Settings, and suggested once on a first run when something's missing) lists
+everything live-keys recommends, each with its state (installed, missing, update available),
+its licence, its size, and an Install button (plus "Install all"):
+
+- **Packages from the distribution** (the `Recommends` above, for users who installed without
+  them or not from the `.deb`);
+- **Plugins only available as a `.deb` of their own** (Surge XT; Helm perhaps): downloaded from
+  their release page, checked, and installed as a package;
+- **Our instruments' samples** (Salamander for the piano): downloaded into
+  `<data dir>/live-keys/samples/`, checksummed, no root needed.
+
+After an install, the app rescans plugins.
+
+Open:
+
+- **How to install packages as a normal user.** PackageKit (its D-Bus API, which the desktop's
+  software centre uses too, and which asks for authorisation itself: `InstallPackages`,
+  `InstallFiles` for a `.deb`), or `pkexec apt-get install`. PackageKit is the cleaner one;
+  check that it's on a default Ubuntu desktop.
+- **Where the list comes from**: compiled in (simple, changes with releases) or a small file
+  fetched from our repository (download URLs and checksums can change between releases).
+- Hosting Surge XT's `.deb` in our own APT repository instead (allowed with its source; then
+  it's a plain `Recommends` too).
+- Other distributions and platforms: the samples part works everywhere; packages differ per
+  distribution, and Windows/macOS would need installers or downloads of their own.
+
 ## Possible order of work
 
 1. **Panel profiles** in the host (data model, `param` and `setbfree` targets, shipped + user
@@ -556,9 +621,12 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
 3. **LV2 inline display** hosting in the FX squares (done, with click-to-open, the right-click
    menu and drag-to-reorder).
 4. **The truce spike** (can run in parallel with 1–3).
-5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (organ) with its
-   built-in front-end, its standalone build and shipped presets.
+5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (the Salamander
+   piano, see `own-plugins.md`) with its built-in front-end, its standalone build and shipped
+   presets.
 6. First built-in effect (a compressor) with the effect popup and its interactive graph.
+7. **Recommended plugins** (Part D): the `.deb`'s `Recommends` (any time), then the install
+   window (needed by 5 for the piano's samples).
 
 Later, separately: MIDI learn for hardware controls; non-X11 backends for VST3 editors and
 CLAP GUIs once the app runs on Windows/macOS. (**Hosting CLAP** is done — `crates/clap-host`
