@@ -737,7 +737,12 @@ behind format-agnostic cores:
     the user resizes the window, the widget is resized to match and the UI's own `ui:resize`
     interface, if any, is told — called with the UI's own handle (`suil_instance_get_handle`),
     like the idle interface, not the struct's `handle` field, which JUCE leaves null (passing
-    it crashed Surge XT). Confirmed via Surge XT and setBfree.
+    it crashed Surge XT). ConfigureNotify events with another size than the one we last
+    gave the window are ignored until it's confirmed (or `RESIZE_SETTLE`, 500 ms, passes):
+    KWin reports the initial 800x600 after we've resized it, and passing that on made LSP's
+    UI, which answers `ui:resize` by asking for the size it was given, flip the window
+    between two sizes until it was moved. Only sizes we didn't ask for (the user's) are
+    passed to the UI's `ui:resize`. Confirmed via Surge XT, setBfree and LSP.
 
   Both mechanisms run their instantiate→show→idle-loop→cleanup lifecycle synchronously on a
   **dedicated background thread per open UI** (not the audio thread, not the GUI's own event-loop

@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use livi::lilv::ui::UI;
@@ -44,6 +44,10 @@ extern "C" fn request_resize(handle: *mut c_void, width: c_int, height: c_int) -
     requested.set(Some((width as u32, height as u32)));
     0
 }
+/// How long a resize of our window may take to be confirmed before other sizes
+/// count as the window manager's (or the user's) again.
+const RESIZE_SETTLE: Duration = Duration::from_millis(500);
+
 /// Fills the slot `livi::Features::iter_features` needs for a "worker" feature,
 /// which UIs never need. A private URI guarantees nothing will ever match it.
 const UNUSED_FEATURE_URI: &CStr = c"urn:live-keys:unused-feature";
@@ -321,8 +325,16 @@ fn run(
         let geometry = conn.get_geometry(widget_xid).ok()?.reply().ok()?;
         Some((u32::from(geometry.width), u32::from(geometry.height)))
     });
+    // The size we last gave our window, until the window manager confirms it.
+    // ConfigureNotify events with another size meanwhile are from before — KWin
+    // reports the window's initial 800x600 after we've resized it — and passing
+    // those on starts a loop with UIs that answer `ui:resize` by asking for that
+    // size (LSP's: the window flips between two sizes until it's moved). Given up
+    // after `RESIZE_SETTLE`, in case the window manager chose another size.
+    let mut pending_size: Option<((u32, u32), Instant)> = None;
     if let Some((width, height)) = initial_size {
         resize(&conn, window, width, height);
+        pending_size = Some(((width, height), Instant::now()));
     }
 
     // SAFETY: instance is non-null and stays alive until suil_instance_free below.
@@ -346,13 +358,28 @@ fn run(
                         closed.store(true, Ordering::SeqCst);
                     }
                 }
-                // The user resized our window: the embedded widget follows.
+                // Our window's new size: the embedded widget follows, and the UI
+                // is told if the user resized it.
                 Event::ConfigureNotify(configure) if configure.window == window => {
                     let size = (u32::from(configure.width), u32::from(configure.height));
+                    let ours = match pending_size {
+                        Some((wanted, _)) if wanted == size => {
+                            pending_size = None;
+                            true
+                        }
+                        Some((_, since)) if since.elapsed() < RESIZE_SETTLE => {
+                            log::debug!("ignoring {size:?}, from before our resize");
+                            continue;
+                        }
+                        _ => {
+                            pending_size = None;
+                            false
+                        }
+                    };
                     if widget_size != Some(size) {
                         widget_size = Some(size);
                         resize(&conn, widget_xid, size.0, size.1);
-                        if !ui_resize.is_null() {
+                        if !ours && !ui_resize.is_null() {
                             // The UI's own interface takes its UI handle, like the
                             // idle interface — not the struct's `handle`, which UIs
                             // leave unset (JUCE's is null: Surge XT crashed on it).
@@ -366,8 +393,12 @@ fn run(
         }
         // The UI asked for a new size: our window follows, and the widget with it
         // (via the ConfigureNotify above).
-        if let Some((width, height)) = requested_size.take() {
+        // (A size it already has brings no ConfigureNotify to confirm it.)
+        if let Some((width, height)) = requested_size.take()
+            && widget_size != Some((width, height))
+        {
             resize(&conn, window, width, height);
+            pending_size = Some(((width, height), Instant::now()));
         }
         if closed.load(Ordering::SeqCst) {
             break;
