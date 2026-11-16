@@ -67,6 +67,8 @@ export global AppState {
     in property <[EffectRow]> master-effects: Platform.uses-mock-data ? MockData.master-effects : [];
     in property <float> master-volume-db: Platform.uses-mock-data ? MockData.master-volume-db : 0;
     in property <bool> master-muted: false;
+    // Semitones added to every slot's notes, on top of each slot's own.
+    in property <int> master-transpose: Platform.uses-mock-data ? MockData.master-transpose : 0;
     // The master chain's last error; empty if none.
     in property <string> master-status;
     // The metronome. `metronome-beat` is the beat it's on (0 = a bar's first),
@@ -202,6 +204,7 @@ export global AppLogic {
     // The right sidebar: master output, metronome, MIDI panic, Settings.
     callback set-master-volume(/* dB */ float);
     callback toggle-master-mute();
+    callback set-master-transpose(/* semitones */ int);
     callback toggle-metronome();
     callback set-metronome-bpm(int);
     // A tap on Tap: after a few, the tempo follows the taps.

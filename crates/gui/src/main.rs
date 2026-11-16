@@ -1233,7 +1233,7 @@ fn main() -> anyhow::Result<()> {
     let engine = Rc::new(RefCell::new(Engine::unscanned(MAX_BLOCK_SIZE)));
     for (slot, slot_config) in config.borrow().slots.iter().enumerate() {
         let mut engine = engine.borrow_mut();
-        engine.set_slot_filter(slot, slot_config.filter());
+        engine.set_slot_filter(slot, slot_config.filter(config.borrow().master_transpose));
         engine.set_slot_gain(slot, slot_config.gain());
     }
     {
@@ -1285,6 +1285,7 @@ fn main() -> anyhow::Result<()> {
         let config = config.borrow();
         state.set_master_volume_db(config.master_volume_db);
         state.set_master_muted(config.master_muted);
+        state.set_master_transpose(config.master_transpose.into());
         state.set_metronome_signatures(string_model(metronome::signature_labels()));
         state.set_metronome_subdivisions(string_model(metronome::subdivision_labels()));
         show_metronome(&app, &config.metronome, false);
@@ -1340,6 +1341,27 @@ fn main() -> anyhow::Result<()> {
             }
             // Fires on every step of a drag; the poll timer saves.
             config_dirty.set(true);
+        });
+    }
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let app_weak = app.as_weak();
+        logic.on_set_master_transpose(move |semitones| {
+            let mut config = config.borrow_mut();
+            let transpose = semitones.clamp(-config::MAX_TRANSPOSE, config::MAX_TRANSPOSE) as i8;
+            if config.master_transpose == transpose {
+                return;
+            }
+            config.master_transpose = transpose;
+            let mut engine = engine.borrow_mut();
+            for (slot, slot_config) in config.slots.iter().enumerate() {
+                engine.set_slot_filter(slot, slot_config.filter(transpose));
+            }
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_master_transpose(transpose.into());
+            }
+            log_on_err(config::save(&config));
         });
     }
     {
@@ -1515,6 +1537,7 @@ fn main() -> anyhow::Result<()> {
         logic.on_toggle_slot_input(move |slot, input| {
             let mut config = config.borrow_mut();
             let input_count = config.midi_inputs.len();
+            let master_transpose = config.master_transpose;
             let Some(slot_config) = config.slots.get_mut(slot as usize) else {
                 return;
             };
@@ -1523,7 +1546,7 @@ fn main() -> anyhow::Result<()> {
             }
             slot_config.midi_inputs ^= 1 << input;
             rack.mark_scene_changed(slot as usize);
-            engine.borrow_mut().set_slot_filter(slot as usize, slot_config.filter());
+            engine.borrow_mut().set_slot_filter(slot as usize, slot_config.filter(master_transpose));
             rack.set_routing(slot as usize, slot_config, input_count);
             log_on_err(config::save(&config));
         });
@@ -2555,7 +2578,7 @@ fn main() -> anyhow::Result<()> {
                 config.slots[slot].set_routing(closed.routing);
                 let slot_config = &config.slots[slot];
                 let mut engine = engine.borrow_mut();
-                engine.set_slot_filter(slot, slot_config.filter());
+                engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
                 engine.set_slot_gain(slot, slot_config.gain());
                 rack.set_routing(slot, slot_config, config.midi_inputs.len());
                 log_on_err(config::save(&config));
@@ -2591,13 +2614,14 @@ fn main() -> anyhow::Result<()> {
         logic.on_set_slot_transpose(move |slot, semitones| {
             let slot = slot as usize;
             let mut config = config.borrow_mut();
+            let master_transpose = config.master_transpose;
             let slot_config = &mut config.slots[slot];
             let transpose = semitones.clamp(-config::MAX_TRANSPOSE, config::MAX_TRANSPOSE) as i8;
             if slot_config.transpose == transpose {
                 return;
             }
             slot_config.transpose = transpose;
-            engine.borrow_mut().set_slot_filter(slot, slot_config.filter());
+            engine.borrow_mut().set_slot_filter(slot, slot_config.filter(master_transpose));
             rack.mark_scene_changed(slot);
             let input_count = config.midi_inputs.len();
             rack.set_routing(slot, &config.slots[slot], input_count);
@@ -2631,6 +2655,7 @@ fn main() -> anyhow::Result<()> {
             move |slot, channel, note_low, note_high, velocity_low, velocity_high| {
                 let slot = slot as usize;
                 let mut config = config.borrow_mut();
+                let master_transpose = config.master_transpose;
                 let slot_config = &mut config.slots[slot];
                 let before = slot_config.routing();
                 // Channel 0 is omni; note/velocity values come from sliders already
@@ -2640,7 +2665,7 @@ fn main() -> anyhow::Result<()> {
                 slot_config.note_high = note_high.clamp(0, 127) as u8;
                 slot_config.velocity_low = velocity_low.clamp(0, 127) as u8;
                 slot_config.velocity_high = velocity_high.clamp(0, 127) as u8;
-                engine.borrow_mut().set_slot_filter(slot, slot_config.filter());
+                engine.borrow_mut().set_slot_filter(slot, slot_config.filter(master_transpose));
                 if slot_config.routing() != before {
                     rack.mark_scene_changed(slot);
                 }
@@ -2989,7 +3014,7 @@ fn load_scene(
         config.slots[slot].set_routing(saved.routing);
         let slot_config = &config.slots[slot];
         let mut engine = engine.borrow_mut();
-        engine.set_slot_filter(slot, slot_config.filter());
+        engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
         engine.set_slot_gain(slot, slot_config.gain());
         rack.set_routing(slot, slot_config, config.midi_inputs.len());
         rack.refresh_slot(&engine, slot, (!errors.is_empty()).then(|| errors.join("\n")));
@@ -3162,7 +3187,7 @@ fn clear_slot(engine: &RefCell<Engine>, config: &RefCell<config::AppConfig>, rac
         config.slots[slot].set_routing(config::SlotConfig::default().routing());
         let slot_config = &config.slots[slot];
         let mut engine = engine.borrow_mut();
-        engine.set_slot_filter(slot, slot_config.filter());
+        engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
         engine.set_slot_gain(slot, slot_config.gain());
         rack.set_routing(slot, slot_config, config.midi_inputs.len());
     }
@@ -3248,7 +3273,7 @@ fn apply_midi_inputs(
 ) {
     let ports = engine.set_midi_inputs(midi_input_devices(config));
     for (slot, slot_config) in config.slots.iter().enumerate() {
-        engine.set_slot_filter(slot, slot_config.filter());
+        engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
     }
     rack.set_all_routing(config);
     midi_inputs.refresh(config);

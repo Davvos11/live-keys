@@ -174,6 +174,7 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "int", "param-search-count", &state.get_param_search_count());
     property(&mut out, "[EffectRow]", "master-effects", &state.get_master_effects());
     property(&mut out, "float", "master-volume-db", &state.get_master_volume_db());
+    property(&mut out, "int", "master-transpose", &state.get_master_transpose());
     property(&mut out, "int", "metronome-bpm", &state.get_metronome_bpm());
     property(&mut out, "string", "params-window-name", &params_window.0);
     property(&mut out, "[ParamRow]", "params-window-params", &params_window.1);

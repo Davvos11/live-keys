@@ -67,7 +67,7 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
 # pinned favourites); an effect's square shows its LV2 inline display if it has one, a click opens
 # its GUI (or parameter window), a right-click its menu, dragging it reorders), then the right
-# sidebar: a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
+# sidebar: a master transpose, a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
 # signature, subdivision, Tap), the master output (volume slider, master audio effects, mute, output device), the MIDI
 # inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic
 cargo run -p live-keys-gui --release
@@ -79,7 +79,7 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
   # preview (the Slint plugin's "Show Preview", slint-viewer) shows instead of empty lists;
   # the preview needs a slint-lsp at least as new as our Slint (README: "Previewing the UI")
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
-# folders, pinned plugin ids, favourite preset ids, master volume + mute, the metronome's tempo, time
+# folders, pinned plugin ids, favourite preset ids, master volume + mute + transpose, the metronome's tempo, time
 # signature, subdivision and volume, and per slot: MIDI inputs + filter, volume), saved as they change.
 # The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
 # scene, open plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
@@ -841,7 +841,10 @@ behind format-agnostic cores:
   Picking calls `pick-plugin(slot, category, id)`, which loads an instrument (replacing) or
   appends to the matching effect section; for `AppState.master-slot` the picker shows audio
   effects only (no tabs). **The sidebar** (`ui/sidebar.slint`, after the design's "Right
-  sidebar"): the metronome (`MetronomeSection`: a volume `LabelledKnob`, `BeatDots` from
+  sidebar"): the master transposition (`TransposeSection`: a `Stepper`,
+  `set-master-transpose` → `AppConfig.master_transpose`, ±`MAX_TRANSPOSE`, added to every
+  slot's own in its `MidiFilter` — `SlotConfig::filter(master_transpose)` — and not part of
+  scenes), the metronome (`MetronomeSection`: a volume `LabelledKnob`, `BeatDots` from
   `AppState.metronome-beats`/`-beat` — which the poll timer sets from `Engine::metronome_beat`
   — a BPM `Stepper` (`signed: false`; Enter/Escape leave its field, and it shows values set
   from elsewhere, like Tap's, even while focused), play/stop under the knob, then a

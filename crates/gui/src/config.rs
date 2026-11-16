@@ -28,6 +28,10 @@ pub struct AppConfig {
     pub master_volume_db: f32,
     #[serde(default)]
     pub master_muted: bool,
+    /// Semitones added to every slot's notes, on top of the slot's own
+    /// transposition.
+    #[serde(default)]
+    pub master_transpose: i8,
     #[serde(default)]
     pub metronome: crate::metronome::MetronomeConfig,
 }
@@ -138,7 +142,8 @@ impl SlotConfig {
         self.transpose = routing.transpose;
     }
 
-    pub fn filter(&self) -> MidiFilter {
+    /// The slot's MIDI filter, its transposition plus the master's.
+    pub fn filter(&self, master_transpose: i8) -> MidiFilter {
         MidiFilter {
             inputs: self.midi_inputs,
             channel: self.midi_channel,
@@ -146,7 +151,7 @@ impl SlotConfig {
             note_high: self.note_high,
             velocity_low: self.velocity_low,
             velocity_high: self.velocity_high,
-            transpose: self.transpose,
+            transpose: self.transpose + master_transpose,
         }
     }
 

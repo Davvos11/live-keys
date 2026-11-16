@@ -1,5 +1,5 @@
-// The right sidebar, after the Penpot design ("Right sidebar"): the metronome,
-// the master output, the MIDI inputs, then Settings and MIDI panic.
+// The right sidebar, after the Penpot design ("Right sidebar"): the master
+// transposition, the metronome, the master output, the MIDI inputs, then Settings and MIDI panic.
 import { CheckBox } from "std-widgets.slint";
 import { AppState, AppLogic, Category, EffectRow, MidiInputRow } from "globals.slint";
 import { Theme, Icons, KButton, DropdownButton, ListItem, Select, Stepper } from "widgets.slint";
@@ -62,6 +62,29 @@ component BeatDots inherits Rectangle {
         border-width: 1.5px;
         border-color: Theme.text-muted;
         background: beat == root.current ? (beat == 0 ? Theme.accent : Theme.text) : transparent;
+    }
+}
+
+// Semitones added to every slot's notes, on top of each slot's own.
+component TransposeSection inherits HorizontalLayout {
+    vertical-stretch: 0;
+    padding: 5px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+
+    SectionTitle {
+        text: "Transpose:";
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    Stepper {
+        minimum: -AppState.max-transpose;
+        maximum: AppState.max-transpose;
+        value: AppState.master-transpose;
+        // Stepping sets its own value, replacing the binding.
+        property <int> source: AppState.master-transpose;
+        changed source => { self.value = self.source; }
+        changed(value) => { AppLogic.set-master-transpose(value); }
     }
 }
 
@@ -340,6 +363,8 @@ export component Sidebar inherits Rectangle {
     }
 
     VerticalLayout {
+        TransposeSection { }
+        Divider { }
         MetronomeSection { }
         Divider { }
         master := MasterSection {
