@@ -226,8 +226,11 @@ impl Synth {
                     voice.sustained = true;
                 }
             }
+            // Key-up noises happen now; the rest waits for the pedal.
+            self.release_triggers(key as u8, Some(false));
         } else {
-            self.release_key(key as u8);
+            self.release_voices(key as u8);
+            self.release_triggers(key as u8, None);
         }
     }
 
@@ -258,7 +261,8 @@ impl Synth {
                 self.sustain_down = false;
                 for key in 0..128u8 {
                     if std::mem::take(&mut self.pending_release[key as usize]) {
-                        self.release_key(key);
+                        self.release_voices(key);
+                        self.release_triggers(key, Some(true));
                     }
                 }
             }
@@ -326,12 +330,17 @@ impl Synth {
         self.clock += frames as u64;
     }
 
-    fn release_key(&mut self, key: u8) {
+    fn release_voices(&mut self, key: u8) {
         for voice in self.voices.iter_mut() {
             if voice.active && voice.key == Some(key) && !voice.one_shot {
                 voice.release();
             }
         }
+    }
+
+    /// Starts the key's release-trigger regions: all of them, or only those that
+    /// do (`Some(true)`) or don't (`Some(false)`) wait for the sustain pedal.
+    fn release_triggers(&mut self, key: u8, waiting: Option<bool>) {
         let instrument = self.instrument.clone();
         let candidates = &instrument.release_by_key[key as usize];
         if candidates.is_empty() {
@@ -346,6 +355,9 @@ impl Synth {
         let rand = self.random();
         for &r in candidates {
             let region = &instrument.regions[r as usize];
+            if waiting.is_some_and(|w| region.waits_for_pedal() != w) {
+                continue;
+            }
             if self.matches(region, r, channel, velocity, rand) {
                 self.start_voice(&instrument, r, Some(key), velocity, held);
             }
@@ -415,7 +427,7 @@ impl Synth {
         let fade = if region.xf_power { fade.sqrt() } else { fade };
         let amp_key = key.unwrap_or(region.amp_keycenter) as f32 - region.amp_keycenter as f32;
         let mut db = amp_key * region.amp_keytrack;
-        if region.trigger == Trigger::Release {
+        if region.is_release() {
             db -= region.rt_decay * held;
         }
         let base_gain = velocity_gain * fade * db_to_gain(db);
@@ -443,7 +455,7 @@ impl Synth {
             released: false,
             sustained: false,
             killed: false,
-            one_shot: loop_mode == LoopMode::OneShot || region.trigger == Trigger::Release || key.is_none(),
+            one_shot: loop_mode == LoopMode::OneShot || region.is_release() || key.is_none(),
             release_time: times.release,
             env: Envelope::start(&times, sample_rate),
             base_gain,
@@ -705,6 +717,21 @@ mod tests {
         assert_eq!(s.active_voices(), 1, "held by the pedal, no release trigger yet");
         s.control_change(0, 64, 0);
         assert_eq!(s.active_voices(), 2, "release trigger on lift");
+    }
+
+    #[test]
+    fn key_up_noises_ignore_the_pedal() {
+        let mut s = synth(
+            "<region> sample=*square
+             <region> trigger=release_key sample=*noise loop_mode=one_shot
+             <region> trigger=release sustain_sw=off sample=*saw loop_mode=one_shot",
+        );
+        s.control_change(0, 64, 127);
+        s.note_on(0, 60, 100);
+        s.note_off(0, 60);
+        assert_eq!(s.active_voices(), 3, "both key-up regions at once, the note held");
+        s.control_change(0, 64, 0);
+        assert_eq!(s.active_voices(), 3, "nothing more on lift");
     }
 
     #[test]

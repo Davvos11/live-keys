@@ -1,7 +1,10 @@
 //! Plays an SFZ instrument live: every MIDI input (or the ones whose name
 //! contains a filter) into the default audio output. Enter quits.
 //!
-//! cargo run -p live-keys-sfz --example play --release -- <file.sfz> [midi port filter]
+//! cargo run -p live-keys-sfz --example play --release -- <file.sfz> [midi port filter] [--samples <dir>]
+//!
+//! `--samples`: the folder to resolve includes and samples against, for an SFZ
+//! kept apart from its samples (like the piano's own).
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -12,12 +15,16 @@ const BLOCK: usize = 512;
 
 fn main() -> Result<()> {
     env_logger::init();
-    let mut args = std::env::args().skip(1);
-    let path = args.next().context("usage: play <file.sfz> [midi port filter]")?;
+    let (args, samples) = split_samples_arg();
+    let mut args = args.into_iter();
+    let path = args.next().context("usage: play <file.sfz> [midi port filter] [--samples <dir>]")?;
     let filter = args.next().map(|f| f.to_lowercase());
 
     println!("loading {path}…");
-    let instrument = Arc::new(Instrument::load(path.as_ref())?);
+    let instrument = Arc::new(match &samples {
+        Some(dir) => Instrument::load_with_base(path.as_ref(), dir.as_ref())?,
+        None => Instrument::load(path.as_ref())?,
+    });
     println!("{} regions, {:.0} MB of samples", instrument.region_count(), instrument.sample_memory() as f64 / 1e6);
 
     let (midi_tx, mut midi_rx) = rtrb::RingBuffer::<[u8; 3]>::new(1024);
@@ -92,4 +99,19 @@ fn main() -> Result<()> {
     println!("playing; press Enter to quit");
     std::io::stdin().read_line(&mut String::new())?;
     Ok(())
+}
+
+/// The command line without `--samples <dir>`, and that dir.
+fn split_samples_arg() -> (Vec<String>, Option<String>) {
+    let mut args = Vec::new();
+    let mut samples = None;
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--samples" {
+            samples = iter.next();
+        } else {
+            args.push(arg);
+        }
+    }
+    (args, samples)
 }

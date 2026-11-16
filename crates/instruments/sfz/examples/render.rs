@@ -1,7 +1,10 @@
 //! Loads an SFZ instrument, plays a short passage offline and writes it to a WAV
 //! file, reporting load time, memory and how fast it renders.
 //!
-//! cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav]
+//! cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav] [--samples <dir>]
+//!
+//! `--samples`: the folder to resolve includes and samples against, for an SFZ
+//! kept apart from its samples (like the piano's own).
 
 use anyhow::{Context, Result};
 use live_keys_sfz::{Instrument, Synth};
@@ -38,12 +41,16 @@ fn passage() -> Vec<(f32, [u8; 3])> {
 
 fn main() -> Result<()> {
     env_logger::init();
-    let mut args = std::env::args().skip(1);
-    let path = args.next().context("usage: render <file.sfz> [out.wav]")?;
+    let (args, samples) = split_samples_arg();
+    let mut args = args.into_iter();
+    let path = args.next().context("usage: render <file.sfz> [out.wav] [--samples <dir>]")?;
     let out = args.next().unwrap_or_else(|| "render.wav".into());
 
     let start = Instant::now();
-    let instrument = Arc::new(Instrument::load(path.as_ref())?);
+    let instrument = Arc::new(match &samples {
+        Some(dir) => Instrument::load_with_base(path.as_ref(), dir.as_ref())?,
+        None => Instrument::load(path.as_ref())?,
+    });
     println!(
         "loaded {} regions, {} samples ({:.0} MB) in {:.2} s",
         instrument.region_count(),
@@ -86,4 +93,19 @@ fn main() -> Result<()> {
     writer.finalize()?;
     println!("wrote {out}");
     Ok(())
+}
+
+/// The command line without `--samples <dir>`, and that dir.
+fn split_samples_arg() -> (Vec<String>, Option<String>) {
+    let mut args = Vec::new();
+    let mut samples = None;
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--samples" {
+            samples = iter.next();
+        } else {
+            args.push(arg);
+        }
+    }
+    (args, samples)
 }

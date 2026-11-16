@@ -3,7 +3,7 @@
 
 use crate::curve::Curve;
 use crate::parse::{self, Section};
-use crate::region::{Applied, Generator, ParseContext, Region, Source, Trigger, float, int, split_number};
+use crate::region::{Applied, Generator, ParseContext, Region, Source, float, int, split_number};
 use crate::sample::Sample;
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashMap};
@@ -39,9 +39,15 @@ impl Instrument {
     /// Loads an `.sfz` file and every sample it uses (in parallel). Regions whose
     /// sample can't be loaded are left out, with a warning.
     pub fn load(path: &Path) -> Result<Instrument> {
-        let sections = parse::parse_file(path)?;
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Self::build(&sections, Some(&base))
+        Self::load_with_base(path, &base)
+    }
+
+    /// Loads an `.sfz` file kept apart from its samples: `#include`s and sample
+    /// paths are resolved against `base` instead of the file's own folder.
+    pub fn load_with_base(path: &Path, base: &Path) -> Result<Instrument> {
+        let sections = parse::parse_file(path, base)?;
+        Self::build(&sections, Some(base))
     }
 
     /// From SFZ text; only generators (`sample=*sine`) work without a `base`
@@ -203,7 +209,7 @@ impl Instrument {
             if !region.cc_triggers.is_empty() {
                 cc_triggered.push(i);
             } else if let Some((lo, hi)) = region.keys {
-                let by_key = if region.trigger == Trigger::Release { &mut release_by_key } else { &mut attack_by_key };
+                let by_key = if region.is_release() { &mut release_by_key } else { &mut attack_by_key };
                 for key in lo..=hi {
                     by_key[key as usize].push(i);
                 }

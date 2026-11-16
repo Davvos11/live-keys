@@ -1,0 +1,11 @@
+[package]
+name = "live-keys-piano"
+description = "live-keys' sampled grand piano, on the Salamander Grand Piano samples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+live-keys-sfz = { path = "../sfz" }
+anyhow = "1"

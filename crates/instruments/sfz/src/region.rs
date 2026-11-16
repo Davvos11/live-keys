@@ -7,8 +7,11 @@
 pub enum Trigger {
     /// On note-on (the default).
     Attack,
-    /// On note-off (or when the sustain pedal lets the note go), with `rt_decay`.
+    /// On note-off, or, if the sustain pedal is down then (and `sustain_sw` is on),
+    /// when the pedal lifts. With `rt_decay`.
     Release,
+    /// On note-off, whatever the pedal does (key-up noises).
+    ReleaseKey,
     /// On note-on when no other key is held.
     First,
     /// On note-on while another key is held.
@@ -204,6 +207,8 @@ pub struct Region {
     pub sw_lokey: Option<u8>,
     pub sw_hikey: Option<u8>,
     pub sw_default: Option<u8>,
+    /// Whether the sustain pedal holds back this region's release trigger.
+    pub sustain_sw: bool,
 
     // Voices.
     pub group: i64,
@@ -283,6 +288,7 @@ impl Default for Region {
             sw_lokey: None,
             sw_hikey: None,
             sw_default: None,
+            sustain_sw: true,
             group: 0,
             off_by: None,
             off_mode: OffMode::Fast,
@@ -347,6 +353,16 @@ impl Region {
         }
     }
 
+    /// Played on note-off (either kind of release trigger).
+    pub fn is_release(&self) -> bool {
+        matches!(self.trigger, Trigger::Release | Trigger::ReleaseKey)
+    }
+
+    /// A release trigger that waits for the sustain pedal to lift.
+    pub fn waits_for_pedal(&self) -> bool {
+        self.trigger == Trigger::Release && self.sustain_sw
+    }
+
     pub fn applies_to_key(&self, key: u8) -> bool {
         self.keys.is_some_and(|(lo, hi)| (lo..=hi).contains(&key))
     }
@@ -403,7 +419,8 @@ impl Region {
             ("seq_position", None) => ok(int(value).map(|v| self.seq_position = v.max(1) as u32)),
             ("trigger", None) => ok(match value {
                 "attack" => Some(Trigger::Attack),
-                "release" | "release_key" => Some(Trigger::Release),
+                "release" => Some(Trigger::Release),
+                "release_key" => Some(Trigger::ReleaseKey),
                 "first" => Some(Trigger::First),
                 "legato" => Some(Trigger::Legato),
                 _ => None,
@@ -414,6 +431,12 @@ impl Region {
             ("sw_hikey", None) => ok(note(value, ctx).map(|k| self.sw_hikey = Some(k))),
             ("sw_default", None) => ok(note(value, ctx).map(|k| self.sw_default = Some(k))),
 
+            ("sustain_sw", None) => ok(match value {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            }
+            .map(|on| self.sustain_sw = on)),
             ("group", None) => ok(int(value).map(|v| self.group = v)),
             ("off_by", None) => ok(int(value).map(|v| self.off_by = Some(v))),
             ("off_mode", None) => ok(match value {

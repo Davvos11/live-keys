@@ -3040,6 +3040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "live-keys-piano"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "live-keys-sfz",
+]
+
+[[package]]
 name = "live-keys-plugin-check"
 version = "0.1.0"
 dependencies = [

@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// One header and the opcodes after it, up to the next header.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,11 +22,11 @@ pub struct Section {
 /// Includes nested deeper than this are taken to be a cycle.
 const MAX_INCLUDE_DEPTH: usize = 32;
 
-/// Parses an SFZ file. `#include` paths are relative to its folder.
-pub fn parse_file(path: &Path) -> Result<Vec<Section>> {
+/// Parses an SFZ file. `#include` paths are relative to `root` (normally the
+/// file's own folder).
+pub fn parse_file(path: &Path, root: &Path) -> Result<Vec<Section>> {
     let text = read_text(path)?;
-    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    parse_str(&text, Some(&root))
+    parse_str(&text, Some(root))
 }
 
 /// Parses SFZ text. Without a `root`, an `#include` is an error.
@@ -93,7 +93,7 @@ impl Preprocessor<'_> {
         let root = self.root.context("#include without a file to resolve it against")?;
         // Relative to the root file's folder, also from included files (that's how
         // sfizz resolves them, and Salamander relies on it).
-        let full: PathBuf = root.join(path.replace('\\', "/"));
+        let full = root.join(path.replace('\\', "/"));
         let text = read_text(&full)?;
         self.expand(&text, depth + 1)
             .with_context(|| format!("in {}", full.display()))
@@ -264,7 +264,7 @@ mod tests {
         std::fs::write(dir.join("Data/region.txt"), "<region> sample=A0$VEL.flac\n").unwrap();
         std::fs::write(dir.join("Data/notes.txt"), "<group> #include \"Data/vel.txt\" lovel=1 #include \"Data/region.txt\"\n").unwrap();
         std::fs::write(dir.join("main.sfz"), "<master>\n#include \"Data/notes.txt\"\n").unwrap();
-        let s = parse_file(&dir.join("main.sfz")).unwrap();
+        let s = parse_file(&dir.join("main.sfz"), &dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let headers: Vec<_> = s.iter().map(|s| s.header.as_str()).collect();
         assert_eq!(headers, ["master", "group", "region"]);
