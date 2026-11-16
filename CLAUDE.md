@@ -137,9 +137,11 @@ cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-k
 # The SFZ engine on its own (not part of the app yet). Salamander, for testing, lives in
 # ~/.local/share/live-keys/samples/salamander/ (git clone of sfzinstruments/SalamanderGrandPiano)
 cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav]
-  # loads it (time, memory), plays a fixed passage offline, writes a WAV, reports render speed
+  # loads it (time, memory), plays a fixed passage, writes a WAV, reports render speed
 cargo run -p live-keys-sfz --example play --release -- <file.sfz> [midi port filter]
   # plays it live from every MIDI input (or the matching ones) on the default output
+# render streams with --stream (at real-time pace; reports underruns and streamed memory) or
+# --head <frames> (a smaller head, to stress the loaders); without, samples load whole.
 # Both take --samples <dir>: resolve includes and samples there (an SFZ kept apart from its
 # samples). The piano: crates/instruments/piano/salamander.sfz --samples ~/.local/share/live-keys/samples/salamander
 ```
@@ -1126,11 +1128,23 @@ behind format-agnostic cores:
   opcodes are collected and logged once, not fatal); `*_onccN`/`*_ccN`/`*ccN`/`*_curveccN`
   become `CcMod`s (`Target`: amplitude multiplies, the rest add; pitch/volume/pan/width/position
   follow the controller live, the rest are read at note-on). `curve.rs`: built-in curves 0–6
-  and `<curve>`s. `sample.rs`: FLAC (claxon) and WAV (hound) decoded whole into `f32`,
-  interleaved, with zero padding around it for 4-point interpolation — **no streaming yet**
-  (Salamander takes 2.6 GB). `instrument.rs`: `Instrument::load` (samples loaded once each,
-  on all cores; regions whose sample fails are dropped with a warning; `load_with_base` for an
-  SFZ kept apart from its samples), per-key indexes of
+  and `<curve>`s. `sample.rs`: a `Decoder` (FLAC via claxon, WAV via hound; block by block,
+  `f32`, at most 2 channels) and `Sample`: interleaved with zero padding around it for 4-point
+  interpolation, held whole or only its **head**. **Streaming** (`stream.rs`, `Preload`): by
+  default each sample keeps its first `DEFAULT_HEAD_FRAMES` (8192) frames — plus the furthest
+  `offset` a region can start it at — in memory (Salamander: 58 MB instead of 2.6 GB). A voice
+  starting on a sample counts itself as a user of its `Slot` and, if the full data isn't
+  loaded, queues a request (one `rtrb` ring per synth, `StreamClient`); a dispatcher thread
+  hands it to one of 4 loader threads, which decode the whole file into a `StreamData` buffer
+  and publish it as they go (`available`, release/acquire), so voices read past the head as
+  soon as frames exist (`Sample::window`). Not there yet = an underrun: silence, counted
+  (`Instrument::underruns`). Data with no users for 5 s is freed by the dispatcher (swap the
+  pointer to null, re-check users, put it back if one appeared — SeqCst, so a voice holding it
+  is always seen); the audio thread never allocates, frees or waits. `Preload::Whole` loads
+  everything (offline rendering). Dropping the `Instrument` joins its threads: not on the
+  audio thread. `instrument.rs`: `Instrument::load`/`load_with`/`from_sfz_with` (samples
+  loaded once each, on all cores; regions whose sample fails are dropped with a warning;
+  `load_with_base` for an SFZ kept apart from its samples), per-key indexes of
   attack and release regions, controller-triggered regions, keyswitch range, initial CCs (MIDI
   defaults, then `set_cc`/`set_hdcc`). `synth.rs`: `Synth` — real-time safe (fixed voice
   pool, no allocation): `midi`/`note_on`/`note_off`/`control_change`/`set_cc`/`pitch_bend`,
@@ -1147,7 +1161,7 @@ behind format-agnostic cores:
   crossfades, `amp_keytrack`, then a 2×2 width/pan matrix ramped per block. `envelope.rs`:
   DAHDSR, linear attack, exponential decay/release (−60 dB at the given time; the voice ends at
   −80 dB). Generators (`sample=*sine`, `*saw`, `*noise`…) are the hook for modelled layers. Not
-  yet: filters, LFOs/other envelopes, effects, streaming, loop points from the file.
+  yet: filters, LFOs/other envelopes, effects, loop points from the file.
 
 - **`crates/instruments/piano`** (`live-keys-piano`) — the Salamander piano: its own SFZ
   (`salamander.sfz`, compiled in as `SFZ`; Salamander's file with the key-release noises on

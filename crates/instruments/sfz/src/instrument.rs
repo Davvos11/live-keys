@@ -4,7 +4,9 @@
 use crate::curve::Curve;
 use crate::parse::{self, Section};
 use crate::region::{Applied, Generator, ParseContext, Region, Source, float, int, split_number};
+use crate::region::Target;
 use crate::sample::Sample;
+use crate::stream::{StreamClient, StreamFile, Streamer};
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Controllers tracked: MIDI's 128 plus room for SFZ's extended ones.
 pub const CC_COUNT: usize = 256;
+
+/// Frames of each sample kept in memory when streaming (as sfizz): ~170 ms at
+/// 48 kHz, plenty for a loader thread to catch up.
+pub const DEFAULT_HEAD_FRAMES: usize = 8192;
+
+/// How an instrument's samples are held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preload {
+    /// Every sample whole, in memory (for offline rendering, or small sets).
+    Whole,
+    /// Each sample's first frames (plus the furthest `offset` a region starts
+    /// it at); the rest is streamed from disk while voices play it.
+    Head(usize),
+}
+
+impl Default for Preload {
+    fn default() -> Self {
+        Preload::Head(DEFAULT_HEAD_FRAMES)
+    }
+}
 
 pub struct Instrument {
     pub(crate) regions: Vec<Region>,
@@ -33,28 +55,63 @@ pub struct Instrument {
     pub(crate) keyswitch_range: Option<(u8, u8)>,
     pub(crate) keyswitch_default: Option<u8>,
     cc_labels: Vec<(u16, String)>,
+    /// Loads streamed samples; `None` when nothing is streamed.
+    streamer: Option<Streamer>,
 }
 
 impl Instrument {
-    /// Loads an `.sfz` file and every sample it uses (in parallel). Regions whose
-    /// sample can't be loaded are left out, with a warning.
+    /// Loads an `.sfz` file and the samples it uses (in parallel), streaming
+    /// them (`Preload::default()`). Regions whose sample can't be loaded are left
+    /// out, with a warning.
+    ///
+    /// The instrument owns the streaming threads: drop it off the audio thread.
     pub fn load(path: &Path) -> Result<Instrument> {
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Self::load_with_base(path, &base)
+        Self::load_with(path, &base, Preload::default())
     }
 
     /// Loads an `.sfz` file kept apart from its samples: `#include`s and sample
     /// paths are resolved against `base` instead of the file's own folder.
     pub fn load_with_base(path: &Path, base: &Path) -> Result<Instrument> {
+        Self::load_with(path, base, Preload::default())
+    }
+
+    /// `load_with_base`, choosing how samples are held.
+    pub fn load_with(path: &Path, base: &Path, preload: Preload) -> Result<Instrument> {
         let sections = parse::parse_file(path, base)?;
-        Self::build(&sections, Some(base))
+        Self::build(&sections, Some(base), preload)
     }
 
     /// From SFZ text; only generators (`sample=*sine`) work without a `base`
     /// folder to find sample files in.
     pub fn from_sfz(text: &str, base: Option<&Path>) -> Result<Instrument> {
+        Self::from_sfz_with(text, base, Preload::default())
+    }
+
+    /// `from_sfz`, choosing how samples are held.
+    pub fn from_sfz_with(text: &str, base: Option<&Path>, preload: Preload) -> Result<Instrument> {
         let sections = parse::parse_str(text, base)?;
-        Self::build(&sections, base)
+        Self::build(&sections, base, preload)
+    }
+
+    /// Samples streamed from disk (the rest are whole in memory).
+    pub fn streamed_sample_count(&self) -> usize {
+        self.samples.iter().filter(|s| s.is_streamed()).count()
+    }
+
+    /// Bytes of streamed sample data loaded right now (beyond `sample_memory`).
+    pub fn streamed_memory(&self) -> usize {
+        self.streamer.as_ref().map_or(0, Streamer::loaded_bytes)
+    }
+
+    /// How often a voice has needed streamed frames that weren't loaded yet
+    /// (and played silence instead), since loading.
+    pub fn underruns(&self) -> u64 {
+        self.streamer.as_ref().map_or(0, Streamer::underruns)
+    }
+
+    pub(crate) fn stream_client(&self) -> Option<StreamClient> {
+        self.streamer.as_ref().map(Streamer::client)
     }
 
     pub fn region_count(&self) -> usize {
@@ -65,7 +122,7 @@ impl Instrument {
         self.samples.len()
     }
 
-    /// Bytes of sample data held in memory.
+    /// Bytes of sample data held in memory for good (whole samples and heads).
     pub fn sample_memory(&self) -> usize {
         self.samples.iter().map(Sample::memory).sum()
     }
@@ -84,7 +141,7 @@ impl Instrument {
         self.curves.get(index as usize).and_then(Option::as_ref).unwrap_or_else(|| self.curves[0].as_ref().unwrap())
     }
 
-    fn build(sections: &[Section], base: Option<&Path>) -> Result<Instrument> {
+    fn build(sections: &[Section], base: Option<&Path>, preload: Preload) -> Result<Instrument> {
         let mut regions = Vec::new();
         let mut curves: Vec<Option<Curve>> = (0..7).map(Curve::builtin).collect();
         let mut initial_cc = [0.0; CC_COUNT];
@@ -192,7 +249,8 @@ impl Instrument {
             log::warn!("sfz: unreadable values: {}", bad.into_iter().collect::<Vec<_>>().join(" "));
         }
 
-        let samples = resolve_sources(&mut regions, base)?;
+        let (samples, stream_files) = resolve_sources(&mut regions, base, preload)?;
+        let streamer = (!stream_files.is_empty()).then(|| Streamer::new(stream_files));
         regions.retain(|r| r.source != Source::None);
         let velcurves = regions
             .iter()
@@ -235,13 +293,17 @@ impl Instrument {
             keyswitch_range,
             keyswitch_default,
             cc_labels,
+            streamer,
         })
     }
 }
 
-/// Sets every region's source, loading each sample file once (in parallel).
-fn resolve_sources(regions: &mut [Region], base: Option<&Path>) -> Result<Vec<Sample>> {
+/// Sets every region's source, loading each sample file once (in parallel), and
+/// lists the streamed ones (their slot numbers set in the samples).
+fn resolve_sources(regions: &mut [Region], base: Option<&Path>, preload: Preload) -> Result<(Vec<Sample>, Vec<StreamFile>)> {
     let mut paths: Vec<PathBuf> = Vec::new();
+    // Per path, the frames to keep in memory: the head, past the furthest offset.
+    let mut heads: Vec<Option<usize>> = Vec::new();
     let mut index_of: HashMap<PathBuf, u32> = HashMap::new();
     let mut region_paths: Vec<Option<u32>> = Vec::with_capacity(regions.len());
     for region in regions.iter_mut() {
@@ -259,19 +321,35 @@ fn resolve_sources(regions: &mut [Region], base: Option<&Path>) -> Result<Vec<Sa
         let path = base.join(relative);
         let index = *index_of.entry(path.clone()).or_insert_with(|| {
             paths.push(path);
+            heads.push(None);
             (paths.len() - 1) as u32
         });
+        if let Preload::Head(frames) = preload {
+            let offset_mods: f32 = region.mods.iter().filter(|m| m.target == Target::Offset).map(|m| m.depth.max(0.0)).sum();
+            let furthest = region.offset as usize + offset_mods.ceil() as usize;
+            let head = &mut heads[index as usize];
+            *head = Some(head.unwrap_or(0).max(furthest + frames));
+        }
         region_paths.push(Some(index));
     }
 
-    let loaded = load_parallel(&paths);
+    let loaded = load_parallel(&paths, &heads);
     let mut samples = Vec::with_capacity(paths.len());
+    let mut stream_files = Vec::new();
     // Index in `paths` → index in `samples` (failed loads are left out).
     let mut remap: Vec<Option<u32>> = Vec::with_capacity(paths.len());
     for result in loaded {
         match result {
-            Ok(sample) => {
+            Ok(mut sample) => {
                 remap.push(Some(samples.len() as u32));
+                if sample.is_streamed() {
+                    sample.slot = stream_files.len() as u32;
+                    stream_files.push(StreamFile {
+                        path: paths[remap.len() - 1].clone(),
+                        channels: sample.channels(),
+                        frames: sample.frames(),
+                    });
+                }
                 samples.push(sample);
             }
             Err(err) => {
@@ -289,10 +367,10 @@ fn resolve_sources(regions: &mut [Region], base: Option<&Path>) -> Result<Vec<Sa
         return Err(anyhow::anyhow!("none of the instrument's {} samples could be loaded", paths.len()))
             .context("loading samples");
     }
-    Ok(samples)
+    Ok((samples, stream_files))
 }
 
-fn load_parallel(paths: &[PathBuf]) -> Vec<Result<Sample>> {
+fn load_parallel(paths: &[PathBuf], heads: &[Option<usize>]) -> Vec<Result<Sample>> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(paths.len().max(1));
     let next = AtomicUsize::new(0);
     let mut results: Vec<Option<Result<Sample>>> = (0..paths.len()).map(|_| None).collect();
@@ -304,7 +382,7 @@ fn load_parallel(paths: &[PathBuf]) -> Vec<Result<Sample>> {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(path) = paths.get(i) else { break };
-                        out.push((i, Sample::load(path)));
+                        out.push((i, Sample::load(path, heads[i])));
                     }
                     out
                 })

@@ -8,12 +8,20 @@ use crate::envelope::Envelope;
 use crate::instrument::{CC_COUNT, Instrument};
 use crate::region::{Generator, LoopMode, OffMode, Region, Source, Target, Trigger};
 use crate::sample::Sample;
+use crate::stream::{StreamClient, StreamData};
 use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::sync::Arc;
 
 /// Fade for voices cut by `off_mode=fast` (and stolen ones), in seconds.
 const FAST_OFF: f32 = 0.006;
 const SUSTAIN_PEDAL: u16 = 64;
+
+/// A voice's view of its sample's streamed data (null until loaded).
+#[derive(Clone, Copy)]
+struct StreamPtr(*const StreamData);
+
+// Points into the instrument, which the synth keeps alive; read only.
+unsafe impl Send for StreamPtr {}
 
 #[derive(Clone)]
 struct Voice {
@@ -43,6 +51,9 @@ struct Voice {
     loop_start: f64,
     loop_end: f64,
     noise: u32,
+    /// The streamer slot this voice counts as a user of, if its sample streams.
+    stream_slot: Option<u32>,
+    stream: StreamPtr,
 
     env: Envelope,
     /// Velocity, crossfades, key tracking, release decay.
@@ -70,6 +81,8 @@ impl Voice {
         loop_start: 0.0,
         loop_end: 0.0,
         noise: 1,
+        stream_slot: None,
+        stream: StreamPtr(std::ptr::null()),
         env: Envelope::IDLE,
         base_gain: 0.0,
         matrix: [0.0; 4],
@@ -120,6 +133,8 @@ pub struct Synth {
     rng: u32,
     clock: u64,
     next_id: u64,
+    /// Requests for streamed samples; `None` if the instrument streams nothing.
+    streams: Option<StreamClient>,
 }
 
 impl Synth {
@@ -144,6 +159,7 @@ impl Synth {
             rng: 0x9E37_79B9,
             clock: 0,
             next_id: 0,
+            streams: instrument.stream_client(),
             instrument,
         }
     }
@@ -305,7 +321,7 @@ impl Synth {
     pub fn all_sound_off(&mut self) {
         self.all_notes_off();
         for voice in self.voices.iter_mut() {
-            voice.active = false;
+            stop(voice, &self.streams);
         }
     }
 
@@ -315,7 +331,7 @@ impl Synth {
         let (left, right) = (&mut left[..frames], &mut right[..frames]);
         left.fill(0.0);
         right.fill(0.0);
-        let Synth { instrument, voices, cc, bend, .. } = self;
+        let Synth { instrument, voices, cc, bend, streams, .. } = self;
         for voice in voices.iter_mut().filter(|v| v.active) {
             let region = &instrument.regions[voice.region as usize];
             let (matrix, pitch_cents) = live_values(instrument, region, cc, voice);
@@ -325,7 +341,20 @@ impl Synth {
                 Source::Sample(i) => Some(&instrument.samples[i as usize]),
                 _ => None,
             };
-            render_voice(voice, sample, step, matrix, left, right);
+            if let (Some(slot), Some(streams)) = (voice.stream_slot, streams.as_mut())
+                && voice.stream.0.is_null()
+            {
+                voice.stream = StreamPtr(streams.poll(slot));
+            }
+            // SAFETY: streamed data stays allocated while the voice counts as a user.
+            let stream = unsafe { voice.stream.0.as_ref() };
+            let underrun = render_voice(voice, sample, stream, step, matrix, left, right);
+            if underrun && let Some(streams) = streams.as_ref() {
+                streams.count_underrun();
+            }
+            if !voice.active {
+                stop(voice, streams);
+            }
         }
         self.clock += frames as u64;
     }
@@ -407,6 +436,7 @@ impl Synth {
         }
 
         let index = self.free_voice();
+        stop(&mut self.voices[index], &self.streams); // a stolen voice
         let sample_rate = self.sample_rate;
         let cc = &self.cc;
         let modulation = |target: Target| -> f32 {
@@ -465,6 +495,12 @@ impl Synth {
         match region.source {
             Source::Sample(i) => {
                 let sample = &instrument.samples[i as usize];
+                if sample.is_streamed()
+                    && let Some(streams) = self.streams.as_mut()
+                {
+                    voice.stream_slot = Some(sample.slot);
+                    voice.stream = StreamPtr(streams.acquire(sample.slot));
+                }
                 let frames = sample.frames() as f64;
                 voice.step = ratio * sample.rate() as f64 / sample_rate as f64;
                 voice.end = region.end.map_or(frames, |e| (e as f64 + 1.0).min(frames));
@@ -605,14 +641,27 @@ fn hermite(xm1: f32, x0: f32, x1: f32, x2: f32, t: f32) -> f32 {
     ((a * t - b) * t + c) * t + x0
 }
 
+/// Ends a voice, letting go of its streamed sample.
+fn stop(voice: &mut Voice, streams: &Option<StreamClient>) {
+    if let (Some(slot), Some(streams)) = (voice.stream_slot.take(), streams) {
+        streams.release(slot);
+    }
+    voice.stream = StreamPtr(std::ptr::null());
+    voice.active = false;
+}
+
+/// Renders a voice into the buffers (adding); returns whether it ran out of
+/// streamed data (and played silence for that part).
 fn render_voice(
     voice: &mut Voice,
     sample: Option<&Sample>,
+    stream: Option<&StreamData>,
     step: f64,
     target: [f32; 4],
     left: &mut [f32],
     right: &mut [f32],
-) {
+) -> bool {
+    let mut underrun = false;
     let frames = left.len();
     let ramp = 1.0 / frames.max(1) as f32;
     let delta: [f32; 4] = std::array::from_fn(|i| (target[i] - voice.matrix[i]) * ramp);
@@ -630,17 +679,23 @@ fn render_voice(
             Some(sample) => {
                 let index = voice.pos as usize;
                 let t = (voice.pos - index as f64) as f32;
-                let w = sample.window(index);
                 let looping = match voice.loop_mode {
                     LoopMode::Continuous => true,
                     LoopMode::Sustain => !voice.released,
                     _ => false,
                 };
-                let frame = if sample.channels() == 2 {
-                    (hermite(w[0], w[2], w[4], w[6], t), hermite(w[1], w[3], w[5], w[7], t))
-                } else {
-                    let s = hermite(w[0], w[1], w[2], w[3], t);
-                    (s, s)
+                let frame = match sample.window(index, stream) {
+                    Some(w) if sample.channels() == 2 => {
+                        (hermite(w[0], w[2], w[4], w[6], t), hermite(w[1], w[3], w[5], w[7], t))
+                    }
+                    Some(w) => {
+                        let s = hermite(w[0], w[1], w[2], w[3], t);
+                        (s, s)
+                    }
+                    None => {
+                        underrun = true;
+                        (0.0, 0.0)
+                    }
                 };
                 voice.pos += step;
                 if looping && voice.pos >= voice.loop_end {
@@ -680,6 +735,7 @@ fn render_voice(
         }
     }
     voice.matrix = target;
+    underrun
 }
 
 #[cfg(test)]
@@ -771,5 +827,88 @@ mod tests {
         s.control_change(0, 7, 0);
         peak(&mut s, 10); // ramps down over a block
         assert!(peak(&mut s, 10) < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use crate::instrument::Preload;
+
+    fn render(instrument: Instrument, settle: bool) -> (Vec<f32>, u64) {
+        let instrument = Arc::new(instrument);
+        let mut synth = Synth::new(instrument.clone(), 48000.0, 8);
+        synth.note_on(0, 62, 100);
+        let mut out = Vec::new();
+        let (mut l, mut r) = ([0.0; 32], [0.0; 32]);
+        for block in 0..400 {
+            synth.render(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+            if settle && block == 0 {
+                // The first block asked for the rest of the sample; let it load.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+        (out, instrument.underruns())
+    }
+
+    fn write_tone(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let spec = hound::WavSpec { channels: 2, sample_rate: 44100, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut writer = hound::WavWriter::create(dir.join("tone.wav"), spec).unwrap();
+        for i in 0..20000 {
+            let s = ((i as f32 * 0.05).sin() * 20000.0) as i16;
+            writer.write_sample(s).unwrap();
+            writer.write_sample(-s).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn streamed_playback_matches_whole_samples() {
+        let dir = std::env::temp_dir().join(format!("live-keys-sfz-stream-{}", std::process::id()));
+        write_tone(&dir);
+        let sfz = "<region> sample=tone.wav pitch_keycenter=60";
+        let whole = Instrument::from_sfz_with(sfz, Some(&dir), Preload::Whole).unwrap();
+        let streamed = Instrument::from_sfz_with(sfz, Some(&dir), Preload::Head(64)).unwrap();
+        assert_eq!(streamed.streamed_sample_count(), 1);
+        let (expected, _) = render(whole, false);
+        let (actual, underruns) = render(streamed, true);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(underruns, 0);
+        assert!(expected.iter().any(|&s| s != 0.0));
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn idle_streamed_data_is_freed() {
+        crate::stream::set_keep_for_tests(std::time::Duration::from_millis(50));
+        let dir = std::env::temp_dir().join(format!("live-keys-sfz-free-{}", std::process::id()));
+        write_tone(&dir);
+        let instrument = Arc::new(Instrument::from_sfz_with("<region> sample=tone.wav", Some(&dir), Preload::Head(64)).unwrap());
+        let mut synth = Synth::new(instrument.clone(), 48000.0, 8);
+        let (mut l, mut r) = ([0.0; 32], [0.0; 32]);
+        let wait_for = |what: &dyn Fn() -> bool| {
+            let start = std::time::Instant::now();
+            while !what() {
+                assert!(start.elapsed().as_secs() < 5, "timed out");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        synth.note_on(0, 60, 100);
+        synth.render(&mut l, &mut r);
+        wait_for(&|| instrument.streamed_memory() > 0);
+        // Kept while the voice plays, well past the keep time.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(instrument.streamed_memory() > 0);
+        synth.all_sound_off();
+        wait_for(&|| instrument.streamed_memory() == 0);
+        // And loaded again for the next note.
+        synth.note_on(0, 60, 100);
+        synth.render(&mut l, &mut r);
+        wait_for(&|| instrument.streamed_memory() > 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(instrument.underruns(), 0);
     }
 }

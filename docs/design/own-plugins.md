@@ -50,11 +50,12 @@ offline render to WAV, and live play from MIDI. Details in CLAUDE.md.
 
 Next steps, roughly in order:
 
-- **Streaming from disk.** Everything is decoded into memory for now: 2.6 GB for Salamander,
-  fine for development, not for shipping. Keep each sample's first part in memory (sfizz:
-  ~8k frames; enough to cover disk latency) and stream the rest per voice from a loader
-  thread into ring buffers; FLAC decoding has to happen there too (or samples are cached
-  decoded on disk on first use).
+- **Streaming from disk** (done, 2026-11-16): each sample's first 8192 frames stay in memory
+  (58 MB for Salamander), and a voice starting on a sample has loader threads decode the whole
+  file into memory, readable as it's decoded, freed 5 s after its last voice. No underruns
+  rendering at real-time pace, even with heads of 64 frames (on an NVMe disk); peak ~190 MB
+  for the test passage. Details in CLAUDE.md. Later, if disks turn out slower: decode only
+  what's ahead of each voice instead of whole files.
 - **Filters** (`fil_type`, `cutoff`, `resonance`, `fil_veltrack`, `_oncc`), for Brightness.
 - **The built-in front-end** (`PluginFormat::Builtin`) with the panel, mapping each control
   onto an SFZ controller — Salamander already exposes string resonance, hammer noise, pedal

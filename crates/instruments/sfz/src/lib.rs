@@ -13,7 +13,8 @@
 //! (pedal noises), groups with `off_by` and (note) polyphony, velocity curves
 //! and crossfades, controller modulation with curves, and the amplitude
 //! envelope. Generators (`sample=*sine`…) are the hook for modelled layers.
-//! Not yet: filters, LFOs and other envelopes, effects, streaming from disk.
+//! Samples are streamed from disk: only each one's head stays in memory.
+//! Not yet: filters, LFOs and other envelopes, effects.
 
 mod curve;
 mod envelope;
@@ -21,10 +22,11 @@ mod instrument;
 pub mod parse;
 mod region;
 mod sample;
+mod stream;
 mod synth;
 
 pub use curve::Curve;
-pub use instrument::{CC_COUNT, Instrument};
+pub use instrument::{CC_COUNT, DEFAULT_HEAD_FRAMES, Instrument, Preload};
 pub use region::{Generator, LoopMode, Region, Trigger};
 pub use sample::Sample;
 pub use synth::Synth;

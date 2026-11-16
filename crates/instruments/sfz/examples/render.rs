@@ -1,15 +1,19 @@
 //! Loads an SFZ instrument, plays a short passage offline and writes it to a WAV
 //! file, reporting load time, memory and how fast it renders.
 //!
-//! cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav] [--samples <dir>]
+//! cargo run -p live-keys-sfz --example render --release -- <file.sfz> [out.wav] [--samples <dir>] [--stream]
 //!
 //! `--samples`: the folder to resolve includes and samples against, for an SFZ
 //! kept apart from its samples (like the piano's own).
+//! `--stream`: stream the samples, as when playing live, rendering at real-time
+//! pace (streaming can't keep up with an offline render), and report underruns
+//! and streamed memory. Without it every sample is loaded whole. `--head <frames>`:
+//! stream, keeping that many frames of each sample in memory (default 8192).
 
 use anyhow::{Context, Result};
-use live_keys_sfz::{Instrument, Synth};
+use live_keys_sfz::{Instrument, Preload, Synth};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 256;
@@ -42,24 +46,34 @@ fn passage() -> Vec<(f32, [u8; 3])> {
 fn main() -> Result<()> {
     env_logger::init();
     let (args, samples) = split_samples_arg();
-    let mut args = args.into_iter();
+    let head = args.iter().position(|a| a == "--head").and_then(|i| args.get(i + 1)?.parse::<usize>().ok());
+    let stream = head.is_some() || args.iter().any(|a| a == "--stream");
+    let mut args = args.iter().enumerate().filter(|&(i, a)| {
+        a != "--stream" && a != "--head" && !(i > 0 && args[i - 1] == "--head")
+    }).map(|(_, a)| a.clone());
     let path = args.next().context("usage: render <file.sfz> [out.wav] [--samples <dir>]")?;
     let out = args.next().unwrap_or_else(|| "render.wav".into());
 
     let start = Instant::now();
-    let instrument = Arc::new(match &samples {
-        Some(dir) => Instrument::load_with_base(path.as_ref(), dir.as_ref())?,
-        None => Instrument::load(path.as_ref())?,
-    });
+    let preload = match head {
+        Some(frames) => Preload::Head(frames),
+        None if stream => Preload::default(),
+        None => Preload::Whole,
+    };
+    let path: &std::path::Path = path.as_ref();
+    let base = samples.map_or_else(|| path.parent().unwrap_or(".".as_ref()).to_path_buf(), Into::into);
+    let instrument = Arc::new(Instrument::load_with(path, &base, preload)?);
     println!(
-        "loaded {} regions, {} samples ({:.0} MB) in {:.2} s",
+        "loaded {} regions, {} samples ({} streamed; {:.0} MB in memory) in {:.2} s",
         instrument.region_count(),
         instrument.sample_count(),
+        instrument.streamed_sample_count(),
         instrument.sample_memory() as f64 / 1e6,
         start.elapsed().as_secs_f64()
     );
 
-    let mut synth = Synth::new(instrument, RATE, 256);
+    let mut synth = Synth::new(instrument.clone(), RATE, 256);
+    let mut most_streamed = 0;
     let events = passage();
     let seconds = events.last().map_or(0.0, |e| e.0) + 4.0;
     let total = (seconds * RATE) as usize;
@@ -75,6 +89,13 @@ fn main() -> Result<()> {
         let end = (block + BLOCK).min(total);
         synth.render(&mut left[block..end], &mut right[block..end]);
         most_voices = most_voices.max(synth.active_voices());
+        if stream {
+            most_streamed = most_streamed.max(instrument.streamed_memory());
+            let due = Duration::from_secs_f64(end as f64 / RATE as f64);
+            if let Some(wait) = due.checked_sub(start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
     }
     let took = start.elapsed().as_secs_f64();
     println!(
@@ -82,6 +103,13 @@ fn main() -> Result<()> {
         seconds as f64 / took
     );
 
+    if stream {
+        println!(
+            "streamed: {} underruns, at most {:.0} MB loaded",
+            instrument.underruns(),
+            most_streamed as f64 / 1e6
+        );
+    }
     let peak = left.iter().chain(&right).fold(0.0f32, |m, s| m.max(s.abs()));
     println!("peak {:.1} dBFS", 20.0 * peak.log10());
     let spec = hound::WavSpec { channels: 2, sample_rate: RATE as u32, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };

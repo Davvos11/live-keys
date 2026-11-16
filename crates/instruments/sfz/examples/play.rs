@@ -25,7 +25,13 @@ fn main() -> Result<()> {
         Some(dir) => Instrument::load_with_base(path.as_ref(), dir.as_ref())?,
         None => Instrument::load(path.as_ref())?,
     });
-    println!("{} regions, {:.0} MB of samples", instrument.region_count(), instrument.sample_memory() as f64 / 1e6);
+    println!(
+        "{} regions, {} samples ({} streamed), {:.0} MB in memory",
+        instrument.region_count(),
+        instrument.sample_count(),
+        instrument.streamed_sample_count(),
+        instrument.sample_memory() as f64 / 1e6
+    );
 
     let (midi_tx, mut midi_rx) = rtrb::RingBuffer::<[u8; 3]>::new(1024);
     let midi_tx = Arc::new(std::sync::Mutex::new(midi_tx));
@@ -72,7 +78,7 @@ fn main() -> Result<()> {
     let channels = config.channels() as usize;
     let rate = config.sample_rate() as f32;
     println!("output at {rate} Hz, {channels} channels");
-    let mut synth = Synth::new(instrument, rate, 256);
+    let mut synth = Synth::new(instrument.clone(), rate, 256);
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     let stream = device.build_output_stream(
         config.into(),
@@ -97,6 +103,18 @@ fn main() -> Result<()> {
     )?;
     stream.play()?;
     println!("playing; press Enter to quit");
+    let stats = instrument.clone();
+    std::thread::spawn(move || {
+        let mut last = (0, 0);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let now = (stats.streamed_memory() / 1_000_000, stats.underruns());
+            if now != last {
+                println!("streamed: {} MB loaded, {} underruns", now.0, now.1);
+                last = now;
+            }
+        }
+    });
     std::io::stdin().read_line(&mut String::new())?;
     Ok(())
 }
