@@ -95,6 +95,7 @@ export component RangeSlider inherits Rectangle {
     }
 
     touch := TouchArea {
+        mouse-cursor: MouseCursor.ew-resize;
         pointer-event(event) => {
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                 let value = root.value-at(self.mouse-x);
@@ -121,6 +122,8 @@ export component SingleSlider inherits Rectangle {
     in property <float> value;
     // Where a double-click puts it.
     in property <float> default-value: root.minimum;
+    // Hovered or dragged, for showing its value.
+    out property <bool> active: touch.has-hover || touch.pressed;
     callback changed(/* value */ float);
 
     private property <length> handle-size: 18px;
@@ -158,7 +161,7 @@ export component SingleSlider inherits Rectangle {
         active: touch.pressed;
     }
     touch := TouchArea {
-        mouse-cursor: pointer;
+        mouse-cursor: MouseCursor.ew-resize;
         pointer-event(event) => {
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                 root.changed(root.value-at(self.mouse-x));

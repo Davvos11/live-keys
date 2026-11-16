@@ -846,7 +846,8 @@ behind format-agnostic cores:
   — a BPM `Stepper` (`signed: false`; Enter/Escape leave its field, and it shows values set
   from elsewhere, like Tap's, even while focused), play/stop under the knob, then a
   time-signature button and a subdivision button (♫) opening `MenuPopup`s, and Tap), the master output (`MasterSection`: a
-  `SingleSlider` in dB like a slot's volume, an `FxStrip` of `AppState.master-effects`
+  `SingleSlider` in dB like a slot's volume, its value shown beside the title while hovered
+  or dragged, an `FxStrip` of `AppState.master-effects`
   (exported from `slot_panel.slint`, as slot `AppState.master-slot`) with its own
   `PresetPopup`, a mute button and
   the output device `Select`), the MIDI inputs, then Settings and MIDI panic

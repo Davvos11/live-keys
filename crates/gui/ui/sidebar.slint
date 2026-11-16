@@ -181,8 +181,21 @@ component MasterSection inherits VerticalLayout {
     padding-bottom: 10px;
     spacing: 3px;
 
-    SectionTitle { text: "Master out:"; }
-    SingleSlider {
+    HorizontalLayout {
+        SectionTitle { text: "Master out:"; }
+        // The volume while the slider is hovered or dragged, like a slot's knob.
+        Text {
+            horizontal-stretch: 1;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            text: !master-volume.active ? ""
+                : AppState.master-volume-db <= AppState.min-volume-db ? "muted"
+                : "\{Math.round(AppState.master-volume-db * 10) / 10} dB";
+            color: Theme.text-muted;
+            font-size: Theme.small-font-size;
+        }
+    }
+    master-volume := SingleSlider {
         height: 32px;
         minimum: AppState.min-volume-db;
         maximum: AppState.max-volume-db;
