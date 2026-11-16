@@ -5,7 +5,7 @@ import { AppState, AppLogic, Category, EffectRow, MidiInputRow } from "globals.s
 import { Theme, Icons, KButton, DropdownButton, ListItem, Select, Stepper } from "widgets.slint";
 import { LabelledKnob } from "knob.slint";
 import { SingleSlider } from "range_slider.slint";
-import { EffectPopup, FxStrip, PopupFrame } from "slot_panel.slint";
+import { FxStrip, PopupFrame } from "slot_panel.slint";
 import { PresetPopup } from "preset_bar.slint";
 
 // A horizontal line between sections.
@@ -173,8 +173,7 @@ component MetronomeSection inherits VerticalLayout {
 
 component MasterSection inherits VerticalLayout {
     callback choose-effect();
-    callback open-effect(/* index */ int);
-    in property <int> selected-effect: -1;
+    callback presets(/* index */ int);
 
     vertical-stretch: 0;
     padding: 5px;
@@ -194,8 +193,8 @@ component MasterSection inherits VerticalLayout {
     FxStrip {
         effects: AppState.master-effects;
         can-add: AppState.master-effects.length < AppState.max-effects;
-        selected: root.selected-effect;
-        open(index) => { root.open-effect(index); }
+        slot-index: AppState.master-slot;
+        presets(index) => { root.presets(index); }
         add => { root.choose-effect(); }
     }
     if AppState.master-status != "" : Text {
@@ -331,11 +330,11 @@ export component Sidebar inherits Rectangle {
         MetronomeSection { }
         Divider { }
         master := MasterSection {
-            selected-effect: effect-popup.is-open ? root.fx-index : -1;
             choose-effect => { root.choose-effect(); }
-            open-effect(index) => {
+            presets(index) => {
                 root.fx-index = index;
-                effect-popup.show();
+                AppLogic.open-preset-browser(root.fx-plugin.key);
+                preset-popup.show();
             }
         }
         Divider { }
@@ -366,21 +365,6 @@ export component Sidebar inherits Rectangle {
                     clicked => { AppLogic.midi-panic(); }
                 }
             }
-        }
-    }
-
-    effect-popup := EffectPopup {
-        x: 5px;
-        y: master.y + 160px;
-        width: root.width - 10px;
-        plugin: root.fx-plugin;
-        slot-index: AppState.master-slot;
-        section: 1;
-        index: root.fx-index;
-        count: AppState.master-effects.length;
-        browse-presets => {
-            AppLogic.open-preset-browser(root.fx-plugin.key);
-            preset-popup.show();
         }
     }
 

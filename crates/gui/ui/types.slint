@@ -66,6 +66,10 @@ export struct EffectRow {
     // The curve its FX square shows: 0 none, 1 compressor, 2 filter (from its
     // name; a placeholder until plugins can be asked).
     graph: int,
+    // Its inline display (Ardour's LV2 extension), rendered from the plugin,
+    // which its FX square shows instead of the name and curve.
+    display: image,
+    has-display: bool,
     // The preset last loaded or saved; empty if none.
     preset-name: string,
     // Whether that preset was saved by the user (and so can be deleted).

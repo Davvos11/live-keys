@@ -126,6 +126,9 @@ export global AppLogic {
     callback move-effect(/* slot */ int, /* section */ int, /* from */ int, /* to */ int);
     // Opens `key`'s parameter window, or closes it if open.
     callback toggle-params(/* key */ int);
+    // An effect's square clicked with nothing open: its own GUI, or its
+    // parameter window if it has none or the GUI fails to open.
+    callback open-effect(/* key */ int);
     callback open-plugin-gui(/* key */ int);
     callback close-plugin-gui(/* key */ int);
     // Invoked by the Rust side for a `ParamsWindow`'s edits (a separate window
@@ -154,6 +157,9 @@ export global AppLogic {
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
+    // Which tab a slot shows (0 the panel and audio effects, 2 MIDI), so only
+    // visible effects' inline displays are rendered.
+    callback set-slot-tab(/* slot */ int, /* tab */ int);
     // The instrument panel on a slot's first tab. `cell` indexes
     // `SlotState.cells`, `drawbar` `SlotState.drawbars`. A cell's value: a
     // knob's position, a switch's state, or a lever's or stepped knob's option.

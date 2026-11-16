@@ -50,6 +50,9 @@ pub struct Case {
     pub resize: Resize,
     /// The GUI talks to the DSP through atoms, both ways.
     pub atoms: bool,
+    /// It has an inline display (Ardour's LV2 extension) that draws something,
+    /// and asks to be redrawn (`queue_draw`) after a note or parameter change.
+    pub inline_display: bool,
     /// Time to let the plugin get ready before playing.
     pub warmup: Duration,
 }
@@ -70,6 +73,7 @@ pub const CASES: &[Case] = &[
         param: param("Envelope Decay", Target::Max, None),
         resize: Resize::NoGui,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -82,6 +86,7 @@ pub const CASES: &[Case] = &[
         param: None,
         resize: Resize::Follows,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -93,6 +98,7 @@ pub const CASES: &[Case] = &[
         param: None,
         resize: Resize::Follows,
         atoms: true,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -104,6 +110,7 @@ pub const CASES: &[Case] = &[
         param: param("volume", Target::Min, Some(20.0)),
         resize: Resize::NotByHost,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -115,6 +122,7 @@ pub const CASES: &[Case] = &[
         param: param("Output gain", Target::Min, None),
         resize: Resize::Follows,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -127,6 +135,20 @@ pub const CASES: &[Case] = &[
         param: param("Gain", Target::Min, Some(12.0)),
         resize: Resize::Follows,
         atoms: true,
+        inline_display: true,
+        warmup: NO_WAIT,
+    },
+    Case {
+        name: "lv2-inline-display",
+        plugin: "http://gareus.org/oss/lv2/darc#stereo",
+        quirks: "inline display that only takes the snapshot it draws while the host offers \
+                 queue_draw (x42-comp); a thin bar, not a square",
+        role: Role::AudioEffect,
+        sound: true,
+        param: param("Ratio", Target::Max, None),
+        resize: Resize::Follows,
+        atoms: false,
+        inline_display: true,
         warmup: NO_WAIT,
     },
     Case {
@@ -139,6 +161,7 @@ pub const CASES: &[Case] = &[
         param: param("Transpose", Target::Min, Some(20.0)),
         resize: Resize::NoGui,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -151,6 +174,7 @@ pub const CASES: &[Case] = &[
         param: param("Global Volume", Target::Min, Some(20.0)),
         resize: Resize::Follows,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -162,6 +186,7 @@ pub const CASES: &[Case] = &[
         param: param("Bypass", Target::Max, None),
         resize: Resize::Fixed,
         atoms: false,
+        inline_display: false,
         warmup: Duration::from_secs(10),
     },
     Case {
@@ -173,6 +198,7 @@ pub const CASES: &[Case] = &[
         param: None,
         resize: Resize::NoGui,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -185,6 +211,7 @@ pub const CASES: &[Case] = &[
         param: param("Global Volume", Target::Min, Some(20.0)),
         resize: Resize::Follows,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -196,6 +223,7 @@ pub const CASES: &[Case] = &[
         param: param("Volume", Target::Min, Some(20.0)),
         resize: Resize::Fixed,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -208,6 +236,7 @@ pub const CASES: &[Case] = &[
         param: param("Output gain", Target::Min, Some(40.0)),
         resize: Resize::Fixed,
         atoms: false,
+        inline_display: false,
         warmup: NO_WAIT,
     },
 ];

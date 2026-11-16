@@ -1,3 +1,4 @@
+mod inline_display;
 mod preset;
 
 use std::cell::OnceCell;
@@ -13,6 +14,8 @@ use livi::event::LV2AtomSequence;
 
 pub use livi;
 pub use lv2_raw;
+pub use inline_display::{InlineDisplay, InlinePicture, argb32_to_rgba};
+use inline_display::QueueDraw;
 pub use preset::InstanceRef;
 use preset::{PresetWorld, StateFeatures};
 
@@ -372,7 +375,10 @@ impl Lv2Host {
         let port_counts = *plugin.port_counts();
 
         let name = plugin.name();
-        let instance = unsafe { plugin.instantiate(self.features.clone(), sample_rate)? };
+        // Offered to every plugin; its data must outlive the instance (see `Drop`).
+        let queue_draw = QueueDraw::new();
+        let instance =
+            unsafe { plugin.instantiate_with_features(self.features.clone(), sample_rate, &[queue_draw.feature()])? };
         let output_buffers = (0..port_counts.audio_outputs)
             .map(|_| vec![0.0f32; self.max_block_size])
             .collect();
@@ -402,7 +408,7 @@ impl Lv2Host {
             let (ui_out, from_plugin) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
             (Some(UiChannel { to_plugin, from_plugin }), Some((ui_in, ui_out)))
         };
-        Ok(Lv2Plugin {
+        let mut lv2 = Lv2Plugin {
             params,
             name,
             plugin,
@@ -425,7 +431,12 @@ impl Lv2Host {
             atom_sequence_out,
             midi_out: Vec::with_capacity(MIDI_OUT_CAPACITY),
             cv_out_buffers,
-        })
+            queue_draw: None,
+            inline_display: None,
+        };
+        lv2.inline_display = queue_draw.display(lv2.instance_ref());
+        lv2.queue_draw = Some(queue_draw);
+        Ok(lv2)
     }
 }
 
@@ -439,6 +450,12 @@ pub struct Lv2Plugin {
     instance: ManuallyDrop<livi::Instance>,
     /// Counts the plugin's [`GuiLease`]s, besides this one.
     gui_leases: Arc<()>,
+    /// The inline display's `queue_draw` feature, which the instance points
+    /// into: always `Some` (an `Option` only so `Drop` can leak it with a leaked
+    /// instance).
+    queue_draw: Option<QueueDraw>,
+    /// Ardour's inline display, if the plugin has one.
+    inline_display: Option<InlineDisplay>,
     /// One per atom-sequence input port (a pure effect commonly has none, unlike
     /// an instrument), each getting the block's MIDI and any atoms its GUI sent
     /// to that port (see `process`).
@@ -524,6 +541,13 @@ impl Lv2Plugin {
     pub fn gui_leases(&self) -> GuiLeases {
         GuiLeases(Arc::downgrade(&self.gui_leases))
     }
+
+    /// The plugin's inline display (Ardour's extension), if it has one: a small
+    /// live picture for its FX square. Rendering it must stop before the plugin
+    /// is dropped (see [`InlineDisplay::render`]).
+    pub fn inline_display(&self) -> Option<InlineDisplay> {
+        self.inline_display.clone()
+    }
 }
 
 impl Drop for Lv2Plugin {
@@ -534,6 +558,7 @@ impl Drop for Lv2Plugin {
         while Arc::strong_count(&self.gui_leases) > 1 {
             if Instant::now() >= deadline {
                 log::warn!("{}: its GUI didn't finish closing, leaking the plugin instance", self.name);
+                std::mem::forget(self.queue_draw.take());
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));

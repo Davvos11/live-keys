@@ -1,6 +1,7 @@
 slint::include_modules!();
 
 mod config;
+mod inline_displays;
 mod metronome;
 mod midi_inputs;
 mod mock_data;
@@ -437,6 +438,8 @@ struct Rack {
     master_effects: Rc<VecModel<EffectRow>>,
     /// The main window, for the master chain's status line.
     app: std::cell::OnceCell<slint::Weak<AppWindow>>,
+    /// Effects' inline displays (their FX squares' pictures).
+    inline: RefCell<inline_displays::InlineDisplays>,
 }
 
 impl Rack {
@@ -496,6 +499,7 @@ impl Rack {
             scenes_dirty: Cell::new(true),
             master_effects: Rc::new(VecModel::default()),
             app: std::cell::OnceCell::new(),
+            inline: RefCell::new(inline_displays::InlineDisplays::new()),
         }
     }
 
@@ -780,6 +784,7 @@ impl Rack {
     fn plugin_row(&self, meta: &LoadedPluginMeta) -> EffectRow {
         let current_presets = self.current_presets.borrow();
         let current = current_presets.get(&meta.key);
+        let display = self.inline.borrow().image(meta.key);
         EffectRow {
             key: meta.key as i32,
             name: meta.name.as_str().into(),
@@ -787,6 +792,8 @@ impl Rack {
             gui_open: self.open_uis.borrow().contains_key(&meta.key),
             params_open: self.param_windows.borrow().contains_key(&meta.key),
             graph: slot_view::graph(&meta.name),
+            display: display.clone().unwrap_or_default(),
+            has_display: display.is_some(),
             preset_name: current.map(|c| c.preset.name.as_str()).unwrap_or_default().into(),
             preset_user: current.is_some_and(|c| c.preset.user),
             preset_changed: current.is_some_and(|c| c.changed),
@@ -1124,6 +1131,7 @@ impl Rack {
     /// GUI (which holds the instance's raw handle), its parameter window and its
     /// current preset.
     fn forget(&self, key: PluginKey) {
+        self.inline.borrow_mut().forget(key);
         self.close_ui(key);
         self.close_params(key);
         self.set_current_preset(key, None);
@@ -1148,9 +1156,35 @@ impl Rack {
         }
         self.current_presets.borrow_mut().clear();
         *self.browser.borrow_mut() = None;
+        self.inline.borrow_mut().clear();
         // The plugins come back at their defaults, if at all.
         for slot in 0..SLOT_COUNT {
             self.mark_slot_changed(slot);
+        }
+    }
+
+    /// Renders the inline displays that asked to be redrawn, of effects whose
+    /// squares show (see `InlineDisplays`), into their chain rows.
+    fn render_inline_displays(&self, engine: &Engine, scale: f32) {
+        let now = Instant::now();
+        let mut inline = self.inline.borrow_mut();
+        let sections = (0..SLOT_COUNT)
+            .flat_map(|slot| [(slot, false, &self.audio_effects[slot]), (slot, true, &self.midi_effects[slot])])
+            .chain([(MASTER_SLOT, false, &self.master_effects)]);
+        for (slot, midi, model) in sections {
+            if !inline.visible(slot, midi) {
+                continue;
+            }
+            for index in 0..model.row_count() {
+                let Some(mut row) = model.row_data(index) else { continue };
+                let key = row.key as PluginKey;
+                if inline.update(engine, key, scale, now) {
+                    let display = inline.image(key);
+                    row.has_display = display.is_some();
+                    row.display = display.unwrap_or_default();
+                    model.set_row_data(index, row);
+                }
+            }
         }
     }
 
@@ -1739,6 +1773,26 @@ fn main() -> anyhow::Result<()> {
                 error = Some(format!("failed to open the parameters: {err}"));
             }
             rack.refresh_slot(&engine, slot, error);
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_open_effect(move |key| {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            let logic = app.global::<AppLogic>();
+            let supported = engine.borrow().plugin(key as PluginKey).is_some_and(gui_supported);
+            if supported {
+                logic.invoke_open_plugin_gui(key);
+            }
+            // Opening the parameter window clears the GUI's error, if any.
+            if !rack.open_uis.borrow().contains_key(&(key as PluginKey)) {
+                logic.invoke_toggle_params(key);
+            }
         });
     }
 
@@ -2598,6 +2652,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     {
+        let rack = rack.clone();
+        logic.on_set_slot_tab(move |slot, tab| {
+            rack.inline.borrow_mut().set_tab(slot as usize, tab);
+        });
+    }
+
+    {
         let config = config.clone();
         let config_dirty = config_dirty.clone();
         let engine = engine.clone();
@@ -2627,6 +2688,7 @@ fn main() -> anyhow::Result<()> {
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
             rack.poll_uis(&engine.borrow());
             if let Some(app) = app_weak.upgrade() {
+                rack.render_inline_displays(&engine.borrow(), app.window().scale_factor());
                 let beat = engine.borrow().metronome_beat().map_or(-1, |beat| beat as i32);
                 let state = app.global::<AppState>();
                 if state.get_metronome_beat() != beat {

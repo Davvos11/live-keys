@@ -4,7 +4,9 @@ use live_keys_core::{
     ALL_INPUTS, Consumer, HostedPlugin, MidiEvent, MidiFilter, ParamChange, ParamInfo, ParamKind, PluginFormat,
     PluginInfo, PluginKind, PresetInfo, Producer, PushError, ring_buffer,
 };
-use live_keys_lv2_host::{GuiLeases, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw};
+use live_keys_lv2_host::{
+    GuiLeases, InlineDisplay, InlinePicture, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw,
+};
 use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
 use live_keys_clap_host::{ClapController, ClapHost, ClapScan};
 
@@ -85,6 +87,9 @@ pub enum PluginEditor {
         /// A GUI using `raw_handle` holds one of these while open (see
         /// [`GuiLease`](live_keys_lv2_host::GuiLease)).
         gui_leases: GuiLeases,
+        /// Ardour's inline display, if the plugin has one (see
+        /// [`Engine::render_inline_display`]).
+        inline_display: Option<InlineDisplay>,
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
@@ -380,6 +385,31 @@ impl Engine {
             .iter()
             .flat_map(SlotChain::plugins)
             .find(|meta| meta.key == key)
+    }
+
+    /// Whether `key` has an inline display (Ardour's LV2 extension) that asked to
+    /// be redrawn since it was last rendered. Main thread only.
+    pub fn inline_display_dirty(&self, key: PluginKey) -> bool {
+        self.inline_display(key).is_some_and(InlineDisplay::is_dirty)
+    }
+
+    /// Renders `key`'s inline display, at most `max_width` × `max_height` pixels.
+    /// `None` if it has none, or nothing to show. Main thread only; it may run
+    /// while the plugin processes (as the extension intends), or while it's lent.
+    pub fn render_inline_display(&self, key: PluginKey, max_width: u32, max_height: u32) -> Option<InlinePicture> {
+        let display = self.inline_display(key)?;
+        // SAFETY: a plugin outlives its meta — it's only dropped once retired,
+        // after its meta was removed, or with the engine — so while `key` is
+        // found, the instance exists; and this is the only caller of `render`,
+        // on the main thread.
+        unsafe { display.render(max_width, max_height) }
+    }
+
+    fn inline_display(&self, key: PluginKey) -> Option<&InlineDisplay> {
+        match &self.plugin(key)?.editor {
+            PluginEditor::Lv2 { inline_display, .. } => inline_display.as_ref(),
+            _ => None,
+        }
     }
 
     fn plugin_mut(&mut self, key: PluginKey) -> Option<&mut LoadedPluginMeta> {
@@ -1040,6 +1070,7 @@ impl Engine {
                     instance: plugin.instance_ref(),
                     ui_channel,
                     gui_leases: plugin.gui_leases(),
+                    inline_display: plugin.inline_display(),
                 },
                 values: HashMap::new(),
                 setbfree,

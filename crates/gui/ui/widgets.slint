@@ -375,27 +375,80 @@ export component Stepper inherits HorizontalLayout {
     }
 }
 
-// The design's FX slot: an 80px square showing an effect (its name, over a
-// curve for effects that have one: 1 compressor, 2 filter), or a faint + to
-// add one.
+// The design's FX slot: an 80px square showing an effect — its inline display
+// if it has one (the name then only on hover), else its name over a curve for
+// effects that have one (1 compressor, 2 filter) — or a faint + to add one.
+// Pressing and moving past a few pixels drags it (not for the +): it reports
+// the pointer, in its own coordinates, until released.
 export component FxSlot inherits Rectangle {
     in property <string> name;
     in property <int> graph;
+    in property <image> display;
+    in property <bool> has-display;
     in property <bool> empty;
+    // Drawn with the primary colour's outline (its window is open).
     in property <bool> selected;
+    // Faded: it's being dragged elsewhere.
+    in property <bool> dimmed;
+    out property <bool> dragging;
+    // Where it was pressed, in its own coordinates.
+    out property <length> pressed-x: area.pressed-x;
+    out property <length> pressed-y: area.pressed-y;
     callback clicked();
+    callback drag-moved(/* x */ length, /* y */ length);
+    callback dropped();
+    callback drag-cancelled();
 
     width: 80px;
     height: 80px;
     border-radius: 4px;
     border-width: 1px;
     border-color: root.selected ? Theme.accent : Theme.control-border;
-    background: area.has-hover ? Theme.control : transparent;
+    background: area.has-hover && !root.has-display ? Theme.control : transparent;
+    opacity: root.dimmed ? 0.35 : 1;
     clip: true;
 
     area := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    root.drag-cancelled();
+                }
+                return;
+            }
+            if event.button != PointerEventButton.left {
+                return;
+            }
+            if event.kind == PointerEventKind.down {
+                root.dragging = false;
+            } else if event.kind == PointerEventKind.up {
+                if root.dragging {
+                    root.dragging = false;
+                    root.dropped();
+                } else {
+                    root.clicked();
+                }
+            }
+        }
+        moved => {
+            if self.pressed && !root.empty && !root.dragging
+                && (Math.abs(self.mouse-x - self.pressed-x) > 4px || Math.abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.dragging = true;
+            }
+            if root.dragging {
+                root.drag-moved(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+    if root.has-display : Image {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        source: root.display;
+        image-fit: contain;
     }
     if root.empty : Path {
         width: 100%;
@@ -407,7 +460,7 @@ export component FxSlot inherits Rectangle {
         stroke-width: 1.5px;
         stroke-line-cap: round;
     }
-    if !root.empty && root.graph > 0 : Path {
+    if !root.empty && !root.has-display && root.graph > 0 : Path {
         width: 100%;
         height: 100%;
         viewbox-width: 80;
@@ -419,16 +472,24 @@ export component FxSlot inherits Rectangle {
         stroke-line-cap: round;
         opacity: 0.6;
     }
-    if !root.empty : Text {
-        x: 6px;
-        y: 4px;
-        width: parent.width - 12px;
-        text: root.name;
-        color: Theme.text;
-        font-size: Theme.small-font-size;
-        wrap: word-wrap;
-        overflow: elide;
-        max-height: parent.height - 8px;
+    // Over a display, only while hovered, on a backing that keeps it readable.
+    if !root.empty && (!root.has-display || area.has-hover) : Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: name.height + 8px;
+        background: root.has-display ? Theme.background.transparentize(0.15) : transparent;
+        name := Text {
+            x: 6px;
+            y: 4px;
+            width: parent.width - 12px;
+            text: root.name;
+            color: Theme.text;
+            font-size: Theme.small-font-size;
+            wrap: word-wrap;
+            overflow: elide;
+            height: min(self.preferred-height, root.height - 8px);
+        }
     }
 }
 

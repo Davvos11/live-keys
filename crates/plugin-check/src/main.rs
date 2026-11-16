@@ -199,6 +199,15 @@ fn run_case(case: &Case) -> Result<()> {
     report("load", "PASS", format!("{} ms", started.elapsed().as_millis()));
     std::thread::sleep(case.warmup);
 
+    // Before anything plays: the display is drawn once at load.
+    match check_inline(&engine, key, case) {
+        Ok(detail) => report("inline", "PASS", detail),
+        Err(err) => match err.downcast::<SkipError>() {
+            Ok(skip) => report("inline", "SKIP", skip.0),
+            Err(err) => report("inline", "FAIL", format!("{err:#}")),
+        },
+    }
+
     let peak = play_note(&mut engine, 60);
     match (case.sound, peak > AUDIBLE) {
         (true, true) => report("note", "PASS", format!("peak {}", db(peak))),
@@ -212,6 +221,10 @@ fn run_case(case: &Case) -> Result<()> {
             Ok(skip) => report("param", "SKIP", skip.0),
             Err(err) => report("param", "FAIL", format!("{err:#}")),
         },
+    }
+
+    if case.inline_display {
+        report_result("inline-redraw", check_inline_redraw(&mut engine, key));
     }
 
     check_gui(&mut engine, key, case);
@@ -269,6 +282,51 @@ fn play_note(engine: &mut Engine, note: u8) -> f32 {
 
 fn db(peak: f32) -> String {
     if peak <= 0.0 { "-inf dB".into() } else { format!("{:.1} dB", 20.0 * peak.log10()) }
+}
+
+/// The inline display's size in the check: an FX square's at 2× scale.
+const INLINE_SIZE: u32 = 156;
+
+/// Renders the inline display, which should be there (or not) as the case says,
+/// and show more than a blank area.
+fn check_inline(engine: &Engine, key: PluginKey, case: &Case) -> Result<String> {
+    let dirty = engine.inline_display_dirty(key);
+    let picture = engine.render_inline_display(key, INLINE_SIZE, INLINE_SIZE);
+    if !case.inline_display {
+        return match picture {
+            Some(picture) => bail!("an unexpected inline display ({}×{})", picture.width, picture.height),
+            None => Err(skip("no inline display, as expected")),
+        };
+    }
+    if !dirty {
+        bail!("not marked for drawing at load");
+    }
+    let picture = picture.context("render returned nothing")?;
+    if picture.width > INLINE_SIZE || picture.height > INLINE_SIZE {
+        bail!("{}×{} exceeds the {INLINE_SIZE}×{INLINE_SIZE} asked for", picture.width, picture.height);
+    }
+    let colours: std::collections::HashSet<&[u8]> = picture.rgba.chunks_exact(4).collect();
+    if colours.len() <= 2 {
+        bail!("{}×{} but blank ({} colours)", picture.width, picture.height, colours.len());
+    }
+    Ok(format!("{}×{}, {} colours", picture.width, picture.height, colours.len()))
+}
+
+/// After the note and parameter steps, the plugin should have asked to be
+/// redrawn through `queue_draw` (another note if not yet), and render again.
+fn check_inline_redraw(engine: &mut Engine, key: PluginKey) -> Result<String> {
+    let mut how = "after the note and parameter change";
+    if !engine.inline_display_dirty(key) {
+        play_note(engine, 64);
+        how = "after another note";
+    }
+    if !engine.inline_display_dirty(key) {
+        bail!("queue_draw never called");
+    }
+    let picture = engine
+        .render_inline_display(key, INLINE_SIZE, INLINE_SIZE)
+        .context("render returned nothing")?;
+    Ok(format!("queue_draw {how}, rendered {}×{}", picture.width, picture.height))
 }
 
 fn check_param(engine: &mut Engine, key: PluginKey, case: &Case, peak_before: f32) -> Result<String> {

@@ -65,7 +65,8 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
 # channel/note-range/velocity-range filter and a transposition. Up to 8 MIDI effects → an
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
-# pinned favourites); an effect's square opens its GUI/params/presets/move/remove), then the right
+# pinned favourites); an effect's square shows its LV2 inline display if it has one, a click opens
+# its GUI (or parameter window), a right-click its menu, dragging it reorders), then the right
 # sidebar: a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
 # signature, subdivision, Tap), the master output (volume slider, master audio effects, mute, output device), the MIDI
 # inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic
@@ -128,9 +129,9 @@ cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # lis
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui
+cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui
   # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
-  # CLAP state file round trips, MIDI device names, input-mask shifting)
+  # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels)
 ```
 
 ## Licensing
@@ -142,6 +143,12 @@ attribution — the `AboutSlint` widget at the bottom of the Settings window; do
 dependencies are checked) reject any dependency licence that isn't permissive, with the Slint
 crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
 new Slint crate is a decision for the developer, not something to just add to the list.
+
+`vendor/livi` is `livi` 0.8.0 (MIT, its `LICENSE` kept) with one addition,
+`Plugin::instantiate_with_features` (host features beyond livi's own — the inline display's
+`queue_draw`), used through `[patch.crates-io]` and excluded from the workspace (not linted or
+tested as ours). Updating livi means re-applying that addition to the new version (vendored
+only, by decision; no upstream PR so far).
 
 Assets compiled into the GUI (`crates/gui/ui/assets/`, embedded by Slint) carry their own
 licences next to them: Source Sans 3 under the SIL OFL (`fonts/OFL.txt`), Lucide icons under ISC
@@ -219,7 +226,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with ten crates, isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with ten crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -346,6 +353,17 @@ behind format-agnostic cores:
   itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
   instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
   own dependency on them.
+  **Inline displays** (`inline_display.rs`; Ardour's `http://harrisonconsoles.com/lv2/inlinedisplay`,
+  see Part C of `docs/design/plugins.md`): every plugin is offered the `queue_draw` feature (via
+  the vendored livi's `instantiate_with_features`), whose callback — called from `run()`, on the
+  audio thread — only sets a per-plugin `AtomicBool`; its data lives in the `Lv2Plugin` (leaked
+  with a leaked instance). `Lv2Plugin::inline_display()` is the plugin's `render` (from
+  `extension_data`), its handle and that flag, as a `Send` `InlineDisplay`: `is_dirty`, and
+  `unsafe render(max_w, max_h)` → an `InlinePicture` (premultiplied RGBA; the plugin's surface
+  is premultiplied native-endian Cairo ARGB32, reordered by `argb32_to_rgba`, unit-tested).
+  `render` may run while the plugin processes (that's how Ardour calls it; x42 and LSP
+  synchronise themselves), but not after the instance is dropped, nor on two threads at once.
+  The flag starts set, so a display is drawn once at load.
 
 - **`crates/vst3-host`** (`live-keys-vst3-host`) — VST3 hosting on the MIT-licensed `vst3`
   bindings crate (COM smart pointers `ComPtr`/`ComWrapper` from `com-scrape-types`; all calls
@@ -659,6 +677,9 @@ behind format-agnostic cores:
   `send_midi(event)` plays MIDI as if from every MIDI input (the MIDI queue's producer is shared
   with the input callback behind a `Mutex`, neither being the audio thread);
   `take_slot_peak(slot)` is the slot's loudest sample since the last call.
+  `render_inline_display(key, max_w, max_h)` renders an LV2 plugin's inline display and
+  `inline_display_dirty(key)` says whether it asked to be (main thread only; safe since a
+  plugin is only dropped after its meta is gone, and lending is on the main thread too).
   `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
   `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
   plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`).
@@ -752,8 +773,11 @@ behind format-agnostic cores:
   photos (`photos/`, 600×300, with `CREDITS.md`). `ui/widgets.slint` has the design's
   components: `KButton` (icon and/or label; `active` = the primary colour), `TextField`,
   `DropdownButton`, `Select` (a ComboBox look-alike on a `PopupWindow`), `ListItem`, `TabBar`,
-  `Stepper`, `FxSlot` (an 80px square: name over a compressor/filter curve — `EffectRow.graph`,
-  guessed from the name by `slot_view::graph` — or a faint +) and `ScrollIndicator`; `Knob`/
+  `Stepper`, `FxSlot` (an 80px square: the effect's inline display, `EffectRow.display`/
+  `has-display`, fitted, with the name only on hover; else the name over a compressor/filter
+  curve — `EffectRow.graph`, guessed from the name by `slot_view::graph` — or a faint +; it
+  reports a click, or a drag once the pointer moves 4 px: `drag-moved`/`dropped`/
+  `drag-cancelled`, `pressed-x/y`) and `ScrollIndicator`; `Knob`/
   `LabelledKnob` in `knob.slint`; `RangeSlider` and `SingleSlider` (the design's one-handle
   Single slider, never setting its own value) in `range_slider.slint`. The Settings window,
   plugin picker and parameter window still use
@@ -817,8 +841,9 @@ behind format-agnostic cores:
   — a BPM `Stepper` (`signed: false`; Enter/Escape leave its field, and it shows values set
   from elsewhere, like Tap's, even while focused), play/stop under the knob, then a
   time-signature button and a subdivision button (♫) opening `MenuPopup`s, and Tap), the master output (`MasterSection`: a
-  `SingleSlider` in dB like a slot's volume, an `FxStrip` of `AppState.master-effects` with
-  its own `EffectPopup`/`PresetPopup` — exported from `slot_panel.slint` — a mute button and
+  `SingleSlider` in dB like a slot's volume, an `FxStrip` of `AppState.master-effects`
+  (exported from `slot_panel.slint`, as slot `AppState.master-slot`) with its own
+  `PresetPopup`, a mute button and
   the output device `Select`), the MIDI inputs, then Settings and MIDI panic
   (`midi-panic` → `Engine::panic`). The metronome's settings are `AppConfig.metronome`
   (`src/metronome.rs`: `MetronomeConfig` — BPM, time signature and subdivision as indices into
@@ -887,14 +912,27 @@ behind format-agnostic cores:
   changed), and values are re-read (`Control::read`, `Rack::refresh_panel_of`) on every
   parameter change, preset load and `idle_plugins` re-read, and for each plugin in
   `Engine::take_setbfree_changes` after `drain_ui_events` — and the audio
-  effects as an `FxStrip`: one row of `FxSlot`s (+ appends one), three fitting a slot,
-  scrolling sideways by dragging, the mouse wheel or a thin scrollbar under it (shown
-  when they don't fit; its thumb can be dragged); tab 2 `SlotPresets`; tab 3 the
+  effects as an `FxStrip`: one row of `EffectSquare`s (+ appends one), three fitting a slot,
+  scrolling sideways by dragging in the gaps between squares, the mouse wheel (anywhere on
+  it) or a thin scrollbar under it (shown when they don't fit; its thumb can be dragged);
+  tab 2 `SlotPresets`; tab 3 the
   MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
   `RangeSlider`s, and a transpose `Stepper` (`set-slot-transpose`: `SlotConfig.transpose`,
   ±`MAX_TRANSPOSE` (48) semitones, into the slot's `MidiFilter`; part of `SlotRouting`, so
-  scenes recall it). Clicking an effect's square opens `EffectPopup` (its GUI, parameter window, presets,
-  move left/right, remove). **Clear with undo:** `clear-slot` first saves the chain as a slot
+  scenes recall it). **An effect's square** (`EffectSquare`, an `FxSlot` with the chain row):
+  clicking opens its own GUI (`gui-supported`), else its parameter window, and clicking while
+  either is open closes it (the square has the primary colour's outline while one is);
+  right-clicking (`ContextMenuArea`) gives Open/Close GUI, Parameters, Presets… (the
+  slot's `PresetPopup`), Move left/right and Remove; dragging it moves it within its chain
+  (`FxStrip`/`FxGrid`: the original fades, an opaque copy follows the pointer, a `DropLine`
+  marks the gap it lands in — before the square under its centre when moving back, after it
+  when moving forward — and dropping calls `move-effect`; in a strip, holding it within 24 px
+  of either end scrolls the row). **Inline displays** (`src/inline_displays.rs`): the poll
+  timer's `Rack::render_inline_displays` renders, for every row of a section whose tab shows
+  (a slot's audio effects on tab 1, MIDI effects on tab 3 — `set-slot-tab` reports the
+  slot's tab — the master chain always), the displays that asked (`Engine::
+  inline_display_dirty`), at most every 33 ms each, at 78 px × the window's scale factor
+  (redrawn when that changes), into `EffectRow.display`; `plugin_row` takes the last one. **Clear with undo:** `clear-slot` first saves the chain as a slot
   preset in `<data dir>/live-keys/undo/slot-<n>/` (`slot_view::snapshot`) and keeps it with the
   routing and the slot preset shown in `Rack::closed`; `undo-clear` loads it back through
   `load_slot_preset` and restores those; `dismiss-closed`, or anything loading into the slot

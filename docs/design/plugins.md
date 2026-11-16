@@ -21,7 +21,14 @@ options. Started 2026-11-10.
 - **No inline displays in instrument headers** for now; inline views are for effects.
 - **Our own effects open a small in-app popup** from their FX square (see Part C).
 - **Third-party plugins first**: panel profiles for existing plugins come before any plugin of
-  our own. Profiles are **for instruments only** at first; effects keep the generic popover.
+  our own. Profiles are **for instruments only** at first.
+- **Third-party effects' FX squares** (2026-11-15): the square shows the plugin's Ardour inline
+  display if it has one (filling the square, its name only on hover), else its name over a
+  guessed curve. Clicking opens the plugin's own GUI, or its parameter window without one;
+  clicking while either is open closes it. Right-clicking gives a menu (GUI, parameters,
+  presets, move, remove) instead of the old popover, and dragging a square reorders its chain
+  (the gaps between squares scroll the row). LV2 only: nothing comparable is implemented by
+  any installed VST3 or CLAP plugin (see Part C).
 - **setBfree** is driven by its own control messages (two-way), with the upper manual's
   drawbars only. The generic `cc` target comes later, with the customise UI.
 - **Up to ten controls** on the slot's first tab, laid out zigzag over two rows; under an
@@ -52,9 +59,9 @@ options. Started 2026-11-10.
 - A slot's first tab shows the instrument's **first five continuous parameters** as knobs
   (`slot_view::knob_rows`). That's a placeholder: the first five are rarely the useful five
   (OT P1ANO S and setBfree show none at all).
-- An effect's FX square shows its **name** over a curve guessed from that name
-  (`slot_view::graph`: "compressor" → a transfer curve, "filter"/"EQ" → a resonance) — also a
-  placeholder.
+- An effect's FX square shows its LV2 **inline display** if it has one, else its **name** over a
+  curve guessed from that name (`slot_view::graph`: "compressor" → a transfer curve,
+  "filter"/"EQ" → a resonance) — a placeholder.
 - **Presets** are each format's own (LV2 `pset:Preset`s, `.vstpreset` files) plus slot presets.
 - The Penpot design already has a `Drawbar` component; the app doesn't use it yet.
 
@@ -444,37 +451,58 @@ units and knob text comes from the plugin's own value text (`param_text`).
   `render(instance, max_width, max_height) -> *LV2_Inline_Display_Image_Surface`
   (`data`, `width`, `height`, `stride`; ARGB32), the pixels owned by the plugin and valid from the
   first render until cleanup. Called by the host "in a non-realtime context, usually the main
-  GUI thread". The plugin picks its own height up to the maximum.
+  GUI thread". The plugin picks its own size within the maximum — usually the full width and a
+  height from its own aspect ratio: x42-eq 16:9, tuna 3:1, x42-comp and dpl a thin bar (w/10),
+  LSP's compressor square.
 - **Host side:** feature `…#queue_draw`, a `{ handle, queue_draw(handle) }` struct the plugin
-  calls "from run()" to ask for a new render. (`…#in_gui` also exists, undocumented.)
+  calls "from run()" to ask for a new render. (`…#in_gui` also exists, undocumented; no
+  installed plugin declares it.)
 - **It's display-only.** Ardour doesn't send input to it; interacting means opening the plugin's
   own GUI.
 - **Who implements it:** ACE (Ardour's bundled plugins), x42 (installed here: `darc`
-  compressor, `dpl` limiter, `fil4` EQ, `meters`, `tuna`), and LSP (`lsp-plugins.lv2`).
-- **Other formats:** VST3 has no equivalent. CLAP has nothing like it either, as far as I could
-  find (its drafts cover parameter indication and remote-control pages, not drawing).
+  compressor, `dpl` limiter, `fil4` EQ, `meters`, `tuna`), and LSP (194 of `lsp-plugins.lv2`'s
+  plugins).
 
-### Hosting it in live-keys
+**Verified against the sources** (2026-11-15; Ardour `libs/ardour/lv2_plugin.cc`,
+`gtk2_ardour/plugin_display.cc`; x42 `fil4.lv2`, `tuna.lv2`, `darc.lv2`; LSP
+`lsp-plugin-fw`'s LV2 wrapper):
 
-Feasible within the current architecture:
+- **`render` runs concurrently with `run()`.** Ardour calls it from its GUI thread with no lock
+  against processing; the plugins synchronise their own state for it (tuna with a pair of
+  sequence counters, fil4 reading its filter coefficients as they are, LSP turning a flag into
+  `queue_draw` in `run()` and drawing from its meshes).
+- **The pixels are premultiplied, native-endian Cairo ARGB32**: Ardour `memcpy`s them into a
+  `CAIRO_FORMAT_ARGB32` surface, and x42 and LSP draw them with Cairo (both link libcairo).
+- **`queue_draw` must be offered**, not just `render` polled: tuna and x42-comp only take the
+  snapshot they draw while the feature is there, so without it their pictures never change.
+  `livi` has no way to add host features (0.8 nor 0.9), so live-keys vendors it with an
+  `instantiate_with_features` (`vendor/livi`).
 
-1. `Lv2Host` offers the `queue_draw` feature; its callback only sets a per-plugin `AtomicBool`
-   — nothing else, since it's called from `run()` on the audio thread.
-2. At instantiation, ask the plugin's `extension_data` for the interface (like
-   `InstanceRef::has_state`); keep the function pointer in `PluginEditor::Lv2`.
-3. The GUI's poll timer, for plugins whose flag is set and whose square is visible, calls
-   `render(handle, 160, 160)` (80px squares at 2× scale) on the main thread, holding a
-   `GuiLease` like an open plugin GUI (the instance must outlive the call), and turns the surface
-   into a `slint::Image` (`Image::from_rgba8_premultiplied`, after reordering ARGB32's bytes).
-   Throttled to ~30 fps.
-4. `FxSlot` shows that image instead of the name-based curve; the fallback stays for plugins
-   without it (every VST3, most LV2).
+**Other formats:** VST3 has only PreSonus's `IGainReductionInfo` (one dB value for a meter);
+CLAP has two drafts, `clap.mini-curve-display/3` (the plugin fills curves — an EQ's response, a
+compressor's transfer curve or gain reduction over time — which the host draws) and
+`clap.gain-adjustment-metering`. None of the installed VST3 or CLAP plugins (Surge XT, Vital,
+LSP, OT P1ANO S) implement any of them, so they're left for later; mini-curve-display would be
+the one to host, drawn with our own style.
 
-To verify first: whether plugins expect `render` to run **concurrently with `run()`** (Ardour
-calls it from its GUI thread while processing continues, so implementing plugins presumably
-synchronise internally — check Ardour's host code and x42/LSP sources), and whether the pixels
-are **premultiplied, native-endian Cairo ARGB32** (the extension started as a Cairo surface,
-which suggests so; Ardour's docs only say "ARGB32").
+### Hosting it in live-keys (done, 2026-11-15)
+
+1. `Lv2Host::instantiate` offers every plugin the `queue_draw` feature; its callback only sets
+   a per-plugin `AtomicBool` (it's called from `run()` on the audio thread).
+2. At instantiation the plugin's `extension_data` is asked for the interface; an
+   `InlineDisplay` (the `render` function, the handle, the flag) goes into
+   `PluginEditor::Lv2`.
+3. The GUI's poll timer renders, on the main thread, the displays that asked to be redrawn,
+   at most ~30 times a second each, only for squares on a tab that shows (a slot's first tab
+   for audio effects, its MIDI tab for MIDI effects, the master chain always), at the
+   square's size in physical pixels (78 px inside the border × the scale factor — not a
+   larger image scaled down, which blurs x42's 1 px lines), and turns the surface into a
+   `slint::Image` (reordered to RGBA, still premultiplied). The flag starts set, so each
+   display is drawn once at load; a changed scale factor redraws it. A plugin is never
+   dropped while its meta exists, and lending happens on the main thread too, so a render
+   never meets a missing or lent-out instance.
+4. `FxSlot` shows that image (fitted, centred) instead of the name-based curve, the name only
+   while hovered; the fallback stays for plugins without one (every VST3 and CLAP, most LV2).
 
 ### Our own effects
 
@@ -486,8 +514,8 @@ The same split as for instruments:
 
 ### The effect popup (decided direction, from a sketch)
 
-Clicking a built-in effect's FX square opens a small popup over the slot (replacing today's
-generic effect popover for these effects):
+Clicking a built-in effect's FX square opens a small popup over the slot (instead of the
+plugin GUI a third-party effect opens):
 
 ```
 ┌ Compressor Stereo ───────────────────────────┐
@@ -503,8 +531,9 @@ generic effect popover for these effects):
 
 - The **FX square** of a built-in effect shows only its live graph — no name text (the name is
   in the popup's title).
-- Third-party effects keep the generic popover; their square shows the Ardour inline display if
-  they have one, else the name (and, until profiles exist, the guessed curve).
+- Third-party effects open their own GUI (or parameter window) and have the right-click menu;
+  their square shows the Ardour inline display if they have one, else the name (and, until
+  profiles exist, the guessed curve).
 - Built-in effects may not need a "GUI" button at all; the popup *is* their GUI.
 - **Our own LV2 plugins (A2-style):** implementing the Ardour extension makes them look good in
   Ardour too, but in live-keys they'd be limited to a picture, unless we also add our own
@@ -524,7 +553,8 @@ immediately); a plain fallback (name, or a guessed curve) for everything else.
    parameters" placeholder.
 2. **Customise panel** beyond the context menu (relabelling, a widget per parameter, overrides)
    for third-party plugins, and the `cc` target.
-3. **LV2 inline display** hosting in the FX squares.
+3. **LV2 inline display** hosting in the FX squares (done, with click-to-open, the right-click
+   menu and drag-to-reorder).
 4. **The truce spike** (can run in parallel with 1–3).
 5. **Built-in format** (`PluginFormat::Builtin`) and the first instrument core (organ) with its
    built-in front-end, its standalone build and shipped presets.

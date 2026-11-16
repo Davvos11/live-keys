@@ -1,6 +1,8 @@
 [workspace]
 members = ["crates/core", "crates/lv2-host", "crates/vst3-host", "crates/vst3-ui-host", "crates/clap-host", "crates/clap-ui-host", "crates/engine", "crates/gui", "crates/lv2-ui-host", "crates/plugin-check"]
 resolver = "2"
+# A path dependency, not a member: not linted or tested as ours.
+exclude = ["vendor/livi"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +12,10 @@ publish = false
 
 # Keep debug symbols in release builds — negligible perf/disk cost, and needed for
 # useful backtraces/gdb output when diagnosing real-time-thread issues like this one.
+# livi with one addition (see vendor/livi/Cargo.toml).
+[patch.crates-io]
+livi = { path = "vendor/livi" }
+
 [profile.release]
 debug = true
 

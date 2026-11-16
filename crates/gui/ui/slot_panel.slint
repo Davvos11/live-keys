@@ -17,86 +17,89 @@ export component PopupFrame inherits Rectangle {
     drop-shadow-color: #00000060;
 }
 
-// What can be done with one effect, opened by clicking its FX square: its own
-// GUI, its parameter window, its presets, moving it and removing it.
-export component EffectPopup inherits PopupWindow {
-    in property <EffectRow> plugin;
+// One effect's FX square. Clicking opens its own GUI, or its parameter window
+// if it has no GUI (or it fails to open); clicking while either is open closes it. Right-clicking
+// offers the rest: GUI, parameters, presets, moving and removing it.
+export component EffectSquare inherits FxSlot {
+    in property <EffectRow> effect;
     in property <int> slot-index;
     // As `AppLogic`'s `section`.
     in property <int> section;
     in property <int> index;
     in property <int> count;
-    callback browse-presets();
+    callback presets();
 
-    close-policy: PopupClosePolicy.close-on-click-outside;
+    name: root.effect.name;
+    graph: root.effect.graph;
+    display: root.effect.display;
+    has-display: root.effect.has-display;
+    selected: root.effect.gui-open || root.effect.params-open;
 
-    PopupFrame {
-        VerticalLayout {
-            padding: 6px;
-            spacing: 6px;
-            Text {
-                text: root.plugin.name;
-                color: Theme.text;
-                font-size: Theme.font-size;
-                overflow: elide;
+    clicked => {
+        if root.effect.gui-open || root.effect.params-open {
+            // A wedged plugin GUI may never report closing; this still lets go.
+            if root.effect.gui-open {
+                AppLogic.close-plugin-gui(root.effect.key);
             }
-            DropdownButton {
-                text: root.plugin.preset-name;
-                placeholder: "Presets";
-                note: root.plugin.preset-changed ? "changed" : "";
-                clicked => {
-                    root.close();
-                    root.browse-presets();
+            if root.effect.params-open {
+                AppLogic.toggle-params(root.effect.key);
+            }
+        } else {
+            AppLogic.open-effect(root.effect.key);
+        }
+    }
+
+    // On top of the square's touch area, which would otherwise take the
+    // right-click; other clicks pass through.
+    ContextMenuArea {
+        width: 100%;
+        height: 100%;
+        Menu {
+            MenuItem {
+                title: root.effect.gui-open ? "Close GUI" : "Open GUI";
+                enabled: root.effect.gui-supported || root.effect.gui-open;
+                activated => {
+                    if root.effect.gui-open {
+                        AppLogic.close-plugin-gui(root.effect.key);
+                    } else {
+                        AppLogic.open-plugin-gui(root.effect.key);
+                    }
                 }
             }
-            HorizontalLayout {
-                spacing: 4px;
-                KButton {
-                    icon: Icons.window;
-                    active: root.plugin.gui-open;
-                    // A wedged plugin GUI may never report closing; the button
-                    // stays usable to force it closed.
-                    enabled: root.plugin.gui-supported || root.plugin.gui-open;
-                    clicked => {
-                        if (root.plugin.gui-open) {
-                            AppLogic.close-plugin-gui(root.plugin.key);
-                        } else {
-                            AppLogic.open-plugin-gui(root.plugin.key);
-                        }
-                    }
-                }
-                KButton {
-                    icon: Icons.sliders;
-                    active: root.plugin.params-open;
-                    clicked => { AppLogic.toggle-params(root.plugin.key); }
-                }
-                Rectangle { horizontal-stretch: 1; }
-                KButton {
-                    icon: Icons.chevron-left;
-                    enabled: root.index > 0;
-                    clicked => {
-                        AppLogic.move-effect(root.slot-index, root.section, root.index, root.index - 1);
-                        root.close();
-                    }
-                }
-                KButton {
-                    icon: Icons.chevron-right;
-                    enabled: root.index < root.count - 1;
-                    clicked => {
-                        AppLogic.move-effect(root.slot-index, root.section, root.index, root.index + 1);
-                        root.close();
-                    }
-                }
-                KButton {
-                    icon: Icons.trash;
-                    clicked => {
-                        AppLogic.remove-effect(root.slot-index, root.section, root.index);
-                        root.close();
-                    }
-                }
+            MenuItem {
+                title: root.effect.params-open ? "Close parameters" : "Parameters";
+                activated => { AppLogic.toggle-params(root.effect.key); }
+            }
+            MenuItem {
+                title: root.effect.preset-name == "" ? "Presets…" : root.effect.preset-changed ? "Presets (\{root.effect.preset-name}, changed)…" : "Presets (\{root.effect.preset-name})…";
+                activated => { root.presets(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Move left";
+                enabled: root.index > 0;
+                activated => { AppLogic.move-effect(root.slot-index, root.section, root.index, root.index - 1); }
+            }
+            MenuItem {
+                title: "Move right";
+                enabled: root.index < root.count - 1;
+                activated => { AppLogic.move-effect(root.slot-index, root.section, root.index, root.index + 1); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Remove";
+                activated => { AppLogic.remove-effect(root.slot-index, root.section, root.index); }
             }
         }
     }
+}
+
+// Where a dragged FX square would land, and the line that shows it: the gap
+// before the square it lands on when moving back, after it when moving forward.
+component DropLine inherits Rectangle {
+    width: 2px;
+    border-radius: 1px;
+    background: Theme.accent;
 }
 
 // The instrument's menu, opened from its name: replacing, removing and its
@@ -127,46 +130,110 @@ component InstrumentMenu inherits PopupWindow {
     }
 }
 
-// A row of FX squares, three to a line: a section's effects in order, then a +
-// to add one while there's room.
+// A section's effects as FX squares, three to a line, then a + to add one
+// while there's room. A square is dragged to move its effect.
 component FxGrid inherits Rectangle {
     in property <[EffectRow]> effects;
     in property <bool> can-add;
-    in property <int> selected: -1;
-    callback open(/* index */ int);
+    in property <int> slot-index;
+    // As `AppLogic`'s `section`.
+    in property <int> section;
+    callback presets(/* index */ int);
     callback add();
 
     property <length> cell: 80px;
     property <length> row-gap: 10px;
     property <int> count: root.effects.length + (root.can-add ? 1 : 0);
     property <length> gap: max(4px, (root.width - 3 * root.cell) / 4);
+    // The dragged square (-1: none), where it was grabbed, and the pointer.
+    property <int> drag-from: -1;
+    property <length> grab-x;
+    property <length> grab-y;
+    property <length> pointer-x;
+    property <length> pointer-y;
+    // The dragged square's centre, and the index it would land on.
+    property <length> drag-x: root.pointer-x - root.grab-x + root.cell / 2;
+    property <length> drag-y: root.pointer-y - root.grab-y + root.cell / 2;
+    property <int> drop-index: root.drag-from < 0 ? -1 : max(0, min(root.effects.length - 1,
+        max(0, min(Math.ceil(root.effects.length / 3) - 1, Math.floor((root.drag-y + root.row-gap / 2) / (root.cell + root.row-gap)))) * 3
+            + max(0, min(2, Math.floor((root.drag-x - root.gap / 2) / (root.cell + root.gap))))));
+
+    function cell-x(index: int) -> length {
+        return root.gap + Math.mod(index, 3) * (root.cell + root.gap);
+    }
+    function cell-y(index: int) -> length {
+        return Math.floor(index / 3) * (root.cell + root.row-gap);
+    }
 
     height: root.count == 0 ? 0px : Math.ceil(root.count / 3) * (root.cell + root.row-gap) - root.row-gap;
 
-    for effect[index] in root.effects : FxSlot {
-        x: root.gap + Math.mod(index, 3) * (root.cell + root.gap);
-        y: Math.floor(index / 3) * (root.cell + root.row-gap);
-        name: effect.name;
-        graph: effect.graph;
-        selected: index == root.selected;
-        clicked => { root.open(index); }
+    for effect[index] in root.effects : EffectSquare {
+        x: root.cell-x(index);
+        y: root.cell-y(index);
+        effect: effect;
+        slot-index: root.slot-index;
+        section: root.section;
+        index: index;
+        count: root.effects.length;
+        dimmed: index == root.drag-from;
+        presets => { root.presets(index); }
+        drag-moved(x, y) => {
+            if root.drag-from != index {
+                root.drag-from = index;
+                root.grab-x = self.pressed-x;
+                root.grab-y = self.pressed-y;
+            }
+            root.pointer-x = self.x + x;
+            root.pointer-y = self.y + y;
+        }
+        dropped => {
+            if root.drop-index >= 0 && root.drop-index != root.drag-from {
+                AppLogic.move-effect(root.slot-index, root.section, root.drag-from, root.drop-index);
+            }
+            root.drag-from = -1;
+        }
+        drag-cancelled => { root.drag-from = -1; }
     }
     if root.can-add : FxSlot {
-        x: root.gap + Math.mod(root.effects.length, 3) * (root.cell + root.gap);
-        y: Math.floor(root.effects.length / 3) * (root.cell + root.row-gap);
+        x: root.cell-x(root.effects.length);
+        y: root.cell-y(root.effects.length);
         empty: true;
         clicked => { root.add(); }
+    }
+    // The dragged square, following the pointer.
+    if root.drag-from >= 0 : FxSlot {
+        x: max(0px, min(root.width - root.cell, root.pointer-x - root.grab-x));
+        y: max(0px, min(root.height - root.cell, root.pointer-y - root.grab-y));
+        name: root.effects[root.drag-from].name;
+        graph: root.effects[root.drag-from].graph;
+        display: root.effects[root.drag-from].display;
+        has-display: root.effects[root.drag-from].has-display;
+        selected: true;
+        // Opaque, so the squares it passes over don't show through.
+        background: Theme.background;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000080;
+    }
+    // Over the dragged square, which may cover it.
+    if root.drag-from >= 0 && root.drop-index != root.drag-from : DropLine {
+        x: root.cell-x(root.drop-index) - 1px + (root.drop-index < root.drag-from ? -root.gap / 2 : root.cell + root.gap / 2);
+        y: root.cell-y(root.drop-index);
+        height: root.cell;
     }
 }
 
 // The audio effects in one row of FX squares, then a + to add one while
-// there's room, scrolling sideways (drag, the mouse wheel, or the scrollbar
-// under it) when they don't fit; three fit a slot, spaced like `FxGrid`'s.
+// there's room; three fit a slot, spaced like `FxGrid`'s. A square is dragged
+// to move its effect (near either end the row scrolls along); the row scrolls
+// sideways with the mouse wheel, the scrollbar under it, or by dragging
+// between the squares.
 export component FxStrip inherits Rectangle {
     in property <[EffectRow]> effects;
     in property <bool> can-add;
-    in property <int> selected: -1;
-    callback open(/* index */ int);
+    in property <int> slot-index;
+    // As `AppLogic`'s `section`.
+    in property <int> section: 1;
+    callback presets(/* index */ int);
     callback add();
 
     property <length> cell: 80px;
@@ -178,35 +245,114 @@ export component FxStrip inherits Rectangle {
     property <length> bar-gap: 6px;
     property <length> bar-height: 4px;
     property <length> max-scroll: max(0px, root.strip-width - root.width);
+    // How far the row is scrolled (≤ 0), as asked and as shown (kept in range
+    // when effects go).
+    property <length> scroll;
+    property <length> offset: max(-root.max-scroll, min(0px, root.scroll));
+    // The dragged square (-1: none), where it was grabbed, and the pointer (in
+    // the strip's coordinates, which scrolling doesn't change).
+    property <int> drag-from: -1;
+    property <length> grab-x;
+    property <length> pointer-x;
+    // Where a drag near an end scrolls the row.
+    property <length> edge: 24px;
+    // The dragged square's centre in the row, and the index it would land on.
+    property <length> drag-x: root.pointer-x - root.offset - root.grab-x + root.cell / 2;
+    property <int> drop-index: root.drag-from < 0 ? -1
+        : max(0, min(root.effects.length - 1, Math.floor((root.drag-x - root.gap / 2) / (root.cell + root.gap))));
+
+    function cell-x(index: int) -> length {
+        return root.gap + index * (root.cell + root.gap);
+    }
+    function scroll-by(delta: length) {
+        root.scroll = max(-root.max-scroll, min(0px, root.offset + delta));
+    }
 
     height: root.cell + root.bar-gap + root.bar-height;
 
-    // Behind the squares, which don't take wheel events: turns the wheel into
-    // sideways scrolling.
+    // Behind the squares: the wheel and dragging between them scroll the row.
     TouchArea {
+        property <length> start;
         scroll-event(event) => {
-            let delta = event.delta-x != 0 ? event.delta-x : event.delta-y;
-            strip.content-x = max(min(strip.content-x + delta, 0px), -root.max-scroll);
+            root.scroll-by(event.delta-x != 0 ? event.delta-x : event.delta-y);
             accept
         }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                self.start = root.offset;
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.scroll-by(self.start + self.mouse-x - self.pressed-x - root.offset);
+            }
+        }
     }
-    strip := Flickable {
-        height: root.cell;
+    Rectangle {
         y: 0;
-        content-width: max(root.width, root.strip-width);
-        content-height: root.cell;
-        for effect[index] in root.effects : FxSlot {
-            x: root.gap + index * (root.cell + root.gap);
-            name: effect.name;
-            graph: effect.graph;
-            selected: index == root.selected;
-            clicked => { root.open(index); }
+        height: root.cell;
+        clip: true;
+        Rectangle {
+            x: root.offset;
+            width: max(root.width, root.strip-width);
+            for effect[index] in root.effects : EffectSquare {
+                x: root.cell-x(index);
+                effect: effect;
+                slot-index: root.slot-index;
+                section: root.section;
+                index: index;
+                count: root.effects.length;
+                dimmed: index == root.drag-from;
+                presets => { root.presets(index); }
+                drag-moved(x, y) => {
+                    if root.drag-from != index {
+                        root.drag-from = index;
+                        root.grab-x = self.pressed-x;
+                    }
+                    root.pointer-x = root.offset + self.x + x;
+                }
+                dropped => {
+                    if root.drop-index >= 0 && root.drop-index != root.drag-from {
+                        AppLogic.move-effect(root.slot-index, root.section, root.drag-from, root.drop-index);
+                    }
+                    root.drag-from = -1;
+                }
+                drag-cancelled => { root.drag-from = -1; }
+            }
+            if root.can-add : FxSlot {
+                x: root.cell-x(root.effects.length);
+                empty: true;
+                clicked => { root.add(); }
+            }
         }
-        if root.can-add : FxSlot {
-            x: root.gap + root.effects.length * (root.cell + root.gap);
-            empty: true;
-            clicked => { root.add(); }
-        }
+    }
+    // The dragged square, following the pointer.
+    if root.drag-from >= 0 : FxSlot {
+        x: max(0px, min(root.width - root.cell, root.pointer-x - root.grab-x));
+        y: 0;
+        name: root.effects[root.drag-from].name;
+        graph: root.effects[root.drag-from].graph;
+        display: root.effects[root.drag-from].display;
+        has-display: root.effects[root.drag-from].has-display;
+        selected: true;
+        // Opaque, so the squares it passes over don't show through.
+        background: Theme.background;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000080;
+    }
+    // Over the dragged square, which may cover it.
+    if root.drag-from >= 0 && root.drop-index != root.drag-from : DropLine {
+        x: max(0px, min(root.width - self.width,
+            root.offset + root.cell-x(root.drop-index) - 1px + (root.drop-index < root.drag-from ? -root.gap / 2 : root.cell + root.gap / 2)));
+        y: 0;
+        height: root.cell;
+    }
+    // A drag held near either end scrolls the row along.
+    Timer {
+        interval: 16ms;
+        running: root.drag-from >= 0 && root.max-scroll > 0
+            && (root.pointer-x < root.edge || root.pointer-x > root.width - root.edge);
+        triggered => { root.scroll-by(root.pointer-x < root.edge ? 6px : -6px); }
     }
     // The scrollbar: a thin thumb, like the tab's, that can be dragged.
     if root.max-scroll > 0 : Rectangle {
@@ -217,7 +363,7 @@ export component FxStrip inherits Rectangle {
         property <float> ratio: root.width / root.strip-width;
         thumb := Rectangle {
             width: max(24px, parent.width * parent.ratio);
-            x: (parent.width - self.width) * (-strip.content-x / root.max-scroll);
+            x: (parent.width - self.width) * (-root.offset / root.max-scroll);
             height: parent.height;
             border-radius: root.bar-height / 2;
             background: thumb-area.pressed || thumb-area.has-hover ? Theme.text-faint : Theme.control-border;
@@ -225,18 +371,18 @@ export component FxStrip inherits Rectangle {
         thumb-area := TouchArea {
             y: -root.bar-gap;
             height: parent.height + root.bar-gap + 4px;
-            property <length> start-x;
+            property <length> start;
             mouse-cursor: pointer;
             pointer-event(event) => {
                 if event.kind == PointerEventKind.down {
-                    self.start-x = strip.content-x;
+                    self.start = root.offset;
                 }
             }
             moved => {
                 if self.pressed {
                     let travel = parent.width - thumb.width;
                     let scrolled = travel > 0 ? (self.mouse-x - self.pressed-x) / travel * root.max-scroll : 0px;
-                    strip.content-x = max(min(self.start-x - scrolled, 0px), -root.max-scroll);
+                    root.scroll-by(self.start - scrolled - root.offset);
                 }
             }
         }
@@ -265,13 +411,11 @@ export component SlotPanel inherits Rectangle {
     property <bool> has-instrument: root.slot.instrument.key >= 0;
     property <bool> is-empty: !root.has-instrument && root.slot.midi-effects.length == 0 && root.slot.audio-effects.length == 0;
     property <int> tab: 0;
-    // The effect whose popup is open (`fx-section` as `AppLogic`'s), and whose
-    // presets the preset popup shows: -1 for the instrument.
-    property <int> fx-section: 1;
-    property <int> fx-index: -1;
+    changed tab => { AppLogic.set-slot-tab(root.slot-index, self.tab); }
+    // Whose presets the preset popup shows (`preset-section` as `AppLogic`'s
+    // `section`): -1 for the instrument.
     property <int> preset-section: -1;
     property <int> preset-index: 0;
-    property <EffectRow> fx-plugin: root.fx-section == 0 ? root.slot.midi-effects[root.fx-index] : root.slot.audio-effects[root.fx-index];
     property <EffectRow> preset-plugin: root.preset-section < 0 ? root.slot.instrument
         : root.preset-section == 0 ? root.slot.midi-effects[root.preset-index] : root.slot.audio-effects[root.preset-index];
 
@@ -288,11 +432,6 @@ export component SlotPanel inherits Rectangle {
         root.preset-index = index;
         AppLogic.open-preset-browser(root.preset-plugin.key);
         preset-popup.show();
-    }
-    function open-effect(section: int, index: int) {
-        root.fx-section = section;
-        root.fx-index = index;
-        effect-popup.show();
     }
 
     border-width: 1px;
@@ -513,8 +652,9 @@ export component SlotPanel inherits Rectangle {
                     if root.tab == 0 : FxStrip {
                         effects: root.slot.audio-effects;
                         can-add: root.slot.audio-effects.length < AppState.max-effects;
-                        selected: effect-popup.is-open && root.fx-section == 1 ? root.fx-index : -1;
-                        open(index) => { root.open-effect(1, index); }
+                        slot-index: root.slot-index;
+                        section: 1;
+                        presets(index) => { root.show-presets(1, index); }
                         add => { root.choose-plugin(Category.audio-effect); }
                     }
 
@@ -528,8 +668,9 @@ export component SlotPanel inherits Rectangle {
                     if root.tab == 2 : FxGrid {
                         effects: root.slot.midi-effects;
                         can-add: root.slot.midi-effects.length < AppState.max-midi-effects;
-                        selected: effect-popup.is-open && root.fx-section == 0 ? root.fx-index : -1;
-                        open(index) => { root.open-effect(0, index); }
+                        slot-index: root.slot-index;
+                        section: 0;
+                        presets(index) => { root.show-presets(0, index); }
                         add => { root.choose-plugin(Category.midi-effect); }
                     }
                     if root.tab == 2 : HorizontalLayout {
@@ -680,17 +821,5 @@ export component SlotPanel inherits Rectangle {
         height: min(380px, max(200px, root.height - 204px));
         filter(query) => { AppLogic.filter-param-search(query); }
         pick(index) => { AppLogic.pick-param-search(index); }
-    }
-
-    effect-popup := EffectPopup {
-        x: 5px;
-        y: 194px;
-        width: root.width - 10px;
-        plugin: root.fx-plugin;
-        slot-index: root.slot-index;
-        section: root.fx-section;
-        index: root.fx-index;
-        count: root.fx-section == 0 ? root.slot.midi-effects.length : root.slot.audio-effects.length;
-        browse-presets => { root.show-presets(root.fx-section, root.fx-index); }
     }
 }
