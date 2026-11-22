@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use live_keys_core::MidiEvent;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The shipped surfaces, by file name.
 ///
@@ -39,7 +39,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
 ];
 
 /// The kinds of control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlKind {
     Fader,
@@ -62,7 +62,7 @@ impl ControlKind {
 }
 
 /// Which row a bank's control 1 is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Numbering {
     #[default]
@@ -71,7 +71,7 @@ pub enum Numbering {
 }
 
 /// What a pad sends while held, besides its note.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Pressure {
     Channel,
@@ -97,54 +97,84 @@ pub enum Reading {
     Release,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// A surface file as written (see the format above): what the editor edits.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SurfaceFile {
-    id: String,
-    name: String,
+pub struct SurfaceSpec {
+    pub id: String,
+    pub name: String,
     #[serde(default)]
-    devices: Vec<String>,
-    banks: Vec<BankFile>,
+    pub devices: Vec<String>,
+    pub banks: Vec<BankSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// A bank as written.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct BankFile {
-    name: String,
-    kind: ControlKind,
+pub struct BankSpec {
+    pub name: String,
+    pub kind: ControlKind,
     #[serde(default)]
-    x: u32,
+    pub x: u32,
     #[serde(default)]
-    y: u32,
+    pub y: u32,
     #[serde(default = "one")]
-    rows: u32,
-    columns: u32,
-    #[serde(default)]
-    numbering: Numbering,
-    #[serde(default)]
-    prefix: String,
+    pub rows: u32,
+    pub columns: u32,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub numbering: Numbering,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
     #[serde(default = "one_u8")]
-    channel: u8,
-    pressure: Option<Pressure>,
-    #[serde(default)]
-    feedback: bool,
-    lit: Option<u8>,
-    controls: Vec<ControlFile>,
+    pub channel: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<Pressure>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub feedback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lit: Option<u8>,
+    pub controls: Vec<ControlSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// A control as written: one message, and what it does differently from its
+/// bank.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct ControlFile {
-    cc: Option<u8>,
-    note: Option<u8>,
-    #[serde(default)]
-    pitch_bend: bool,
-    #[serde(default)]
-    channel_pressure: bool,
-    channel: Option<u8>,
-    label: Option<String>,
-    feedback: Option<bool>,
-    lit: Option<u8>,
+pub struct ControlSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<u8>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub pitch_bend: bool,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub channel_pressure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lit: Option<u8>,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+impl ControlSpec {
+    /// A control sending `message`.
+    pub fn of(message: Message) -> Self {
+        let mut spec = Self::default();
+        match message {
+            Message::Cc(number) => spec.cc = Some(number),
+            Message::Note(number) => spec.note = Some(number),
+            Message::PitchBend => spec.pitch_bend = true,
+            Message::ChannelPressure => spec.channel_pressure = true,
+        }
+        spec
+    }
 }
 
 fn one() -> u32 {
@@ -155,8 +185,9 @@ fn one_u8() -> u8 {
     1
 }
 
-impl ControlFile {
-    fn message(&self) -> Result<Message, String> {
+impl ControlSpec {
+    /// Its message, or why it hasn't exactly one.
+    pub fn message(&self) -> Result<Message, String> {
         let messages = [
             self.cc.map(Message::Cc),
             self.note.map(Message::Note),
@@ -233,16 +264,21 @@ pub struct Surface {
     /// `(channel, message) → control index`; a pad's pressure is found
     /// through its note.
     index: HashMap<(u8, Message), usize>,
+    /// What it was made from.
+    pub spec: SurfaceSpec,
+    /// It's the user's (a file in [`user_dir`]), not a shipped one.
+    pub user: bool,
 }
 
 impl Surface {
     /// Parses a surface file.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let file: SurfaceFile = serde_json::from_str(json).map_err(|err| err.to_string())?;
-        Self::from_file(file)
+        let file: SurfaceSpec = serde_json::from_str(json).map_err(|err| err.to_string())?;
+        Self::from_spec(file)
     }
 
-    fn from_file(file: SurfaceFile) -> Result<Self, String> {
+    /// Lays out `file`'s controls; an error says what's wrong with it.
+    pub fn from_spec(file: SurfaceSpec) -> Result<Self, String> {
         let mut banks = Vec::new();
         let mut controls = Vec::new();
         for (bank_index, bank) in file.banks.iter().enumerate() {
@@ -295,6 +331,11 @@ impl Surface {
         }
         let width = banks.iter().map(|bank| bank.x + bank.width).max().unwrap_or(0);
         let height = banks.iter().map(|bank| bank.y + bank.height).max().unwrap_or(0);
+        // Mappings name controls by label.
+        let mut labels = std::collections::HashSet::new();
+        if let Some(control) = controls.iter().find(|control| !labels.insert(control.label.as_str())) {
+            return Err(format!("two controls are called {}", control.label));
+        }
         let mut index = HashMap::new();
         for (control_index, control) in controls.iter().enumerate() {
             if index.insert((control.channel, control.message), control_index).is_some() {
@@ -306,14 +347,16 @@ impl Surface {
             }
         }
         Ok(Self {
-            id: file.id,
-            name: file.name,
-            devices: file.devices,
+            id: file.id.clone(),
+            name: file.name.clone(),
+            devices: file.devices.clone(),
             banks,
             controls,
             width,
             height,
             index,
+            spec: file,
+            user: false,
         })
     }
 
@@ -444,6 +487,37 @@ impl Library {
         Self { surfaces }
     }
 
+    /// Saves `spec` as the user's surface (`<id>.json` in [`user_dir`]),
+    /// replacing one with that id; it must lay out.
+    pub fn save(spec: &SurfaceSpec) -> Result<PathBuf, String> {
+        Surface::from_spec(spec.clone())?;
+        let dir = user_dir().ok_or("no data folder")?;
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        // Whatever file had it before.
+        Self::delete(&spec.id)?;
+        let path = dir.join(format!("{}.json", spec.id));
+        let json = serde_json::to_string_pretty(spec).map_err(|err| err.to_string())?;
+        std::fs::write(&path, json + "\n").map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    /// Deletes the user's surfaces with id `id` (a shipped one with that id
+    /// comes back).
+    pub fn delete(id: &str) -> Result<(), String> {
+        let Some(dir) = user_dir() else { return Ok(()) };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(()) };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let is_it = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|json| serde_json::from_str::<SurfaceSpec>(&json).ok())
+                .is_some_and(|spec| spec.id == id);
+            if is_it {
+                std::fs::remove_file(&path).map_err(|err| err.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     /// The surface for MIDI device `device` (a `midi_device_name`), if any.
     pub fn for_device(&self, device: &str) -> Option<&Surface> {
         self.surfaces.iter().find(|surface| surface.matches(device))
@@ -469,7 +543,10 @@ fn read_dir(dir: &Path) -> Vec<Surface> {
             .map_err(|err| err.to_string())
             .and_then(|json| Surface::from_json(&json));
         match parsed {
-            Ok(surface) => surfaces.push(surface),
+            Ok(mut surface) => {
+                surface.user = true;
+                surfaces.push(surface);
+            }
             Err(err) => log::warn!("surface {}: {err}", path.display()),
         }
     }
@@ -540,12 +617,26 @@ mod tests {
         let json = r#"{ "id": "x", "name": "x", "banks": [
             { "name": "k", "kind": "knob", "columns": 2, "channel": 2, "feedback": true,
               "controls": [{ "cc": 7 }, { "cc": 8, "feedback": false }] },
-            { "name": "p", "kind": "pad", "columns": 1, "feedback": true, "lit": 5, "controls": [{ "note": 36 }] }
+            { "name": "p", "kind": "pad", "columns": 1, "prefix": "P", "feedback": true, "lit": 5, "controls": [{ "note": 36 }] }
         ] }"#;
         let surface = Surface::from_json(json).unwrap();
         assert_eq!(surface.feedback(0, Shown::Position(1.0)), Some([0xB1, 7, 127]));
         assert_eq!(surface.feedback(1, Shown::Position(1.0)), None);
         assert_eq!(surface.feedback(2, Shown::Lit(true)), Some([0x90, 36, 5]));
         assert_eq!(surface.feedback(2, Shown::Lit(false)), Some([0x80, 36, 0]));
+    }
+
+    #[test]
+    fn specs_round_trip_and_labels_are_unique() {
+        for (_, json) in SHIPPED {
+            let surface = Surface::from_json(json).unwrap();
+            let written = serde_json::to_string(&surface.spec).unwrap();
+            assert_eq!(Surface::from_json(&written).unwrap().controls, surface.controls);
+        }
+        let twice = r#"{ "id": "x", "name": "x", "banks": [
+            { "name": "a", "kind": "knob", "columns": 1, "prefix": "K", "controls": [{ "cc": 1 }] },
+            { "name": "b", "kind": "knob", "columns": 1, "prefix": "K", "controls": [{ "cc": 2 }] }
+        ] }"#;
+        assert!(Surface::from_json(twice).is_err());
     }
 }

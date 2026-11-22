@@ -892,6 +892,15 @@ behind format-agnostic cores:
   for a knob dragged on screen); `MappingsUi::decorate` shows it on the panel's knobs
   (`PanelCell.modulated`/`mod-low`/`mod-high`/`mod-value`: `Knob`'s outer arc and dot),
   and a volume's base is what the config keeps.
+  **The surface editor** (`src/surface_editor.rs`: `Editor`, a working `SurfaceSpec` for
+  a device, logic only and unit-tested — add, reshape, renumber, move and delete banks;
+  learning a bank in turn, one control, or a whole device grouped into banks; its glue is
+  `Learn::connect_editor`/`refresh_editor` in `learn.rs`, the `edit-*` callbacks and
+  `AppState.editing`/`edit-*`, with the editor's bank and control models refilled in place
+  so a dragged handle survives) is `SurfaceEditor` in `ui/surfaces.slint`, laid over the
+  bottom of the slots by `app.slint`; it's opened by "Edit" beside a surface's name or a
+  device-without-surface card's buttons. Saving reloads the library
+  (`SurfacesUi::reload`) and `sync_surfaces`.
   `ui/learn.slint`: `LearnPane` (over the scenes pane while `AppState.learning`),
   `TargetSettings` (mode, range, levels, momentary value, kept with the scene or in every
   scene, this parameter or this panel position), and `LearnTarget`, laid over each target
@@ -1226,7 +1235,10 @@ behind format-agnostic cores:
   `pad_pressure` finds the pads a channel-pressure message may belong to. Controls with
   `"feedback": true` (bank or control; `lit` for pads/buttons) have a `Feedback`, and
   `Surface::feedback(control, Shown)` is the message showing a position or lit state on
-  one. Unit-tested.
+  one. The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`, serde both
+  ways; `Surface::from_spec`, and each `Surface` keeps its `spec` and whether it's the
+  user's); `Library::save` writes a spec as the user's `<id>.json` (replacing any file with
+  that id), `Library::delete` removes it. Labels must be unique within a surface. Unit-tested.
 
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
   check against real installed plugins, not part of the app (see Common commands). `cases.rs`

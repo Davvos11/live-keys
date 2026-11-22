@@ -531,7 +531,33 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
      the same message twice in a row. A new setup, or a change in the devices shown or
      plugged in (`Engine::resync_feedback`), reopens outputs and sends every control its
      value. The panel draws a control where it was sent.
-5. The surface editor: add menu, bank settings, dragging, learning a bank and a whole device.
+5. **Done (2026-11-22).** The surface editor: add menu, bank settings, dragging, learning a
+   bank and a whole device. As built:
+   - Opened by "Edit" next to a shown surface's name, or for a device without one by
+     "Learn by moving controls" (listening straight away) or "Lay out…" on its card. It
+     covers the bottom of the slots (460 px); Save or Cancel close it. Saving writes the
+     surface as the user's (`<id>.json` in the user folder, replacing any file with that
+     id), reloads the library and shows the device; "Delete surface" removes the user's
+     file (a shipped surface with that id comes back).
+   - The left column: name, "+ Add" (a bank of, or a single, fader/knob/pad/button),
+     "Learn controls…", a status line, and the selected bank's settings — name, kind,
+     rows, columns, numbering, what it sends (CC, note, pitch bend) with channel, first
+     number and step (which renumber every control), a pad's pressure, feedback and lit
+     velocity, "Learn bank" and "Delete bank". The settings sit beside the surface
+     rather than in a popup.
+   - Banks are framed, with a handle above that selects and drags them (4 px grid; no
+     snapping to other banks yet). Clicking a control learns just that one.
+   - Learning a bank fills its controls in turn (Skip, Stop); a control already sending
+     the learned message swaps with it. The first control learned sets the bank's channel.
+     Learning a device groups consecutive numbers of one message type and channel into a
+     bank as they come (CCs as knobs, notes as pads, pitch bend as a fader); controls the
+     surface has already are ignored. A control sending a stream counts once.
+   - Labels must be unique on a surface (mappings name controls by them): a second bank
+     of a kind gets prefix `K2.` etc., and a file with two controls of one label is
+     rejected.
+   - Not done: per-bank default takeover, a per-control feedback message, relative and
+     14-bit knobs, inferring pressure or relative encoders while learning. The panel is
+     still 140 px high: a surface laid out taller is cut off there.
 6. Smoothing (decided 2026-11-22, a later phase): where a target is continuous, the audio
    thread interpolates between a control's successive values (per block, like the gain
    ramps), so 7-bit steps don't zipper. Not for stepped, choice or toggle targets.

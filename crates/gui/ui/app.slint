@@ -6,7 +6,7 @@ import { AppState, AppLogic, Category } from "globals.slint";
 import { ParamsWindow } from "params_window.slint";
 import { SettingsWindow } from "settings_window.slint";
 import { Theme } from "theme.slint";
-import { SurfacesPanel, SurfaceSizes } from "surfaces.slint";
+import { SurfacesPanel, SurfaceSizes, SurfaceEditor } from "surfaces.slint";
 
 export { AppState, AppLogic, ParamsWindow, SettingsWindow }
 
@@ -150,6 +150,21 @@ export component AppWindow inherits Window {
         }
     }
 
+    }
+
+    // The surface editor, grown up over the slots (none need to be seen).
+    if AppState.editing : Rectangle {
+        x: 0;
+        y: max(0px, root.height - 460px);
+        width: root.width - 300px;
+        height: min(root.height, 460px);
+        drop-shadow-blur: 24px;
+        drop-shadow-offset-y: -6px;
+        drop-shadow-color: #00000099;
+        background: Theme.background;
+        // Clicks don't reach the slots under it.
+        TouchArea { }
+        SurfaceEditor { }
     }
 
     picker := PluginPicker {

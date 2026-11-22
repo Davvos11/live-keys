@@ -12,6 +12,7 @@ mod scenes;
 mod session;
 mod slot_presets;
 mod slot_view;
+mod surface_editor;
 mod surfaces;
 
 use std::cell::{Cell, RefCell};
@@ -1351,8 +1352,12 @@ fn main() -> anyhow::Result<()> {
         surfaces: surfaces.clone(),
         metronome_playing: metronome_playing.clone(),
         app: app.as_weak(),
+        editor: RefCell::default(),
+        edit_banks: Rc::new(VecModel::default()),
+        edit_controls: Rc::new(VecModel::default()),
     });
     learn.connect(&logic);
+    learn.connect_editor(&logic);
 
     {
         let config = config.clone();

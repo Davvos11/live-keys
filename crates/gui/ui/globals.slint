@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, EditBank, EditBankSettings } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, EditBank, EditBankSettings } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -40,6 +40,21 @@ export global AppState {
     in property <int> metronome-volume-learn;
     in property <int> metronome-play-learn;
     in property <int> tempo-learn;
+    // The surface editor: on; the device and the surface's name; the surface
+    // as laid out, its banks' frames and the selected bank (-1: none) with its
+    // settings; what it's listening for (0 nothing, 1 a bank's controls in
+    // turn, 2 one control, 3 every new control) and its status line; and
+    // whether there's a user file to delete.
+    in property <bool> editing;
+    in property <string> edit-device;
+    in property <string> edit-name;
+    in property <SurfaceView> edit-surface;
+    in property <[EditBank]> edit-banks;
+    in property <int> edit-selected: -1;
+    in property <EditBankSettings> edit-bank;
+    in property <int> edit-listening;
+    in property <string> edit-status;
+    in property <bool> edit-can-delete;
     // The scene list, filtered by `AppLogic.filter-scenes`; `scene-count` is
     // every scene, matching or not.
     in property <[SceneRow]> scene-rows: Platform.uses-mock-data ? MockData.scene-rows : [];
@@ -156,6 +171,26 @@ export global AppLogic {
     callback learn-set-kept(/* row */ int, /* kept */ int, /* panel position */ bool);
     callback learn-set-takeover(/* 0 jump, 1 glide, 2 pick up */ int);
     callback learn-set-pass-through(/* on */ bool);
+    // The surface editor: opens it for a device (`learn`: listening for every
+    // new control straight away); closes it, saving or not; adds a bank (or
+    // a single control) of `kind` (as `EditBankSettings.kind`); selects,
+    // moves and deletes banks; changes the selected bank's settings (`field`
+    // is an `EditBankSettings` field name); learns (`what` as
+    // `AppState.edit-listening`), one control, skips one, stops.
+    callback edit-surface(/* device */ string, /* learn */ bool);
+    callback edit-finish(/* save */ bool);
+    callback edit-add(/* kind */ int, /* single */ bool);
+    callback edit-select-bank(/* bank */ int);
+    callback edit-move-bank(/* bank */ int, /* x */ float, /* y */ float);
+    callback edit-delete-bank();
+    callback edit-set-name(/* name */ string);
+    callback edit-bank-name(/* name */ string);
+    callback edit-bank-set(/* field */ string, /* value */ int);
+    callback edit-learn(/* what */ int);
+    callback edit-learn-control(/* control */ int);
+    callback edit-skip();
+    callback edit-stop();
+    callback edit-delete-surface();
     callback add-midi-input();
     // Input 0 can't be removed.
     callback remove-midi-input(/* input */ int);

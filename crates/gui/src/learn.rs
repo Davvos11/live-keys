@@ -13,8 +13,9 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::config::{self, AppConfig};
 use crate::mappings::{self, Concrete, Ctx, LearnFlags, MappingMode};
-use crate::surfaces::SurfacesUi;
-use crate::{AppLogic, AppState, AppWindow, OpenEditor, Rack, log_on_err};
+use crate::surface_editor::{BankMessages, Editor, Listening, MessageType, pressure_index, pressure_of};
+use crate::surfaces::{SurfacesUi, control_views};
+use crate::{AppLogic, AppState, AppWindow, EditBank, EditBankSettings, OpenEditor, Rack, log_on_err, sync_surfaces};
 
 /// What MIDI learn works with.
 pub struct Learn {
@@ -25,6 +26,12 @@ pub struct Learn {
     pub surfaces: Rc<SurfacesUi>,
     pub metronome_playing: Rc<Cell<bool>>,
     pub app: slint::Weak<AppWindow>,
+    /// The surface being edited, while the editor is open.
+    pub editor: RefCell<Option<Editor>>,
+    /// The editor's banks and controls, refilled in place: a bank's handle
+    /// being dragged mustn't be made anew.
+    pub edit_banks: Rc<VecModel<EditBank>>,
+    pub edit_controls: Rc<VecModel<crate::SurfaceControlView>>,
 }
 
 /// A mapping moved a target: as reported, the latest per target.
@@ -73,6 +80,21 @@ impl Learn {
                     }
                 }
             }
+        }
+        // The surface editor learns from its device's events.
+        let learned = {
+            let mut editor = self.editor.borrow_mut();
+            editor.as_mut().is_some_and(|editor| {
+                let mut changed = false;
+                let device = editor.device.clone();
+                for event in events.iter().filter(|event| *event.device == *device) {
+                    changed |= editor.event(&event.event);
+                }
+                changed
+            })
+        };
+        if learned {
+            self.refresh_editor();
         }
         let moved = self.surfaces.apply(&events);
         if self.rack.mappings.learning()
@@ -434,6 +456,252 @@ impl Learn {
             learn.rack.mappings.edit_control(|settings| settings.pass_through = on);
             learn.changed((true, None));
             learn.refresh_view();
+        });
+    }
+}
+
+impl Learn {
+    /// Shows the surface editor as it is.
+    fn refresh_editor(&self) {
+        let Some(app) = self.app.upgrade() else { return };
+        let state = app.global::<AppState>();
+        let editor = self.editor.borrow();
+        let Some(editor) = editor.as_ref() else {
+            state.set_editing(false);
+            return;
+        };
+        state.set_editing(true);
+        state.set_edit_device(editor.device.as_str().into());
+        state.set_edit_name(editor.spec.name.as_str().into());
+        state.set_edit_status(editor.status().into());
+        state.set_edit_listening(match editor.listening {
+            Listening::None => 0,
+            Listening::Bank { .. } => 1,
+            Listening::Control { .. } => 2,
+            Listening::Device => 3,
+        });
+        state.set_edit_can_delete(self.surfaces.library_surface(&editor.device).is_some_and(|s| s.user && s.id == editor.spec.id));
+        if let Ok(surface) = editor.surface() {
+            // The control being learned is outlined.
+            let learning = match editor.listening {
+                Listening::Control { control } => Some(control),
+                Listening::Bank { bank, next } => {
+                    Some(editor.spec.banks[..bank].iter().map(|bank| bank.controls.len()).sum::<usize>() + next)
+                }
+                _ => None,
+            };
+            let mut controls = control_views(&surface);
+            if let Some(control) = learning.and_then(|control| controls.get_mut(control)) {
+                control.selected = true;
+            }
+            crate::sync_model(&self.edit_controls, controls);
+            state.set_edit_surface(crate::SurfaceView {
+                name: surface.name.as_str().into(),
+                device: editor.device.as_str().into(),
+                known: true,
+                connected: true,
+                width: surface.width as f32,
+                height: surface.height as f32,
+                controls: ModelRc::from(self.edit_controls.clone()),
+            });
+            let banks: Vec<EditBank> = surface
+                .banks
+                .iter()
+                .enumerate()
+                .map(|(index, bank)| EditBank {
+                    x: bank.x as f32,
+                    y: bank.y as f32,
+                    width: bank.width as f32,
+                    height: bank.height as f32,
+                    name: bank.name.as_str().into(),
+                    selected: editor.selected == Some(index),
+                })
+                .collect();
+            crate::sync_model(&self.edit_banks, banks);
+            state.set_edit_banks(ModelRc::from(self.edit_banks.clone()));
+        }
+        state.set_edit_selected(editor.selected.map_or(-1, |bank| bank as i32));
+        if let Some(bank) = editor.selected.and_then(|bank| editor.spec.banks.get(bank)) {
+            let messages = editor.bank_messages(editor.selected.unwrap_or(0));
+            state.set_edit_bank(EditBankSettings {
+                name: bank.name.as_str().into(),
+                kind: bank.kind as i32,
+                rows: bank.rows as i32,
+                columns: bank.columns as i32,
+                numbering: i32::from(bank.numbering == live_keys_surfaces::Numbering::BottomFirst),
+                message: messages.map_or(0, |m| MessageType::ALL.iter().position(|k| *k == m.kind).unwrap_or(0) as i32),
+                channel: i32::from(bank.channel),
+                first: messages.map_or(0, |m| i32::from(m.first)),
+                step: messages.map_or(1, |m| i32::from(m.step)),
+                feedback: bank.feedback,
+                lit: i32::from(bank.lit.unwrap_or(127)),
+                pressure: pressure_index(bank.pressure),
+            });
+        }
+    }
+
+    /// Changes the surface being edited, then shows it.
+    fn edit_surface(&self, change: impl FnOnce(&mut Editor)) {
+        if let Some(editor) = self.editor.borrow_mut().as_mut() {
+            change(editor);
+        }
+        self.refresh_editor();
+    }
+
+    /// Closes the editor; `save`: the surface becomes the user's, shown for
+    /// its device.
+    fn finish_editing(&self, save: bool) {
+        let Some(editor) = self.editor.borrow_mut().take() else { return };
+        if save {
+            if let Err(err) = live_keys_surfaces::Library::save(&editor.spec) {
+                // Keep editing: it can't be saved like this.
+                if let Some(app) = self.app.upgrade() {
+                    app.global::<AppState>().set_edit_status(format!("Can't be saved: {err}").into());
+                }
+                *self.editor.borrow_mut() = Some(editor);
+                return;
+            }
+            let mut config = self.config.borrow_mut();
+            if let Some(devices) = &mut config.surfaces.devices
+                && !devices.contains(&editor.device)
+            {
+                devices.push(editor.device.clone());
+                log_on_err(config::save(&config));
+            }
+        }
+        self.reload_surfaces();
+        self.refresh_editor();
+    }
+
+    /// Reads the surfaces again (one was saved or deleted) and shows them.
+    fn reload_surfaces(&self) {
+        let config = self.config.borrow();
+        self.surfaces.reload(live_keys_surfaces::Library::load(), &config);
+        sync_surfaces(&mut self.engine.borrow_mut(), &config, &self.surfaces, self.app.upgrade().as_ref());
+    }
+
+    /// Hands the surface editor's callbacks to the window.
+    pub fn connect_editor(self: &Rc<Self>, logic: &AppLogic) {
+        let learn = self.clone();
+        logic.on_edit_surface(move |device, listen| {
+            let surface = learn.surfaces.library_surface(&device);
+            let mut editor = Editor::new(&device, surface.as_ref());
+            if listen {
+                editor.listen(Listening::Device);
+            }
+            *learn.editor.borrow_mut() = Some(editor);
+            learn.refresh_editor();
+        });
+        let learn = self.clone();
+        logic.on_edit_finish(move |save| learn.finish_editing(save));
+        let learn = self.clone();
+        logic.on_edit_add(move |kind, single| {
+            let kind = match kind {
+                0 => live_keys_surfaces::ControlKind::Fader,
+                1 => live_keys_surfaces::ControlKind::Knob,
+                2 => live_keys_surfaces::ControlKind::Pad,
+                _ => live_keys_surfaces::ControlKind::Button,
+            };
+            learn.edit_surface(|editor| editor.add_bank(kind, single));
+        });
+        let learn = self.clone();
+        logic.on_edit_select_bank(move |bank| learn.edit_surface(|editor| editor.selected = usize::try_from(bank).ok()));
+        let learn = self.clone();
+        logic.on_edit_move_bank(move |bank, x, y| {
+            learn.edit_surface(|editor| editor.move_bank(bank as usize, x.round() as i32, y.round() as i32));
+        });
+        let learn = self.clone();
+        logic.on_edit_delete_bank(move || {
+            learn.edit_surface(|editor| {
+                if let Some(bank) = editor.selected {
+                    editor.delete_bank(bank);
+                }
+            });
+        });
+        let learn = self.clone();
+        logic.on_edit_set_name(move |name| learn.edit_surface(|editor| editor.spec.name = name.to_string()));
+        let learn = self.clone();
+        logic.on_edit_bank_name(move |name| {
+            learn.edit_surface(|editor| {
+                if let Some(bank) = editor.selected {
+                    editor.edit_bank(bank, |spec| spec.name = name.to_string());
+                }
+            });
+        });
+        let learn = self.clone();
+        logic.on_edit_bank_set(move |field, value| {
+            learn.edit_surface(|editor| {
+                let Some(bank) = editor.selected else { return };
+                let Some(spec) = editor.spec.banks.get(bank) else { return };
+                let (rows, columns) = (spec.rows, spec.columns);
+                let messages = editor.bank_messages(bank).unwrap_or(BankMessages { kind: MessageType::Cc, first: 0, step: 1 });
+                let byte = value.clamp(0, 127) as u8;
+                match field.as_str() {
+                    "rows" => editor.set_shape(bank, value.max(1) as u32, columns),
+                    "columns" => editor.set_shape(bank, rows, value.max(1) as u32),
+                    "message" => {
+                        let kind = MessageType::ALL.get(value as usize).copied().unwrap_or(MessageType::Cc);
+                        editor.set_messages(bank, BankMessages { kind, ..messages });
+                    }
+                    "first" => editor.set_messages(bank, BankMessages { first: byte, ..messages }),
+                    "step" => editor.set_messages(bank, BankMessages { step: byte.max(1), ..messages }),
+                    "kind" => editor.edit_bank(bank, |spec| {
+                        spec.kind = match value {
+                            0 => live_keys_surfaces::ControlKind::Fader,
+                            1 => live_keys_surfaces::ControlKind::Knob,
+                            2 => live_keys_surfaces::ControlKind::Pad,
+                            _ => live_keys_surfaces::ControlKind::Button,
+                        };
+                    }),
+                    "numbering" => editor.edit_bank(bank, |spec| {
+                        spec.numbering = if value == 1 {
+                            live_keys_surfaces::Numbering::BottomFirst
+                        } else {
+                            live_keys_surfaces::Numbering::TopFirst
+                        };
+                    }),
+                    "channel" => editor.edit_bank(bank, |spec| {
+                        spec.channel = value.clamp(1, 16) as u8;
+                        for control in &mut spec.controls {
+                            control.channel = None;
+                        }
+                    }),
+                    "feedback" => editor.edit_bank(bank, |spec| spec.feedback = value != 0),
+                    "lit" => editor.edit_bank(bank, |spec| spec.lit = Some(byte.max(1))),
+                    "pressure" => editor.edit_bank(bank, |spec| spec.pressure = pressure_of(value)),
+                    _ => {}
+                }
+            });
+        });
+        let learn = self.clone();
+        logic.on_edit_learn(move |what| {
+            learn.edit_surface(|editor| match what {
+                1 => {
+                    if let Some(bank) = editor.selected {
+                        editor.listen(Listening::Bank { bank, next: 0 });
+                    }
+                }
+                3 => editor.listen(Listening::Device),
+                _ => editor.listen(Listening::None),
+            });
+        });
+        let learn = self.clone();
+        logic.on_edit_learn_control(move |control| {
+            learn.edit_surface(|editor| editor.listen(Listening::Control { control: control as usize }));
+        });
+        let learn = self.clone();
+        logic.on_edit_skip(move || learn.edit_surface(Editor::skip));
+        let learn = self.clone();
+        logic.on_edit_stop(move || learn.edit_surface(|editor| editor.listen(Listening::None)));
+        let learn = self.clone();
+        logic.on_edit_delete_surface(move || {
+            let Some(id) = learn.editor.borrow().as_ref().map(|editor| editor.spec.id.clone()) else { return };
+            if let Err(err) = live_keys_surfaces::Library::delete(&id) {
+                log::error!("deleting surface {id} failed: {err}");
+            }
+            *learn.editor.borrow_mut() = None;
+            learn.reload_surfaces();
+            learn.refresh_editor();
         });
     }
 }

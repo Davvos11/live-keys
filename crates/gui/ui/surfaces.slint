@@ -2,9 +2,9 @@
 // 1"): the MIDI devices shown, each drawn as its surface's banks of faders,
 // knobs, pads and buttons, moving as the hardware does. See
 // `docs/design/midi-learn.md`.
-import { CheckBox } from "std-widgets.slint";
+import { CheckBox, ScrollView } from "std-widgets.slint";
 import { AppState, AppLogic, SurfaceView, SurfaceControlView } from "globals.slint";
-import { Theme, Icons, KButton, DropdownButton } from "widgets.slint";
+import { Theme, Icons, KButton, DropdownButton, ListItem, Segmented, Stepper, TextField } from "widgets.slint";
 import { PopupFrame } from "slot_panel.slint";
 
 export global SurfaceSizes {
@@ -202,7 +202,7 @@ component SurfaceDrawing inherits Rectangle {
     in property <SurfaceView> surface;
     property <length> name-height: 18px;
 
-    width: root.surface.known ? max(root.surface.width * 1px, name.preferred-width) : 300px;
+    width: root.surface.known ? max(root.surface.width * 1px, name.preferred-width + 40px) : 420px;
 
     name := Text {
         x: 0;
@@ -213,6 +213,20 @@ component SurfaceDrawing inherits Rectangle {
         font-weight: 600;
         color: Theme.text-faint;
         vertical-alignment: center;
+    }
+    // Opens the surface editor.
+    if root.surface.known : Text {
+        x: name.preferred-width + 8px;
+        y: 0;
+        height: root.name-height;
+        text: "Edit";
+        font-size: Theme.tiny-font-size;
+        color: edit-area.has-hover ? Theme.accent : Theme.text-faint;
+        vertical-alignment: center;
+        edit-area := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { AppLogic.edit-surface(root.surface.device, false); }
+        }
     }
     if root.surface.known : Rectangle {
         y: root.name-height;
@@ -240,24 +254,31 @@ component SurfaceDrawing inherits Rectangle {
     }
     if !root.surface.known : Rectangle {
         y: root.name-height + 4px;
-        height: 72px;
+        height: 96px;
         border-radius: 4px;
         border-width: 1px;
         border-color: Theme.control-border;
         background: Theme.control;
-        HorizontalLayout {
+        VerticalLayout {
             padding: 10px;
-            spacing: 10px;
+            spacing: 8px;
             Text {
-                horizontal-stretch: 1;
                 text: "No control surface is known for this device yet.";
                 color: Theme.text-muted;
                 font-size: Theme.small-font-size;
                 wrap: word-wrap;
-                vertical-alignment: center;
             }
-            VerticalLayout {
-                alignment: center;
+            HorizontalLayout {
+                spacing: 6px;
+                KButton {
+                    text: "Learn by moving controls";
+                    active: true;
+                    clicked => { AppLogic.edit-surface(root.surface.device, true); }
+                }
+                KButton {
+                    text: "Lay out…";
+                    clicked => { AppLogic.edit-surface(root.surface.device, false); }
+                }
                 KButton {
                     text: "Hide";
                     clicked => { AppLogic.toggle-surface-device(root.surface.device); }
@@ -435,6 +456,357 @@ export component SurfacesPanel inherits Rectangle {
                         color: Theme.text-faint;
                         font-size: Theme.small-font-size;
                         vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component EditCaption inherits Text {
+    color: Theme.text-muted;
+    font-size: Theme.small-font-size;
+    vertical-alignment: center;
+}
+
+// A number setting: its name, then a stepper.
+component EditNumber inherits HorizontalLayout {
+    in property <string> label;
+    in property <int> value;
+    in property <int> minimum: 0;
+    in property <int> maximum: 127;
+    callback changed(int);
+
+    spacing: 6px;
+    EditCaption {
+        text: root.label;
+        horizontal-stretch: 1;
+    }
+    Stepper {
+        signed: false;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value: root.value;
+        // Stepping sets its own value, replacing the binding.
+        property <int> source: root.value;
+        changed source => { self.value = self.source; }
+        changed(value) => { root.changed(value); }
+    }
+}
+
+// The surface editor (Penpot: "MIDI learn 4"), over the slots: the surface's
+// and the selected bank's settings on the left, the surface on the right with
+// its banks framed — a bank's handle selects and drags it, a control clicked
+// is learned on its own.
+export component SurfaceEditor inherits Rectangle {
+    property <length> handle: 14px;
+
+    background: Theme.background;
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.divider;
+    }
+
+    HorizontalLayout {
+        // The settings.
+        Rectangle {
+            width: SurfaceSizes.column;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.divider;
+            }
+            settings := ScrollView {
+                VerticalLayout {
+                    width: settings.visible-width;
+                    padding: 10px;
+                    spacing: 8px;
+                    alignment: start;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Edit surface";
+                            color: Theme.text;
+                            font-size: Theme.font-size;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        KButton {
+                            text: "Cancel";
+                            clicked => { AppLogic.edit-finish(false); }
+                        }
+                        KButton {
+                            text: "Save";
+                            active: true;
+                            clicked => { AppLogic.edit-finish(true); }
+                        }
+                    }
+                    TextField {
+                        text: AppState.edit-name;
+                        placeholder: "Name";
+                        edited(text) => { AppLogic.edit-set-name(text); }
+                    }
+                    Text {
+                        text: "For " + AppState.edit-device;
+                        color: Theme.text-faint;
+                        font-size: Theme.small-font-size;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        add := KButton {
+                            text: "+ Add";
+                            clicked => { add-menu.show(); }
+                        }
+                        KButton {
+                            text: AppState.edit-listening == 3 ? "Stop learning" : "Learn controls…";
+                            active: AppState.edit-listening == 3;
+                            clicked => {
+                                if (AppState.edit-listening == 3) {
+                                    AppLogic.edit-stop();
+                                } else {
+                                    AppLogic.edit-learn(3);
+                                }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    if AppState.edit-status != "" : Text {
+                        text: AppState.edit-status;
+                        color: AppState.edit-listening > 0 ? Theme.accent : Theme.text-muted;
+                        font-size: Theme.small-font-size;
+                        wrap: word-wrap;
+                    }
+                    if AppState.edit-listening == 1 || AppState.edit-listening == 2 : HorizontalLayout {
+                        spacing: 6px;
+                        if AppState.edit-listening == 1 : KButton {
+                            text: "Skip";
+                            clicked => { AppLogic.edit-skip(); }
+                        }
+                        KButton {
+                            text: "Stop";
+                            clicked => { AppLogic.edit-stop(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    if AppState.edit-selected < 0 : Text {
+                        text: AppState.edit-banks.length == 0
+                            ? "Add banks of faders, knobs, pads or buttons, or let \"Learn controls…\" make them as you move each control."
+                            : "Click a bank's handle to set it up; drag it to move it.";
+                        color: Theme.text-faint;
+                        font-size: Theme.small-font-size;
+                        wrap: word-wrap;
+                    }
+                    if AppState.edit-selected >= 0 : VerticalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.divider;
+                        }
+                        TextField {
+                            text: AppState.edit-bank.name;
+                            placeholder: "Bank name";
+                            edited(text) => { AppLogic.edit-bank-name(text); }
+                        }
+                        Segmented {
+                            options: ["Faders", "Knobs", "Pads", "Buttons"];
+                            current: AppState.edit-bank.kind;
+                            picked(index) => { AppLogic.edit-bank-set("kind", index); }
+                        }
+                        EditNumber {
+                            label: "Rows";
+                            value: AppState.edit-bank.rows;
+                            minimum: 1;
+                            maximum: 16;
+                            changed(value) => { AppLogic.edit-bank-set("rows", value); }
+                        }
+                        EditNumber {
+                            label: "Columns";
+                            value: AppState.edit-bank.columns;
+                            minimum: 1;
+                            maximum: 32;
+                            changed(value) => { AppLogic.edit-bank-set("columns", value); }
+                        }
+                        if AppState.edit-bank.rows > 1 : Segmented {
+                            options: ["Top row first", "Bottom row first"];
+                            current: AppState.edit-bank.numbering;
+                            picked(index) => { AppLogic.edit-bank-set("numbering", index); }
+                        }
+                        EditCaption { text: "Sends"; }
+                        Segmented {
+                            options: ["CC", "Note", "Pitch bend"];
+                            current: AppState.edit-bank.message;
+                            picked(index) => { AppLogic.edit-bank-set("message", index); }
+                        }
+                        EditNumber {
+                            label: "Channel";
+                            value: AppState.edit-bank.channel;
+                            minimum: 1;
+                            maximum: 16;
+                            changed(value) => { AppLogic.edit-bank-set("channel", value); }
+                        }
+                        if AppState.edit-bank.message != 2 : EditNumber {
+                            label: AppState.edit-bank.message == 0 ? "First CC" : "First note";
+                            value: AppState.edit-bank.first;
+                            changed(value) => { AppLogic.edit-bank-set("first", value); }
+                        }
+                        if AppState.edit-bank.message != 2 : EditNumber {
+                            label: "Step";
+                            value: AppState.edit-bank.step;
+                            minimum: 1;
+                            maximum: 16;
+                            changed(value) => { AppLogic.edit-bank-set("step", value); }
+                        }
+                        if AppState.edit-bank.kind == 2 : VerticalLayout {
+                            spacing: 2px;
+                            EditCaption { text: "While held, also sends"; }
+                            Segmented {
+                                options: ["Nothing", "Pressure", "Poly pressure"];
+                                current: AppState.edit-bank.pressure;
+                                picked(index) => { AppLogic.edit-bank-set("pressure", index); }
+                            }
+                        }
+                        Text {
+                            text: "Motor faders, LED rings and lit pads or buttons can show a value sent back.";
+                            color: Theme.text-faint;
+                            font-size: Theme.small-font-size;
+                            wrap: word-wrap;
+                        }
+                        CheckBox {
+                            text: "Shows values sent back";
+                            checked: AppState.edit-bank.feedback;
+                            property <bool> source: AppState.edit-bank.feedback;
+                            changed source => { self.checked = self.source; }
+                            toggled => { AppLogic.edit-bank-set("feedback", self.checked ? 1 : 0); }
+                        }
+                        if AppState.edit-bank.feedback && AppState.edit-bank.kind >= 2 : EditNumber {
+                            label: "Lit at";
+                            value: AppState.edit-bank.lit;
+                            minimum: 1;
+                            changed(value) => { AppLogic.edit-bank-set("lit", value); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            KButton {
+                                text: "Learn bank";
+                                active: AppState.edit-listening == 1;
+                                clicked => { AppLogic.edit-learn(1); }
+                            }
+                            KButton {
+                                text: "Delete bank";
+                                clicked => { AppLogic.edit-delete-bank(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Text {
+                            text: "\"Learn bank\" listens: move or press each of its controls in turn. Click a control to learn just that one.";
+                            color: Theme.text-faint;
+                            font-size: Theme.small-font-size;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if AppState.edit-can-delete : HorizontalLayout {
+                        alignment: start;
+                        KButton {
+                            text: "Delete surface";
+                            clicked => { AppLogic.edit-delete-surface(); }
+                        }
+                    }
+                }
+            }
+        }
+        // The surface, its banks framed.
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            Flickable {
+                content-width: max(self.width, AppState.edit-surface.width * 1px + 40px);
+                content-height: max(self.height, AppState.edit-surface.height * 1px + 60px);
+                Rectangle {
+                    x: 20px;
+                    y: 24px;
+                    width: AppState.edit-surface.width * 1px;
+                    height: AppState.edit-surface.height * 1px;
+                    for bank[index] in AppState.edit-banks : Rectangle {
+                        x: bank.x * 1px - 4px;
+                        y: bank.y * 1px - 4px;
+                        width: bank.width * 1px + 8px;
+                        height: bank.height * 1px + 8px;
+                        border-radius: 4px;
+                        border-width: bank.selected ? 2px : 1px;
+                        border-color: bank.selected ? Theme.accent : Theme.control-border;
+                    }
+                    for control[index] in AppState.edit-surface.controls : Rectangle {
+                        x: control.x * 1px;
+                        y: control.y * 1px;
+                        width: control.width * 1px;
+                        height: control.height * 1px;
+                        border-radius: 4px;
+                        border-width: control.selected ? 2px : area.has-hover ? 1px : 0px;
+                        border-color: control.selected ? Theme.accent : Theme.control-border;
+                        if control.kind == 0 : SurfaceFader { control: control; }
+                        if control.kind == 1 : SurfaceKnob { control: control; }
+                        if control.kind == 2 : SurfacePad { control: control; }
+                        if control.kind == 3 : SurfaceButton { control: control; }
+                        area := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.edit-learn-control(index); }
+                        }
+                    }
+                    // Each bank's handle, above it: click selects, drag moves.
+                    for bank[index] in AppState.edit-banks : Rectangle {
+                        x: bank.x * 1px - 4px;
+                        y: bank.y * 1px - 4px - root.handle;
+                        width: bank.width * 1px + 8px;
+                        height: root.handle;
+                        border-radius: 3px;
+                        background: bank.selected ? Theme.accent : handle-area.has-hover ? Theme.control-hover : Theme.control;
+                        Text {
+                            x: 4px;
+                            width: parent.width - 8px;
+                            text: bank.name;
+                            font-size: 10px;
+                            color: bank.selected ? Theme.on-accent : Theme.text-muted;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        handle-area := TouchArea {
+                            mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    AppLogic.edit-select-bank(index);
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    AppLogic.edit-move-bank(index,
+                                        bank.x + (self.mouse-x - self.pressed-x) / 1px,
+                                        bank.y + (self.mouse-y - self.pressed-y) / 1px);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    add-menu := PopupWindow {
+        x: 10px + 0px;
+        y: 90px;
+        width: 220px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        PopupFrame {
+            VerticalLayout {
+                padding: 4px;
+                for item[index] in ["Bank of faders", "Bank of knobs", "Bank of pads", "Bank of buttons", "A fader", "A knob", "A pad", "A button"] : ListItem {
+                    text: item;
+                    clicked => {
+                        AppLogic.edit-add(Math.mod(index, 4), index >= 4);
+                        add-menu.close();
                     }
                 }
             }

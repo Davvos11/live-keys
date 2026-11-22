@@ -764,8 +764,8 @@ mod tests {
         let now = Instant::now();
         let surface = || -> Arc<Surface> {
             let json = r#"{ "id": "t", "name": "t", "banks": [
-                { "name": "F", "kind": "fader", "columns": 1, "feedback": true, "controls": [{ "cc": 1 }] },
-                { "name": "B", "kind": "button", "columns": 1, "feedback": true, "controls": [{ "note": 36 }] }
+                { "name": "F", "kind": "fader", "columns": 1, "prefix": "F", "feedback": true, "controls": [{ "cc": 1 }] },
+                { "name": "B", "kind": "button", "columns": 1, "prefix": "B", "feedback": true, "controls": [{ "note": 36 }] }
             ] }"#;
             Arc::new(Surface::from_json(json).unwrap())
         };

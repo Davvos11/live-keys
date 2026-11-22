@@ -32,9 +32,9 @@ struct Shown {
 }
 
 pub struct SurfacesUi {
-    library: Library,
+    library: RefCell<Library>,
     /// The library's surfaces, shared with the mapping thread.
-    shared: Vec<Arc<Surface>>,
+    shared: RefCell<Vec<Arc<Surface>>>,
     /// `AppState.surfaces`.
     pub views: Rc<VecModel<SurfaceView>>,
     /// `AppState.surface-devices`.
@@ -52,8 +52,8 @@ pub struct SurfacesUi {
 impl SurfacesUi {
     pub fn new(library: Library) -> Self {
         Self {
-            shared: library.surfaces.iter().cloned().map(Arc::new).collect(),
-            library,
+            shared: RefCell::new(library.surfaces.iter().cloned().map(Arc::new).collect()),
+            library: RefCell::new(library),
             views: Rc::new(VecModel::default()),
             devices: Rc::new(VecModel::default()),
             shown: RefCell::default(),
@@ -79,7 +79,7 @@ impl SurfacesUi {
                 .present
                 .borrow()
                 .iter()
-                .filter(|device| self.library.for_device(device).is_some())
+                .filter(|device| self.library.borrow().for_device(device).is_some())
                 .cloned()
                 .collect(),
         }
@@ -117,7 +117,8 @@ impl SurfacesUi {
         self.shown_devices(config)
             .iter()
             .map(|device| {
-                let name = self.library.for_device(device).map_or(device.as_str(), |surface| surface.name.as_str());
+                let library = self.library.borrow();
+                let name = library.for_device(device).map_or(device.as_str(), |surface| surface.name.as_str());
                 if present.contains(device) { name.to_string() } else { format!("{name} (not connected)") }
             })
             .collect::<Vec<_>>()
@@ -147,10 +148,11 @@ impl SurfacesUi {
             let kept = old.iter().position(|item| &item.device == device).map(|index| old.remove(index));
             shown.push(kept.unwrap_or_else(|| self.show(device)));
         }
+        let library = self.library.borrow();
         let views: Vec<SurfaceView> = shown
             .iter()
             .map(|item| {
-                let surface = item.surface.map(|index| &self.library.surfaces[index]);
+                let surface = item.surface.map(|index| &library.surfaces[index]);
                 SurfaceView {
                     name: surface.map_or(item.device.as_str(), |surface| surface.name.as_str()).into(),
                     device: item.device.as_str().into(),
@@ -165,41 +167,23 @@ impl SurfacesUi {
         sync_model(&self.views, views);
     }
 
+    /// Replaces the library (a surface was saved or deleted), and shows the
+    /// devices again with it.
+    pub fn reload(&self, library: Library, config: &AppConfig) {
+        *self.shared.borrow_mut() = library.surfaces.iter().cloned().map(Arc::new).collect();
+        *self.library.borrow_mut() = library;
+        self.shown.borrow_mut().clear();
+        self.refresh(config);
+    }
+
+    /// The surface the library has for `device`, shown or not.
+    pub fn library_surface(&self, device: &str) -> Option<Surface> {
+        self.library.borrow().for_device(device).cloned()
+    }
+
     fn show(&self, device: &str) -> Shown {
-        let surface = self.library.surfaces.iter().position(|surface| surface.matches(device));
-        let controls: Vec<SurfaceControlView> = surface
-            .map(|index| &self.library.surfaces[index])
-            .map(|surface| {
-                surface
-                    .controls
-                    .iter()
-                    .map(|control| {
-                        let (width, height) = control.kind.cell_size();
-                        SurfaceControlView {
-                            kind: match control.kind {
-                                ControlKind::Fader => 0,
-                                ControlKind::Knob => 1,
-                                ControlKind::Pad => 2,
-                                ControlKind::Button => 3,
-                            },
-                            label: control.label.as_str().into(),
-                            x: control.x as f32,
-                            y: control.y as f32,
-                            width: width as f32,
-                            height: height as f32,
-                            // Pitch bend rests in the middle.
-                            value: if control.message == Message::PitchBend { 0.5 } else { 0.0 },
-                            pressed: false,
-                            moving: false,
-                            mapped: false,
-                            selected: false,
-                            waiting: false,
-                            target: 0.0,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let surface = self.library.borrow().surfaces.iter().position(|surface| surface.matches(device));
+        let controls = surface.map(|index| control_views(&self.library.borrow().surfaces[index])).unwrap_or_default();
         Shown {
             device: device.to_string(),
             surface,
@@ -213,7 +197,7 @@ impl SurfacesUi {
         self.shown
             .borrow()
             .iter()
-            .filter_map(|item| Some((item.device.as_str().into(), self.shared[item.surface?].clone())))
+            .filter_map(|item| Some((item.device.as_str().into(), self.shared.borrow()[item.surface?].clone())))
             .collect()
     }
 
@@ -221,7 +205,7 @@ impl SurfacesUi {
     pub fn surface_of(&self, device: &str) -> Option<Arc<Surface>> {
         let shown = self.shown.borrow();
         let item = shown.iter().find(|item| item.device == device)?;
-        Some(self.shared[item.surface?].clone())
+        Some(self.shared.borrow()[item.surface?].clone())
     }
 
     /// Marks MIDI learn's selected control and the controls that drive
@@ -291,10 +275,11 @@ impl SurfacesUi {
         }
         let now = Instant::now();
         let mut moved = None;
+        let library = self.library.borrow();
         let mut shown = self.shown.borrow_mut();
         for event in events {
             let Some(item) = shown.iter_mut().find(|item| *item.device == *event.device) else { continue };
-            let Some(surface) = item.surface.map(|index| &self.library.surfaces[index]) else { continue };
+            let Some(surface) = item.surface.map(|index| &library.surfaces[index]) else { continue };
             self.last_event.set(Some(now));
             if let Some((control, reading)) = surface.read(&event.event) {
                 if !matches!(reading, Reading::Release) {
@@ -348,4 +333,36 @@ impl SurfacesUi {
         }
         self.last_event.get().is_some_and(|at| now - at < MOVING)
     }
+}
+
+/// `surface`'s controls as the panel draws them, at rest.
+pub fn control_views(surface: &Surface) -> Vec<SurfaceControlView> {
+    surface
+        .controls
+        .iter()
+        .map(|control| {
+            let (width, height) = control.kind.cell_size();
+            SurfaceControlView {
+                kind: match control.kind {
+                    ControlKind::Fader => 0,
+                    ControlKind::Knob => 1,
+                    ControlKind::Pad => 2,
+                    ControlKind::Button => 3,
+                },
+                label: control.label.as_str().into(),
+                x: control.x as f32,
+                y: control.y as f32,
+                width: width as f32,
+                height: height as f32,
+                // Pitch bend rests in the middle.
+                value: if control.message == Message::PitchBend { 0.5 } else { 0.0 },
+                pressed: false,
+                moving: false,
+                mapped: false,
+                selected: false,
+                waiting: false,
+                target: 0.0,
+            }
+        })
+        .collect()
 }

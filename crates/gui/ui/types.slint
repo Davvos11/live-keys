@@ -255,6 +255,35 @@ export struct SurfaceControlView {
     target: float,
 }
 
+// A bank of the surface being edited: its frame, in surface pixels.
+export struct EditBank {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    name: string,
+    selected: bool,
+}
+
+// The selected bank's settings in the surface editor. `kind`: 0 fader, 1
+// knob, 2 pad, 3 button; `numbering`: 0 top row first, 1 bottom row first;
+// `message`: 0 CC, 1 note, 2 pitch bend; `pressure`: 0 none, 1 channel, 2
+// poly; `channel` 1–16.
+export struct EditBankSettings {
+    name: string,
+    kind: int,
+    rows: int,
+    columns: int,
+    numbering: int,
+    message: int,
+    channel: int,
+    first: int,
+    step: int,
+    feedback: bool,
+    lit: int,
+    pressure: int,
+}
+
 // One level of a MIDI-learn toggle: its position 0..1 along the target's
 // control, and that as the target's value.
 export struct LearnLevel {
