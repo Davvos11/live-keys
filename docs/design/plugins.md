@@ -592,7 +592,9 @@ its licence, its size, and an Install button (plus "Install all"):
 - **Plugins only available as a `.deb` of their own** (Surge XT; Helm perhaps): downloaded from
   their release page, checked, and installed as a package;
 - **Our instruments' samples** (Salamander for the piano): downloaded into
-  `<data dir>/live-keys/samples/`, checksummed, no root needed.
+  `<data dir>/live-keys/samples/`, checksummed, no root needed. (A first version is done,
+  2026-11-22: picking the piano without its samples offers the download in a dialog; the
+  window listing everything comes later.)
 
 After an install, the app rescans plugins.
 

@@ -10,3 +10,10 @@ publish.workspace = true
 live-keys-sfz = { path = "../sfz" }
 anyhow = "1"
 dirs = "7"
+flate2 = "1"
+sha2 = "0.10"
+tar = "0.4"
+# TLS with the system's certificates (rustls-platform-verifier), not Mozilla's
+# bundled list (webpki-roots, CDLA-Permissive-2.0); ring as rustls' crypto.
+ureq = { version = "3", default-features = false, features = ["gzip", "rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

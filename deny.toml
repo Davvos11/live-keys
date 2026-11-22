@@ -3,6 +3,16 @@
 
 [graph]
 all-features = true
+# The platforms live-keys builds for (or means to), so a dependency of a
+# platform it never targets doesn't count (rustls-platform-verifier's
+# webpki-root-certs, CDLA-Permissive-2.0, is wasm32-only).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [licenses]
 # Live Keys is MIT: only licences that allow that, without asking us to

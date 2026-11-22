@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 live-keys-engine = { path = "../engine" }
+live-keys-builtin = { path = "../builtin" }
 live-keys-surfaces = { path = "../surfaces" }
 live-keys-lv2-ui = { path = "../lv2-ui-host" }
 live-keys-vst3-ui = { path = "../vst3-ui-host" }
@@ -38,10 +39,12 @@ copyright = "David Vos"
 license-file = ["../../LICENSE", "0"]
 section = "sound"
 priority = "optional"
-depends = "$auto"
+# ca-certificates: the in-app sample download checks HTTPS against the system's certificates.
+depends = "$auto, ca-certificates"
 extended-description = """\
-An instrument rack for playing live from a MIDI keyboard: LV2 and VST3 instruments and \
-effects in a few parallel slots, each with its own keyboard zone, presets and scenes. \
+An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP instruments and \
+effects in a few parallel slots, each with its own keyboard zone, presets and scenes, and a \
+sampled grand piano of its own (its samples are downloaded from within the app). \
 Contains the app (live-keys-gui) and a headless command-line host (live-keys)."""
 assets = [
     ["target/release/live-keys-gui", "usr/bin/", "755"],

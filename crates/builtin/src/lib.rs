@@ -37,6 +37,20 @@ struct Definition {
     presets: &'static [(&'static str, &'static [(&'static str, f32)])],
     voices: usize,
     load: fn() -> Result<Instrument>,
+    /// The samples it downloads, if any.
+    samples: Option<SampleSet>,
+}
+
+/// A downloadable sample set.
+struct SampleSet {
+    name: &'static str,
+    credit: &'static str,
+    download_mb: u32,
+    installed_mb: u32,
+    files: fn() -> u32,
+    dir: fn() -> Option<PathBuf>,
+    is_installed: fn(&Path) -> bool,
+    install: fn(&Path, &DownloadProgress) -> Result<()>,
 }
 
 const DEFINITIONS: &[Definition] = &[Definition {
@@ -46,7 +60,66 @@ const DEFINITIONS: &[Definition] = &[Definition {
     presets: live_keys_piano::PRESETS,
     voices: live_keys_piano::VOICES,
     load: load_piano,
+    samples: Some(SampleSet {
+        name: "Salamander Grand Piano",
+        credit: live_keys_piano::samples::CREDIT,
+        download_mb: live_keys_piano::samples::DOWNLOAD_MB,
+        installed_mb: live_keys_piano::samples::INSTALLED_MB,
+        files: live_keys_piano::samples::file_count,
+        dir: live_keys_piano::default_sample_dir,
+        is_installed: live_keys_piano::samples::is_installed,
+        install: live_keys_piano::samples::install,
+    }),
 }];
+
+/// A sample download's progress: files done, bytes, and a cancel flag.
+pub use live_keys_piano::samples::Progress as DownloadProgress;
+
+/// Samples a built-in instrument needs and doesn't have yet.
+#[derive(Clone)]
+pub struct MissingSamples {
+    /// The instrument's name ("Grand Piano").
+    pub instrument: &'static str,
+    /// The sample set's name, and who made it under which licence.
+    pub name: &'static str,
+    pub credit: &'static str,
+    pub download_mb: u32,
+    pub installed_mb: u32,
+    /// Files an install writes (for progress).
+    pub files: u32,
+    /// Where they go.
+    pub dir: PathBuf,
+    install: fn(&Path, &DownloadProgress) -> Result<()>,
+}
+
+impl MissingSamples {
+    /// Downloads and installs them. Blocking (minutes): run it on a thread of
+    /// its own; `progress` shows how far it is and can cancel it.
+    pub fn install(&self, progress: &DownloadProgress) -> Result<()> {
+        (self.install)(&self.dir, progress)
+    }
+}
+
+/// The samples `plugin_id` still needs, if it's a built-in instrument that
+/// downloads them and they aren't installed.
+pub fn missing_samples(plugin_id: &str) -> Option<MissingSamples> {
+    let definition = definition(plugin_id).ok()?;
+    let set = definition.samples.as_ref()?;
+    let dir = (set.dir)()?;
+    if (set.is_installed)(&dir) {
+        return None;
+    }
+    Some(MissingSamples {
+        instrument: definition.name,
+        name: set.name,
+        credit: set.credit,
+        download_mb: set.download_mb,
+        installed_mb: set.installed_mb,
+        files: (set.files)(),
+        dir,
+        install: set.install,
+    })
+}
 
 fn load_piano() -> Result<Instrument> {
     let dir = live_keys_piano::default_sample_dir().context("no data folder to find the samples in")?;

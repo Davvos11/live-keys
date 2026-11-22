@@ -21,6 +21,8 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use live_keys_builtin::{DownloadProgress, MissingSamples};
+use std::sync::Arc;
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
     MASTER_SLOT, PluginInfo, PluginKey, PluginKind, PluginScan, PresetInfo, SLOT_COUNT, Section, SlotChain,
@@ -92,6 +94,91 @@ impl OpenEditor {
             OpenEditor::Lv2(handle) => handle.request_close(),
             OpenEditor::Vst3(editor) => editor.close(),
             OpenEditor::Clap(editor) => editor.close(),
+        }
+    }
+}
+
+/// A built-in instrument's samples, offered or being downloaded, and where to
+/// load the instrument once they're in.
+struct SampleDownload {
+    slot: usize,
+    plugin_id: String,
+    samples: MissingSamples,
+    progress: Arc<DownloadProgress>,
+    worker: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+}
+
+/// Offers the download (`AppState.download-state` 1).
+fn offer_download(app: &AppWindow, samples: &MissingSamples) {
+    let state = app.global::<AppState>();
+    state.set_download_title(format!("Download the {}'s samples?", samples.instrument).into());
+    state.set_download_text(
+        format!(
+            "The {} plays the {} samples: {}. They're downloaded once, about {} MB ({} MB on disk), into {}.",
+            samples.instrument,
+            samples.name,
+            samples.credit,
+            samples.download_mb,
+            samples.installed_mb,
+            samples.dir.display()
+        )
+        .into(),
+    );
+    state.set_download_progress(0.0);
+    state.set_download_status("".into());
+    state.set_download_state(1);
+}
+
+/// Follows a running download: its progress, and once it's done, loading the
+/// instrument (or showing why it failed).
+fn poll_download(app: &AppWindow, download: &RefCell<Option<SampleDownload>>) {
+    let state = app.global::<AppState>();
+    let finished = {
+        let current = download.borrow();
+        let Some(current) = current.as_ref() else { return };
+        let Some(worker) = &current.worker else { return };
+        let files = current.progress.files.load(std::sync::atomic::Ordering::Relaxed);
+        let megabytes = current.progress.bytes.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000;
+        let total = current.samples.files.max(1);
+        state.set_download_progress(files as f32 / total as f32);
+        state.set_download_status(
+            if current.progress.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                "Cancelling…".to_string()
+            } else {
+                format!("{files} of {total} files, {megabytes} MB")
+            }
+            .into(),
+        );
+        worker.is_finished()
+    };
+    if !finished {
+        return;
+    }
+    let mut current = download.borrow_mut();
+    let Some(done) = current.as_mut() else { return };
+    let result = match done.worker.take().map(std::thread::JoinHandle::join) {
+        Some(Ok(result)) => result,
+        _ => Err(anyhow::anyhow!("the download stopped unexpectedly")),
+    };
+    let cancelled = done.progress.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    match result {
+        Ok(()) => {
+            let done = current.take().expect("checked above");
+            drop(current);
+            state.set_download_state(0);
+            log::info!("installed {} into {}", done.samples.name, done.samples.dir.display());
+            // Loading it now finds its samples.
+            app.global::<AppLogic>().invoke_pick_plugin(done.slot as i32, 0, done.plugin_id.into());
+        }
+        Err(_) if cancelled => {
+            *current = None;
+            state.set_download_state(0);
+        }
+        Err(err) => {
+            log::error!("downloading {}: {err:#}", done.samples.name);
+            state.set_download_title(format!("Couldn't download the {}'s samples", done.samples.instrument).into());
+            state.set_download_text(format!("{err:#}").into());
+            state.set_download_state(3);
         }
     }
 }
@@ -1767,13 +1854,84 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    let download: Rc<RefCell<Option<SampleDownload>>> = Rc::new(RefCell::new(None));
+    {
+        let download = download.clone();
+        let app_weak = app.as_weak();
+        logic.on_start_download(move || {
+            let mut current = download.borrow_mut();
+            let Some(current) = current.as_mut() else { return };
+            if current.worker.is_some() {
+                return;
+            }
+            let progress = Arc::new(DownloadProgress::default());
+            current.progress = progress.clone();
+            let samples = current.samples.clone();
+            let title = format!("Downloading the {}'s samples…", samples.instrument);
+            current.worker = Some(
+                std::thread::Builder::new()
+                    .name("sample-download".into())
+                    .spawn(move || samples.install(&progress))
+                    .expect("failed to spawn the download thread"),
+            );
+            if let Some(app) = app_weak.upgrade() {
+                let state = app.global::<AppState>();
+                state.set_download_title(title.into());
+                state.set_download_progress(0.0);
+                state.set_download_status("Starting…".into());
+                state.set_download_state(2);
+            }
+        });
+    }
+    {
+        let download = download.clone();
+        let app_weak = app.as_weak();
+        logic.on_cancel_download(move || {
+            let mut current = download.borrow_mut();
+            match current.as_ref() {
+                // The poll timer closes the dialog once it has stopped.
+                Some(running) if running.worker.is_some() => {
+                    running.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {
+                    *current = None;
+                    if let Some(app) = app_weak.upgrade() {
+                        app.global::<AppState>().set_download_state(0);
+                    }
+                }
+            }
+        });
+    }
+
     {
         let config = config.clone();
         let engine = engine.clone();
         let rack = rack.clone();
+        let download = download.clone();
+        let app_weak = app.as_weak();
         logic.on_pick_plugin(move |slot, category, plugin_id| {
             let slot = slot as usize;
             let kind = kind_from(category);
+            // A built-in instrument without its samples: offer them first; the
+            // instrument loads once they're in (`poll_download`).
+            if kind == PluginKind::Instrument
+                && let Some(samples) = live_keys_builtin::missing_samples(&plugin_id)
+            {
+                if download.borrow().as_ref().is_some_and(|d| d.worker.is_some()) {
+                    return;
+                }
+                if let Some(app) = app_weak.upgrade() {
+                    offer_download(&app, &samples);
+                }
+                *download.borrow_mut() = Some(SampleDownload {
+                    slot,
+                    plugin_id: plugin_id.to_string(),
+                    samples,
+                    progress: Arc::default(),
+                    worker: None,
+                });
+                return;
+            }
             if kind == PluginKind::Instrument {
                 // The slot's current instrument is about to be replaced, and an open
                 // GUI holds its raw instance handle.
@@ -2820,6 +2978,9 @@ fn main() -> anyhow::Result<()> {
                 && let Some(app) = app_weak.upgrade()
             {
                 rack.refresh_scenes(&app);
+            }
+            if let Some(app) = app_weak.upgrade() {
+                poll_download(&app, &download);
             }
             // CLAP plugins' main-thread work, and their GUIs' edits.
             let mut edits = Vec::new();

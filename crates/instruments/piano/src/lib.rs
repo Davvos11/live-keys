@@ -7,7 +7,10 @@
 //! loads the instrument, makes a `Synth` and applies the controls to it.
 //!
 //! The samples aren't part of the build: they're downloaded into
-//! [`default_sample_dir`] (a copy of sfzinstruments/SalamanderGrandPiano).
+//! [`default_sample_dir`] (a copy of sfzinstruments/SalamanderGrandPiano) by
+//! [`samples::install`].
+
+pub mod samples;
 
 use anyhow::{Context, Result};
 use live_keys_sfz::{Control, ControlTarget, Instrument};
@@ -72,7 +75,7 @@ pub fn default_sample_dir() -> Option<PathBuf> {
 
 /// Loads the piano from the Salamander sample folder (streaming its samples).
 pub fn load(sample_dir: &Path) -> Result<Instrument> {
-    if !sample_dir.join("Samples").is_dir() {
+    if !samples::is_installed(sample_dir) {
         anyhow::bail!(
             "the Salamander Grand Piano samples aren't installed (expected in {})",
             sample_dir.display()

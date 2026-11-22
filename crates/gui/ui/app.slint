@@ -1,4 +1,5 @@
-import { Palette, Spinner } from "std-widgets.slint";
+import { Palette, ProgressIndicator, Spinner } from "std-widgets.slint";
+import { KButton } from "widgets.slint";
 import { LiveTab } from "live_tab.slint";
 import { Sidebar } from "sidebar.slint";
 import { PickerTarget, PluginPicker } from "plugin_picker.slint";
@@ -172,5 +173,64 @@ export component AppWindow inherits Window {
         height: max(240px, root.height - 64px);
         x: (root.width - self.width) / 2;
         y: 32px;
+    }
+
+    // A built-in instrument's samples to download (see `AppState.download-state`):
+    // over everything, the rest dimmed.
+    if AppState.download-state != 0 : Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #000000a0;
+        // Clicks don't reach what's under it.
+        TouchArea { }
+        Rectangle {
+            width: 460px;
+            height: card.preferred-height;
+            border-radius: 8px;
+            background: Theme.background;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000099;
+            card := VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+                Text {
+                    text: AppState.download-title;
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: AppState.download-text;
+                    color: AppState.download-state == 3 ? #e06c6c : Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                if AppState.download-state == 2 : VerticalLayout {
+                    spacing: 6px;
+                    ProgressIndicator {
+                        progress: AppState.download-progress;
+                        height: 8px;
+                    }
+                    Text {
+                        text: AppState.download-status;
+                        color: Theme.text-muted;
+                        font-size: 14px;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    KButton {
+                        text: AppState.download-state == 2 ? "Cancel" : AppState.download-state == 3 ? "Close" : "Not now";
+                        clicked => { AppLogic.cancel-download(); }
+                    }
+                    if AppState.download-state != 2 : KButton {
+                        text: AppState.download-state == 3 ? "Try again" : "Download";
+                        active: true;
+                        clicked => { AppLogic.start-download(); }
+                    }
+                }
+            }
+        }
     }
 }

@@ -67,9 +67,13 @@ Next steps, roughly in order:
   Each control drives one SFZ controller of our SFZ (Salamander's own: string resonance, key
   noise, pedal noise, release, velocity tracking; ours: brightness, tune, width) or the
   natural/retuned keyswitch. Five shipped presets; user presets and state files in the
-  core's own text format (`symbol = value`). Next: the install window for the samples (until
-  then, loading the piano without them says where they're expected), and the standalone
-  build (truce), which should read the same state files.
+  core's own text format (`symbol = value`). Next: the standalone build (truce), which should
+  read the same state files.
+- **Shipping the samples** (done, 2026-11-22): picking the piano without its samples offers
+  to download them (GitHub's tarball of sfzinstruments' repository at a pinned commit, every
+  file checked against SHA-256s compiled in), with progress, then loads it. About 25 s on a
+  fast connection. A samples `.deb` in our APT repository was ruled out: GitHub Pages refuses
+  files over 100 MB.
 - SFZ v2's numbered LFOs and envelopes (`lfoN_*`, `egN_*`) if an instrument needs them; loop
   points read from the file (`smpl` chunk) for instruments that loop; OGG samples.
 

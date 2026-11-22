@@ -162,7 +162,10 @@ attribution — the `AboutSlint` widget at the bottom of the Settings window; do
 `deny.toml` makes `cargo deny --workspace check` (cargo-deny; `--workspace`, or only the CLI's
 dependencies are checked) reject any dependency licence that isn't permissive, with the Slint
 crates as named exceptions. Run it after adding or updating a dependency; a new licence or a
-new Slint crate is a decision for the developer, not something to just add to the list.
+new Slint crate is a decision for the developer, not something to just add to the list. It
+checks the platforms we build for (`[graph] targets`: Linux, Windows and macOS on x86_64 and
+aarch64), so a dependency only some other platform pulls in (wasm32's `webpki-root-certs`,
+CDLA-Permissive-2.0) doesn't count.
 
 `vendor/livi` is `livi` 0.8.0 (MIT, its `LICENSE` kept) with one addition,
 `Plugin::instantiate_with_features` (host features beyond livi's own — the inline display's
@@ -214,7 +217,8 @@ half-finished code.
     cargo-deb names both after the package, so the workflow passes each its file name. Their
     version is the tag minus the `v`, not Cargo.toml's (which may lag; nothing checks they
     match). `Depends` comes from `dpkg-shlibdeps` (`$auto`), so it names 24.04's library
-    packages (`libasound2t64` etc.): the package is for Ubuntu 24.04 and newer.
+    packages (`libasound2t64` etc.): the package is for Ubuntu 24.04 and newer; plus
+    `ca-certificates`, which the in-app sample download needs for HTTPS.
   - **The APT repository** (`https://davvos11.github.io/live-keys`, suite `stable`, component
     `main`, amd64) is the `apt` job: it downloads the `live-keys_*_amd64.deb`s (the with-repository
     variant, so installing from the repository keeps the source) of the latest `APT_KEEP_RELEASES`
@@ -977,7 +981,13 @@ behind format-agnostic cores:
   every search word must appear in name + format, pinned first, the first unpinned row flagged
   `after-pinned` for a divider); pins are `AppConfig.pinned_plugins`, toggled by `toggle-pin`.
   Picking calls `pick-plugin(slot, category, id)`, which loads an instrument (replacing) or
-  appends to the matching effect section; for `AppState.master-slot` the picker shows audio
+  appends to the matching effect section — except a built-in instrument whose samples are
+  missing (`live_keys_builtin::missing_samples`): that offers the **sample download** instead,
+  a dialog over the whole window (`AppState.download-state`: 1 offered, 2 downloading with a
+  `ProgressIndicator` and a files/MB line, 3 failed; `start-download`/`cancel-download`).
+  `SampleDownload` in `main` keeps the slot, the plugin and the worker thread; the poll timer's
+  `poll_download` updates the progress and, once it's done, invokes `pick-plugin` again, which
+  now loads it; for `AppState.master-slot` the picker shows audio
   effects only (no tabs). **The sidebar** (`ui/sidebar.slint`, after the design's "Right
   sidebar"): the master transposition (`TransposeSection`: a `Stepper`,
   `set-master-transpose` → `AppConfig.master_transpose`, ±`MAX_TRANSPOSE`, added to every
@@ -1336,6 +1346,15 @@ behind format-agnostic cores:
   `set_hdcc`s, unit-tested), `PRESETS` (shipped: name + the controls that differ from their
   defaults), `default_sample_dir()` (`<data dir>/live-keys/samples/salamander/`) and
   `load(sample_dir)` (an error saying the samples aren't installed if they aren't).
+  `samples.rs` installs them: GitHub's tarball of sfzinstruments/SalamanderGrandPiano at a
+  pinned `COMMIT` (ureq; TLS with the system's certificates through rustls-platform-verifier
+  and ring, not webpki-roots), unpacked (flate2 + tar) into `<dir>.download/`, each file
+  checked against `salamander.sha256` (`sha256sum` output for that commit, compiled in — the
+  tarball's own bytes aren't guaranteed stable, its files are; only listed files are
+  written), then swapped in for `<dir>`. `is_installed` = every listed file present (a manual
+  `git clone` counts); `Progress` (files, bytes, cancel) is shared with the caller. Blocking:
+  run it on a thread. `cargo run -p live-keys-piano --example install_samples --release --
+  [folder]` does it from the command line.
 
 - **`crates/builtin`** (`live-keys-builtin`) — our instruments as plugins of the built-in format
   (`PluginFormat::Builtin`), the only crate that knows both an instrument core and live-keys'
@@ -1346,6 +1365,9 @@ behind format-agnostic cores:
   holds it, and handles presets: shipped ones (`shipped\t<name>` ids) and user ones as files in
   the core's state format (`<data dir>/live-keys/presets/<core id>/<name>.lkpreset`, `file\t<path>`
   ids); state files (`.lkstate`, for slot presets and the session) are the same format.
+  `missing_samples(plugin id)` is a core's sample set (`SampleSet` in its definition) if it
+  isn't installed: a `MissingSamples` (names, credit, sizes, folder, file count) whose
+  `install(&DownloadProgress)` downloads it.
   Parameters are the controls: id = index, symbol = the control's symbol, values in its range
   (a choice: 0, 1, …).
 

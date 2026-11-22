@@ -79,6 +79,15 @@ export global AppState {
     // Whether a plugin scan is running (from startup, or Rescan); not in
     // `MockData`, since the app never exits mid-scan.
     in property <bool> scanning: false;
+    // A built-in instrument's sample download: 0 none, 1 offered (picking the
+    // instrument found its samples missing), 2 downloading, 3 failed. Its title,
+    // the text under it (what, how big, where; or the error), how far it is
+    // (0..1) and a progress line. Not in `MockData`.
+    in property <int> download-state: 0;
+    in property <string> download-title;
+    in property <string> download-text;
+    in property <float> download-progress;
+    in property <string> download-status;
     // The plugin picker's list for its current category and search, pinned
     // plugins first; refilled by `AppLogic.filter-picker`.
     in property <[PickerRow]> picker-rows: Platform.uses-mock-data ? MockData.picker-rows : [];
@@ -204,6 +213,10 @@ export global AppLogic {
     // Loads the plugin as the slot's instrument (replacing any) or appends it
     // to the slot's MIDI or audio effects, depending on `category`.
     callback pick-plugin(/* slot */ int, /* category */ int, /* plugin id */ string);
+    // The sample download offered by `download-state`: start (or retry) it,
+    // or cancel it / close the dialog.
+    callback start-download();
+    callback cancel-download();
     callback unload-plugin(/* slot */ int);
     // Removes every plugin from the slot, keeping what was there for
     // `undo-clear` (shown through `SlotState.closed-name`).
