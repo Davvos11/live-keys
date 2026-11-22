@@ -365,6 +365,8 @@ An example (its message numbers are illustrative, not the LPD8's actual defaults
 }
 ```
 
+Feedback (phase 4): `"feedback": true` on a bank or control, and for pads/buttons `"lit": n`.
+
 `devices` are substrings of `midi_device_name`; the first surface (user before shipped) one of
 them matches is the device's. Each control's message is stored on its own (the bank editor's
 "first + step" only fills them in), since real controllers aren't always contiguous. `x`/`y`
@@ -513,7 +515,22 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
      engine plays the effective one. Mute, transposition and the metronome are set by the
      GUI at their effective value, so a scene saved while one is modulated keeps that.
    - Not done: the warning when saving a plugin preset while modulated.
-4. Feedback: output connections, per-bank feedback in the surface format.
+4. **Done (2026-11-22).** Feedback: output connections, per-bank feedback in the surface
+   format. As built:
+   - A bank (or a control, overriding it) with `"feedback": true` shows values sent back
+     as its own message; pads and buttons are lit with `lit` (velocity or CC value, default
+     127) and unlit with 0 / a note-off. The shipped surfaces have none yet (unknown which of
+     the LX88+'s or LPD8's controls light up from outside).
+   - A control with feedback always jumps (the learn pane says so instead of offering
+     takeover). It's sent its first target's base along its range, a toggle's on/off, a
+     momentary button's held state; a modulating control shows nothing (it's where it was
+     turned). Its own moves aren't sent back; an incoming value equal to what it was last
+     sent is taken as its echo (a motor fader arriving) and ignored.
+   - The mapping thread opens the output port with the device's name on the first value
+     (`midir`), sends at most every 10 ms per control (the latest value, later) and never
+     the same message twice in a row. A new setup, or a change in the devices shown or
+     plugged in (`Engine::resync_feedback`), reopens outputs and sends every control its
+     value. The panel draws a control where it was sent.
 5. The surface editor: add menu, bank settings, dragging, learning a bank and a whole device.
 6. Smoothing (decided 2026-11-22, a later phase): where a target is continuous, the audio
    thread interpolates between a control's successive values (per block, like the gain

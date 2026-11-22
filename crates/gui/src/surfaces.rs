@@ -253,6 +253,22 @@ impl SurfacesUi {
         }
     }
 
+    /// Draws control `control` of `device` where it was sent (MIDI feedback):
+    /// that's where the hardware is now.
+    pub fn show_sent(&self, device: &str, control: usize, shown: live_keys_engine::Shown) {
+        let shown_devices = self.shown.borrow();
+        let Some(item) = shown_devices.iter().find(|item| item.device == device) else { return };
+        let Some(mut row) = item.controls.row_data(control) else { return };
+        match shown {
+            live_keys_engine::Shown::Position(position) => row.value = position,
+            live_keys_engine::Shown::Lit(on) => {
+                row.pressed = on;
+                row.value = if on { 1.0 } else { 0.0 };
+            }
+        }
+        item.controls.set_row_data(control, row);
+    }
+
     /// Shows no control's target as elsewhere (a new setup starts over).
     pub fn clear_waiting(&self) {
         for item in self.shown.borrow().iter() {

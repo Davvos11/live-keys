@@ -4,15 +4,20 @@
 //! of their own, setBfree's functions to the plugin's second atom channel —
 //! then to the GUI thread as reports, for showing and recording. Neither the GUI
 //! thread's pace nor its stalls stand between a hardware move and the sound.
+//! Controls that show values (motor faders, LED rings, lit buttons) are sent
+//! them from here too, through output connections of the thread's own.
 //! See "How it runs" in `docs/design/midi-learn.md`.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use live_keys_core::{ParamChange, Producer};
 use live_keys_lv2_host::PortEvent;
-use live_keys_surfaces::Surface;
+use live_keys_surfaces::{Shown, Surface};
+
+use crate::midi::midi_device_name;
 
 use crate::engine::PluginKey;
 use crate::mapping::{ControlSetup, Mappings, TargetId};
@@ -25,6 +30,9 @@ const GLIDE_TICK: Duration = Duration::from_millis(2);
 /// Inputs (surface events, setups) waiting for the thread; a surface event
 /// that doesn't fit is dropped.
 const INPUT_QUEUE: usize = 1024;
+/// The least time between two values sent to one control: a fader being
+/// moved from the screen sends at most this often.
+const FEEDBACK_INTERVAL: Duration = Duration::from_millis(10);
 /// Reports waiting for the GUI thread, which drains them every ~16 ms.
 const REPORT_QUEUE: usize = 8192;
 
@@ -85,6 +93,9 @@ pub enum MapperReport {
         value: f32,
         for_gui: Vec<PortEvent>,
     },
+    /// A control that shows values was sent `shown` (the panel draws the
+    /// hardware there).
+    Feedback { device: Arc<str>, control: usize, shown: Shown },
     /// A fader or knob's target is elsewhere than the hardware (`at`, as a
     /// position of the control: draw the hardware as a ghost) or no longer is.
     Waiting { generation: u64, device: Arc<str>, control: usize, at: Option<f32> },
@@ -113,6 +124,82 @@ pub(crate) enum MapperInput {
     Setup(Box<Setup>),
     /// A target of setup `generation` was moved elsewhere.
     Position { generation: u64, target: TargetId, position: f32 },
+    /// Devices may have been (re)connected: open outputs again and send every
+    /// control that shows values its value.
+    Resync,
+}
+
+/// A control, as (device, control index).
+type ControlKey = (Arc<str>, usize);
+
+/// Sending values back to controls: an output connection per device, and
+/// per control when it was last sent one and what's waiting to be.
+#[derive(Default)]
+struct FeedbackOut {
+    /// By device name; `None`: it has no output (or it failed), until a resync.
+    outputs: HashMap<Arc<str>, Option<midir::MidiOutputConnection>>,
+    sent: HashMap<ControlKey, Instant>,
+    waiting: HashMap<ControlKey, [u8; 3]>,
+    /// The message last sent, so the same isn't sent again (until a resync).
+    last: HashMap<ControlKey, [u8; 3]>,
+}
+
+impl FeedbackOut {
+    /// Sends `message` to `device`'s control `control`, or keeps it until
+    /// [`FEEDBACK_INTERVAL`] after the last.
+    fn send(&mut self, device: &Arc<str>, control: usize, message: [u8; 3], now: Instant) {
+        let key = (device.clone(), control);
+        if self.last.get(&key) == Some(&message) {
+            self.waiting.remove(&key);
+            return;
+        }
+        if self.sent.get(&key).is_some_and(|sent| now.duration_since(*sent) < FEEDBACK_INTERVAL) {
+            self.waiting.insert(key, message);
+            return;
+        }
+        self.waiting.remove(&key);
+        self.sent.insert(key.clone(), now);
+        self.last.insert(key, message);
+        let output = self.outputs.entry(device.clone()).or_insert_with(|| open_output(device));
+        if let Some(output) = output
+            && let Err(err) = output.send(&message)
+        {
+            log::warn!("feedback to {device} failed: {err}");
+        }
+    }
+
+    /// Sends what waited long enough.
+    fn send_due(&mut self, now: Instant) {
+        let due: Vec<(ControlKey, [u8; 3])> = self
+            .waiting
+            .iter()
+            .filter(|(key, _)| self.sent.get(*key).is_none_or(|sent| now.duration_since(*sent) >= FEEDBACK_INTERVAL))
+            .map(|(key, message)| (key.clone(), *message))
+            .collect();
+        for ((device, control), message) in due {
+            self.send(&device, control, message, now);
+        }
+    }
+}
+
+/// An output connection to the MIDI output port of `device` (by
+/// [`midi_device_name`]), if it has one.
+fn open_output(device: &str) -> Option<midir::MidiOutputConnection> {
+    let output = midir::MidiOutput::new("live-keys").ok()?;
+    let port = output
+        .ports()
+        .into_iter()
+        .find(|port| output.port_name(port).is_ok_and(|name| midi_device_name(&name) == device))?;
+    match output.connect(&port, "live-keys-feedback") {
+        Ok(connection) => {
+            log::info!("MIDI feedback output connected: {device}");
+            Some(connection)
+        }
+        Err(err) => {
+            log::warn!("connecting MIDI feedback output '{device}' failed: {err}");
+            None
+        }
+    }
 }
 
 /// Starts the mapping thread. It runs until every sender of its input queue is
@@ -130,6 +217,8 @@ pub(crate) fn spawn(rack: SharedMapperTx) -> (SyncSender<MapperInput>, Receiver<
 struct State {
     generation: u64,
     devices: Vec<Arc<str>>,
+    surfaces: Vec<Arc<Surface>>,
+    feedback: FeedbackOut,
     mappings: Mappings,
     targets: Vec<Target>,
     rack: SharedMapperTx,
@@ -140,13 +229,15 @@ fn run(inputs: Receiver<MapperInput>, rack: SharedMapperTx, reports: SyncSender<
     let mut state = State {
         generation: 0,
         devices: Vec::new(),
+        surfaces: Vec::new(),
+        feedback: FeedbackOut::default(),
         mappings: Mappings::new(Vec::new(), Vec::new(), Vec::new()),
         targets: Vec::new(),
         rack,
         reports,
     };
     loop {
-        let input = if state.mappings.gliding() {
+        let input = if state.mappings.gliding() || !state.feedback.waiting.is_empty() {
             match inputs.recv_timeout(GLIDE_TICK) {
                 Ok(input) => Some(input),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -166,6 +257,7 @@ fn run(inputs: Receiver<MapperInput>, rack: SharedMapperTx, reports: SyncSender<
         }
         state.mappings.tick(Instant::now());
         state.flush();
+        state.feedback.send_due(Instant::now());
     }
 }
 
@@ -183,8 +275,10 @@ impl State {
                 self.flush();
                 let positions = setup.targets.iter().map(|(spec, _)| spec.position).collect();
                 self.devices = setup.surfaces.iter().map(|(device, _)| device.clone()).collect();
-                let surfaces = setup.surfaces.into_iter().map(|(_, surface)| surface).collect();
-                self.mappings = Mappings::new(surfaces, setup.controls, positions);
+                self.surfaces = setup.surfaces.into_iter().map(|(_, surface)| surface).collect();
+                self.mappings = Mappings::new(self.surfaces.clone(), setup.controls, positions);
+                self.feedback.last.clear();
+                self.mappings.resync_feedback();
                 self.targets = setup
                     .targets
                     .into_iter()
@@ -200,6 +294,11 @@ impl State {
                     }
                     self.mappings.set_position(target, position);
                 }
+            }
+            MapperInput::Resync => {
+                self.feedback.outputs.clear();
+                self.feedback.last.clear();
+                self.mappings.resync_feedback();
             }
         }
     }
@@ -242,6 +341,21 @@ impl State {
                     base: write.base,
                     value,
                     for_gui: Vec::new(),
+                });
+            }
+        }
+        let now = Instant::now();
+        for feedback in self.mappings.take_feedback() {
+            let (Some(device), Some(surface)) = (self.devices.get(feedback.surface), self.surfaces.get(feedback.surface))
+            else {
+                continue;
+            };
+            if let Some(message) = surface.feedback(feedback.control, feedback.shown) {
+                self.feedback.send(device, feedback.control, message, now);
+                let _ = self.reports.try_send(MapperReport::Feedback {
+                    device: device.clone(),
+                    control: feedback.control,
+                    shown: feedback.shown,
                 });
             }
         }

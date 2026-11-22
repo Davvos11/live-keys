@@ -16,7 +16,11 @@
 //! (`channel` or `poly`: what they send while held), and its `controls` in
 //! number order, each one message: `{ "cc": n }`, `{ "note": n }`,
 //! `{ "pitch-bend": true }` or `{ "channel-pressure": true }`, optionally
-//! with its own `channel` and `label`.
+//! with its own `channel` and `label`. A bank (or a control, overriding it)
+//! with `"feedback": true` can show a value sent back as its own message —
+//! motor faders, LED rings, lit pads and buttons —, pads and buttons lit by
+//! `lit` (a note's velocity or a CC's value, default 127; some pads pick a
+//! colour by it).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -122,6 +126,9 @@ struct BankFile {
     #[serde(default = "one_u8")]
     channel: u8,
     pressure: Option<Pressure>,
+    #[serde(default)]
+    feedback: bool,
+    lit: Option<u8>,
     controls: Vec<ControlFile>,
 }
 
@@ -136,6 +143,8 @@ struct ControlFile {
     channel_pressure: bool,
     channel: Option<u8>,
     label: Option<String>,
+    feedback: Option<bool>,
+    lit: Option<u8>,
 }
 
 fn one() -> u32 {
@@ -179,6 +188,24 @@ pub struct Control {
     pub y: u32,
     /// Its bank, as an index into [`Surface::banks`].
     pub bank: usize,
+    /// It shows a value sent back to it, as its own message.
+    pub feedback: Option<Feedback>,
+}
+
+/// How a control shows a value sent back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Feedback {
+    /// A pad's or button's "on": a note's velocity, a CC's value.
+    pub lit: u8,
+}
+
+/// A value to show on a control.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shown {
+    /// A fader's or knob's position, 0..=1.
+    Position(f32),
+    /// A pad or button lit, or not.
+    Lit(bool),
 }
 
 /// A bank as laid out (for its frame in the editor, later).
@@ -252,6 +279,9 @@ impl Surface {
                     x: bank.x + column * cell_width,
                     y: bank.y + row * cell_height,
                     bank: bank_index,
+                    feedback: control.feedback.unwrap_or(bank.feedback).then(|| Feedback {
+                        lit: control.lit.or(bank.lit).unwrap_or(127).min(127),
+                    }),
                 });
             }
             banks.push(Bank {
@@ -331,6 +361,35 @@ impl Surface {
             }
             _ => None,
         }
+    }
+
+    /// The message showing `shown` on control `control`, if it takes feedback
+    /// (and its message can carry a value: not channel pressure).
+    pub fn feedback(&self, control: usize, shown: Shown) -> Option<[u8; 3]> {
+        let control = self.controls.get(control)?;
+        let feedback = control.feedback?;
+        let channel = control.channel & 0x0F;
+        let seven = |position: f32| (position.clamp(0.0, 1.0) * 127.0).round() as u8;
+        Some(match (control.message, shown) {
+            (Message::Cc(number), Shown::Position(position)) => [0xB0 | channel, number, seven(position)],
+            (Message::Cc(number), Shown::Lit(on)) => [0xB0 | channel, number, if on { feedback.lit } else { 0 }],
+            (Message::Note(number), shown) => {
+                let on = match shown {
+                    Shown::Lit(on) => on,
+                    Shown::Position(position) => position > 0.0,
+                };
+                if on { [0x90 | channel, number, feedback.lit.max(1)] } else { [0x80 | channel, number, 0] }
+            }
+            (Message::PitchBend, shown) => {
+                let position = match shown {
+                    Shown::Position(position) => position,
+                    Shown::Lit(on) => f32::from(u8::from(on)),
+                };
+                let value = (position.clamp(0.0, 1.0) * 16383.0).round() as u16;
+                [0xE0 | channel, (value & 0x7F) as u8, (value >> 7) as u8]
+            }
+            (Message::ChannelPressure, _) => return None,
+        })
     }
 
     /// For a channel-pressure message that isn't a control of its own: the
@@ -474,5 +533,19 @@ mod tests {
         assert!(Surface::from_json(&json(r#"{ }"#)).is_err());
         assert!(Surface::from_json(&json(r#"{ "cc": 1, "note": 2 }"#)).is_err());
         assert!(Surface::from_json(&json(r#"{ "cc": 128 }"#)).is_err());
+    }
+
+    #[test]
+    fn feedback_is_the_controls_own_message() {
+        let json = r#"{ "id": "x", "name": "x", "banks": [
+            { "name": "k", "kind": "knob", "columns": 2, "channel": 2, "feedback": true,
+              "controls": [{ "cc": 7 }, { "cc": 8, "feedback": false }] },
+            { "name": "p", "kind": "pad", "columns": 1, "feedback": true, "lit": 5, "controls": [{ "note": 36 }] }
+        ] }"#;
+        let surface = Surface::from_json(json).unwrap();
+        assert_eq!(surface.feedback(0, Shown::Position(1.0)), Some([0xB1, 7, 127]));
+        assert_eq!(surface.feedback(1, Shown::Position(1.0)), None);
+        assert_eq!(surface.feedback(2, Shown::Lit(true)), Some([0x90, 36, 5]));
+        assert_eq!(surface.feedback(2, Shown::Lit(false)), Some([0x80, 36, 0]));
     }
 }

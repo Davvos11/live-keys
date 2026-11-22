@@ -14,6 +14,7 @@ pub use engine::{
 };
 pub use mapper::{MapperReport, MapperSetup, Output, TargetSpec, ToValue};
 pub use mapping::{ControlSetup, Link, Mode, Takeover, TargetId};
+pub use live_keys_surfaces::Shown;
 pub use metronome::{MAX_BPM, MIN_BPM, MetronomeSettings, Subdivision};
 pub use setbfree::SETBFREE_URI;
 pub use rack::{ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Section};

@@ -804,6 +804,7 @@ impl MappingsUi {
                     glide: Duration::from_millis(u64::from(settings.glide_ms)),
                     pass_through: settings.pass_through,
                     release_to_zero: control.kind == ControlKind::Pad,
+                    feedback: control.feedback.is_some(),
                     links,
                 });
             }
@@ -1343,6 +1344,7 @@ impl MappingsUi {
             kind: control.kind as i32,
             takeover: TakeoverSetting::ALL.iter().position(|t| *t == settings.takeover).unwrap_or(1) as i32,
             pass_through: settings.pass_through,
+            feedback: control.feedback.is_some(),
         }
     }
 

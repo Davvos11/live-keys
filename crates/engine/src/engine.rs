@@ -600,6 +600,13 @@ impl Engine {
         self.mapper_generation
     }
 
+    /// Opens the control surfaces' outputs again and sends every control that
+    /// shows values (MIDI feedback) its value: call when devices may have
+    /// been plugged in again.
+    pub fn resync_feedback(&self) {
+        let _ = self.mapper_tx.try_send(MapperInput::Resync);
+    }
+
     /// Tells the mapping thread that target `target` of setup `generation` was
     /// moved elsewhere (the mouse, a preset…), to `position`.
     pub fn set_mapped_position(&self, generation: u64, target: usize, position: f32) {

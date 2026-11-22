@@ -290,7 +290,13 @@ export component LearnPane inherits Rectangle {
             }
         }
         // Faders and knobs: how they take over a target that's elsewhere.
-        if AppState.learn-control.selected && AppState.learn-control.kind <= 1 : VerticalLayout {
+        if AppState.learn-control.selected && AppState.learn-control.feedback : Text {
+            text: "This control is sent its target's value, so it's always where its target is.";
+            color: Theme.text-muted;
+            font-size: Theme.small-font-size;
+            wrap: word-wrap;
+        }
+        if AppState.learn-control.selected && AppState.learn-control.kind <= 1 && !AppState.learn-control.feedback : VerticalLayout {
             spacing: 2px;
             Caption { text: "When the target is elsewhere"; }
             Segmented {

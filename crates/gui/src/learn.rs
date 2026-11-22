@@ -66,6 +66,7 @@ impl Learn {
                     applied.retain(|a| (a.generation, a.target) != (generation, target));
                     applied.push(Applied { generation, target, output, position, base, value, for_gui });
                 }
+                MapperReport::Feedback { device, control, shown } => self.surfaces.show_sent(&device, control, shown),
                 MapperReport::Waiting { generation, device, control, at } => {
                     if generation == self.rack.mappings.generation() {
                         self.surfaces.set_waiting(&device, control, at);
@@ -83,12 +84,17 @@ impl Learn {
         for applied in applied {
             self.apply(applied);
         }
-        if self.surfaces.take_changed() {
+        let surfaces_changed = self.surfaces.take_changed();
+        if surfaces_changed {
             self.rack.mappings.setup_dirty.set(true);
             self.rack.mappings.view_dirty.set(true);
         }
         if self.rack.mappings.setup_dirty.get() {
             self.rebuild_setup();
+        }
+        // A device plugged in again: its controls that show values get them.
+        if surfaces_changed {
+            self.engine.borrow().resync_feedback();
         }
         self.with_ctx(|ctx| self.rack.mappings.sync_positions(ctx));
         if self.rack.mappings.view_dirty.get() {

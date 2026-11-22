@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use live_keys_core::MidiEvent;
-use live_keys_surfaces::{ControlKind, Reading, Surface};
+use live_keys_surfaces::{ControlKind, Reading, Shown, Surface};
 
 /// A target, as an index into the setup's targets.
 pub type TargetId = usize;
@@ -93,7 +93,18 @@ pub struct ControlSetup {
     pub pass_through: bool,
     /// A pad in [`Mode::Range`] goes back to 0 when let go.
     pub release_to_zero: bool,
+    /// It shows its first target's value sent back to it (motor faders, LED
+    /// rings, lit buttons): it never has to take a target over.
+    pub feedback: bool,
     pub links: Vec<Link>,
+}
+
+/// A value to send back to a control that shows it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Feedback {
+    pub surface: usize,
+    pub control: usize,
+    pub shown: Shown,
 }
 
 /// A target's new effective position (what it gets), and its base under it.
@@ -135,11 +146,15 @@ struct ControlState {
     links: Vec<LinkState>,
     /// As last reported.
     waiting: Option<f32>,
+    /// What it was last sent (or is at, for a position it set itself).
+    shown: Option<Shown>,
 }
 
 impl ControlState {
     fn jumps(&self) -> bool {
-        matches!(self.kind, ControlKind::Pad | ControlKind::Button) || self.setup.takeover == Takeover::Jump
+        matches!(self.kind, ControlKind::Pad | ControlKind::Button)
+            || self.setup.takeover == Takeover::Jump
+            || self.setup.feedback
     }
 }
 
@@ -166,6 +181,7 @@ pub struct Mappings {
     targets: Vec<TargetState>,
     writes: Vec<Write>,
     waiting: Vec<Waiting>,
+    feedback: Vec<Feedback>,
 }
 
 impl Mappings {
@@ -198,9 +214,18 @@ impl Mappings {
                 hardware: None,
                 pressed: false,
                 waiting: None,
+                shown: None,
             });
         }
-        Self { surfaces, controls: states, by_control, targets, writes: Vec::new(), waiting: Vec::new() }
+        Self {
+            surfaces,
+            controls: states,
+            by_control,
+            targets,
+            writes: Vec::new(),
+            waiting: Vec::new(),
+            feedback: Vec::new(),
+        }
     }
 
     /// Applies a MIDI event from surface `surface`.
@@ -228,6 +253,16 @@ impl Mappings {
             Reading::Value(value) => {
                 // A pad's pressure counts only while it's held.
                 if pad_or_button && !self.controls[index].pressed {
+                    return;
+                }
+                // A control that shows values sending back what it was just
+                // sent (a motor fader arriving) is its echo, not a move.
+                let control = &mut self.controls[index];
+                if let Some(Shown::Position(shown)) = control.shown
+                    && control.setup.feedback
+                    && (shown * 127.0).round() == (value * 127.0).round()
+                {
+                    control.hardware = Some(value);
                     return;
                 }
                 self.controls[index].hardware = Some(value);
@@ -281,6 +316,64 @@ impl Mappings {
             }
         }
         self.update_waiting(index);
+        self.show(index, true);
+    }
+
+    /// What control `index` should show, if it shows anything: its first
+    /// target's base along its range, whether a toggle's target is on, or
+    /// whether a momentary button is held.
+    fn feedback_value(&self, index: usize) -> Option<Shown> {
+        let control = &self.controls[index];
+        if !control.setup.feedback {
+            return None;
+        }
+        let link = control.setup.links.first()?;
+        let base = self.targets[link.target].base;
+        match link.mode {
+            Mode::Range { from, to } => (to != from).then(|| Shown::Position(((base - from) / (to - from)).clamp(0.0, 1.0))),
+            Mode::Toggle { .. } => Some(Shown::Lit(base > 1e-3)),
+            Mode::Momentary { .. } | Mode::MomentaryModulate { .. } => Some(Shown::Lit(control.pressed)),
+            // It's wherever it was turned to.
+            Mode::Modulate { .. } => None,
+        }
+    }
+
+    /// Sends control `index` its value if that changed. `own`: after its own
+    /// move, a position it's at already isn't sent back (motor faders fight
+    /// that), only noted.
+    fn show(&mut self, index: usize, own: bool) {
+        let Some(shown) = self.feedback_value(index) else { return };
+        let control = &mut self.controls[index];
+        if control.shown == Some(shown) {
+            return;
+        }
+        control.shown = Some(shown);
+        if !(own && matches!(shown, Shown::Position(_))) {
+            self.feedback.push(Feedback { surface: control.setup.surface, control: control.setup.control, shown });
+        }
+    }
+
+    /// Sends the controls showing `target` (but `except`) its new value.
+    fn show_target(&mut self, target: TargetId, except: Option<usize>) {
+        for index in 0..self.controls.len() {
+            if Some(index) != except && self.controls[index].setup.links.first().is_some_and(|link| link.target == target) {
+                self.show(index, false);
+            }
+        }
+    }
+
+    /// Sends every control that shows values its value, changed or not (a
+    /// device connected, a new setup).
+    pub fn resync_feedback(&mut self) {
+        for index in 0..self.controls.len() {
+            self.controls[index].shown = None;
+            self.show(index, false);
+        }
+    }
+
+    /// The values to send back since the last call, oldest first.
+    pub fn take_feedback(&mut self) -> Vec<Feedback> {
+        std::mem::take(&mut self.feedback)
     }
 
     /// A modulating link now adds `offset`.
@@ -358,6 +451,7 @@ impl Mappings {
         self.targets[target].base = position.clamp(0.0, 1.0);
         self.recompute(target);
         self.lose(target, by);
+        self.show_target(target, by.map(|(index, _)| index));
     }
 
     /// Works out `target`'s effective position from its layers, and writes
@@ -417,6 +511,7 @@ impl Mappings {
         state.written = (position, position);
         self.recompute(target);
         self.lose(target, None);
+        self.show_target(target, None);
     }
 
     /// Moves gliding targets on.
@@ -511,6 +606,7 @@ mod tests {
             glide: Duration::from_millis(100),
             pass_through: false,
             release_to_zero: true,
+            feedback: false,
             links: vec![Link { target: 0, mode }],
         }
     }
@@ -661,5 +757,64 @@ mod tests {
         assert_eq!(mappings.targets[0].base, 1.0);
         assert_eq!(note(&mut mappings, 36, 0), Vec::<f32>::new());
         assert!(close(&cc(&mut mappings, 64, now), &[64.0 / 127.0]));
+    }
+
+    #[test]
+    fn feedback_shows_changes_from_elsewhere_only() {
+        let now = Instant::now();
+        let surface = || -> Arc<Surface> {
+            let json = r#"{ "id": "t", "name": "t", "banks": [
+                { "name": "F", "kind": "fader", "columns": 1, "feedback": true, "controls": [{ "cc": 1 }] },
+                { "name": "B", "kind": "button", "columns": 1, "feedback": true, "controls": [{ "note": 36 }] }
+            ] }"#;
+            Arc::new(Surface::from_json(json).unwrap())
+        };
+        let mut fader = setup(FADER, Takeover::PickUp, FULL);
+        fader.feedback = true;
+        let mut button = setup(BUTTON, Takeover::Jump, Mode::Toggle { levels: vec![0.0, 1.0] });
+        button.feedback = true;
+        let mut mappings = Mappings::new(vec![surface()], vec![fader, button], vec![0.5]);
+        let shown = |mappings: &mut Mappings| -> Vec<(usize, Shown)> {
+            mappings.take_feedback().iter().map(|f| (f.control, f.shown)).collect()
+        };
+        mappings.resync_feedback();
+        assert_eq!(shown(&mut mappings), [(0, Shown::Position(0.5)), (1, Shown::Lit(true))]);
+        // With feedback, a fader jumps (no pick up); its own move isn't sent back.
+        assert_eq!(cc(&mut mappings, 0, now), [0.0]);
+        assert_eq!(shown(&mut mappings), [(1, Shown::Lit(false))]);
+        // The button turns it on: the fader is sent there.
+        note(&mut mappings, 36, 100);
+        assert_eq!(shown(&mut mappings), [(0, Shown::Position(1.0)), (1, Shown::Lit(true))]);
+        mappings.set_position(0, 0.25);
+        assert_eq!(shown(&mut mappings), [(0, Shown::Position(0.25))]);
+    }
+
+    #[test]
+    fn a_feedback_echo_isnt_a_move() {
+        let now = Instant::now();
+        let surface = Arc::new(
+            Surface::from_json(
+                r#"{ "id": "t", "name": "t", "banks": [
+                    { "name": "F", "kind": "fader", "columns": 2, "feedback": true, "controls": [{ "cc": 1 }, { "cc": 2 }] }
+                ] }"#,
+            )
+            .unwrap(),
+        );
+        let mut sent = setup(FADER, Takeover::Jump, FULL);
+        sent.feedback = true;
+        let mut mover = setup(1, Takeover::Jump, FULL);
+        mover.feedback = true;
+        let mut mappings = Mappings::new(vec![surface], vec![sent, mover], vec![0.0]);
+        let move_second = |mappings: &mut Mappings, value: u8| {
+            mappings.event(0, &MidiEvent::from_raw(0, &[0xB0, 2, value]).unwrap(), now);
+            mappings.take_writes().len()
+        };
+        assert_eq!(move_second(&mut mappings, 100), 1);
+        assert_eq!(mappings.take_feedback().len(), 1);
+        // The first fader echoes the 100 it was sent: nothing happens.
+        assert!(cc(&mut mappings, 100, now).is_empty());
+        assert!(mappings.take_feedback().is_empty());
+        // Moved for real, it takes the target.
+        assert_eq!(cc(&mut mappings, 20, now), [20.0 / 127.0]);
     }
 }

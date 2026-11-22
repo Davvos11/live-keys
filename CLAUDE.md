@@ -629,7 +629,14 @@ behind format-agnostic cores:
     effective values (`take_writes`, each with its base), `set_position` is a target set
     elsewhere — its new base — (links whose control is elsewhere lose it: pick up waits for
     a crossing, glide slides over the glide time, `tick` moving it on), and `take_waiting`
-    reports faders and knobs whose target's base is elsewhere, for the GUI's ghost. `mapper.rs` runs it on the
+    reports faders and knobs whose target's base is elsewhere, for the GUI's ghost.
+    Controls with feedback (`ControlSetup::feedback`) always jump and are sent their first
+    target's state when it changes from elsewhere (`take_feedback`; `resync_feedback` sends
+    all), their own echo ignored. The thread sends those through `midir` output
+    connections of its own (the device's port by name, opened on first use; at most every
+    10 ms per control, no repeats; `Engine::resync_feedback`, which the GUI calls when the
+    devices shown or present change, reopens them and sends everything) and reports them
+    (`MapperReport::Feedback`, drawn by `SurfacesUi::show_sent`). `mapper.rs` runs it on the
     `midi-mapping` thread, which blocks on its input channel (2 ms ticks while gliding):
     `Engine::set_mappings(MapperSetup)` (surfaces, controls, `TargetSpec`s: an `Output` —
     `Param { key, param }`, `Setbfree { key, function }`, `Volume { slot }`, or `Gui` — a
@@ -1216,7 +1223,10 @@ behind format-agnostic cores:
   `Numbering` top/bottom-first) and indexes them by `(channel, message)`; `Surface::matches`
   picks a surface for a device name (case-insensitive substrings), `Surface::read` turns a
   `MidiEvent` into `(control, Reading)` (a position, a press with velocity, a release), and
-  `pad_pressure` finds the pads a channel-pressure message may belong to. Unit-tested.
+  `pad_pressure` finds the pads a channel-pressure message may belong to. Controls with
+  `"feedback": true` (bank or control; `lit` for pads/buttons) have a `Feedback`, and
+  `Surface::feedback(control, Shown)` is the message showing a position or lit state on
+  one. Unit-tested.
 
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
   check against real installed plugins, not part of the app (see Common commands). `cases.rs`

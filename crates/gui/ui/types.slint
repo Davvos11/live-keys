@@ -294,6 +294,9 @@ export struct LearnControl {
     kind: int,
     takeover: int,
     pass-through: bool,
+    // It shows its target's value sent back (motor fader, LED ring, lit
+    // button): no takeover needed.
+    feedback: bool,
 }
 
 // A MIDI device shown in the control surfaces panel.

@@ -123,7 +123,7 @@ slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
     kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target,
 });
-slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through });
+slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback });
 slint_struct!(LearnLevel { position, text });
 slint_struct!(LearnTargetRow {
     name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, kept,
