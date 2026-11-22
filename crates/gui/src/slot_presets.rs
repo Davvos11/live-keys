@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use live_keys_engine::{Engine, LoadedPluginMeta, PluginKey, PresetInfo, Section};
 use serde::{Deserialize, Serialize};
 
-use crate::mappings::SceneMapping;
+use crate::mappings::{SavedValue, SceneMapping};
 
 const FILE_NAME: &str = "slot.json";
 /// The folder of presets of slots without an instrument.
@@ -65,6 +65,10 @@ pub struct PluginState {
     /// Its MIDI-learn mappings kept with the scene.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mappings: Vec<SceneMapping>,
+    /// The bases of its targets that were modulated (MIDI learn), which the
+    /// state file only has with the modulation on: restored after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<SavedValue>,
 }
 
 /// What saving a plugin into a slot preset needs besides its state: its
@@ -73,6 +77,7 @@ pub struct PluginExtras {
     pub preset: Option<PresetInfo>,
     pub preset_changed: bool,
     pub mappings: Vec<SceneMapping>,
+    pub values: Vec<SavedValue>,
 }
 
 /// A [`PresetInfo`], as stored.
@@ -208,6 +213,7 @@ pub fn write(
             preset: extras.preset.as_ref().map(PresetRef::from),
             preset_changed: extras.preset_changed,
             mappings: extras.mappings,
+            values: extras.values,
         })
     };
     let instrument = instrument.as_ref().map(|plugin| save_plugin(plugin, "instrument")).transpose()?;

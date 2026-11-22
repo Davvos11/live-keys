@@ -457,15 +457,17 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
   - **To the hardware**: feedback, through `midir` output connections the mapping thread owns.
   - Things that aren't values — recalling a scene, starting the metronome, panic — are
     forwarded to the GUI thread, which already does them.
-- **Edits from elsewhere** (mouse, a plugin's GUI, presets, scenes). **As built (phase 2)**:
-  the GUI's poll timer reads every mapped target's position and tells the mapping thread of
-  any that moved since it last saw it (`Engine::set_mapped_position`), which is what pick up
-  and glide compare against; a position a mapping set is noted as seen first, so it doesn't
-  count. **With the value layers (phase 3)**: edits to a target that has a
-  mapping go through the mapping thread as base changes (a ring from the GUI thread), which
-  re-sends the effective value — otherwise a mouse edit would overwrite a modulated value with
-  its bare base. Unmapped targets keep today's path. Saving reads the bases from the mapping
-  thread (a request answered over the same rings).
+- **Edits from elsewhere** (mouse, a plugin's GUI, presets, scenes). **As built**: an edit
+  takes the usual path (the plugin gets the new value at once); the GUI's poll timer reads
+  every mapped target's position and tells the mapping thread of any that moved since it last
+  saw it (`Engine::set_mapped_position`). The mapping thread takes that as the target's new
+  **base**, works out the effective value again (base + offsets, or a momentary override)
+  and sends it if there's modulation on top — so a mouse edit on a modulated knob moves the
+  base and the modulation keeps riding on it, a block or a tick later rather than the
+  same block. Pick up and glide compare against the base. A position a mapping set is
+  noted as seen first, so it doesn't count. Every report of a mapping carries the target's
+  base and effective value; the GUI keeps the bases (for knobs and for saving) rather than
+  asking the thread.
 - **Learn mode** reads the raw events the GUI gets: the last control moved is selected.
 - **Setups**: the GUI resolves every mapping against what's loaded (`src/mappings.rs`) into a
   `MapperSetup` — the shown surfaces, each mapped control's settings and links, each
@@ -493,8 +495,24 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    mode is entered from the panel's "MIDI learn" button or by clicking a surface control, and
    left with Done or Escape; the popup of a target not mapped yet has "Assign to <control>"
    (its settings so far apply), one mapped edits it live.
-3. The value layers: modulate and momentary modulate, the knob's modulation display, bases
-   saved in `slot.json`.
+3. **Done (2026-11-22).** The value layers: modulate and momentary modulate, the knob's
+   modulation display, bases saved in `slot.json`. As built:
+   - The layers live in the mapping thread (`mapping::TargetState`: base, a momentary
+     override, offsets per modulating link, the effective value); a modulating link's
+     offset is 0 until its control moves.
+   - A panel knob whose target is modulated shows its base (pointer and arc), a thin outer
+     arc for the modulation's reach (the sum of its links' offset ranges) and a dot at the
+     effective value. Only knobs without choices; switches, levers and drawbars just show
+     the effective value. Dragging such a knob sets the base, shown at once.
+   - Slot presets, scenes and the session save, per plugin, the bases of its modulated
+     targets (`"values"`: target and value) beside its mappings; loading puts them back
+     after the state file. setBfree applies a loaded state on its next run and reports it
+     afterwards, so its values are sent again when that report comes
+     (`Engine::restore_setbfree`).
+   - Volumes: the config (and so scenes) keeps a slot's or the master's base volume; the
+     engine plays the effective one. Mute, transposition and the metronome are set by the
+     GUI at their effective value, so a scene saved while one is modulated keeps that.
+   - Not done: the warning when saving a plugin preset while modulated.
 4. Feedback: output connections, per-bank feedback in the surface format.
 5. The surface editor: add menu, bank settings, dragging, learning a bank and a whole device.
 6. Smoothing (decided 2026-11-22, a later phase): where a target is continuous, the audio

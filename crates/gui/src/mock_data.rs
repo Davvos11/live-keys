@@ -133,7 +133,8 @@ slint_struct!(SurfaceView { name, device, known, connected, width, height, contr
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
 slint_struct!(PanelCell {
-    widget, label, text, position, default_position, steps, on, choices, index, default_index, value_text,
+    widget, label, text, position, default_position, steps, on, choices, index, default_index, value_text, modulated,
+    mod_low, mod_high, mod_value,
 });
 slint_struct!(DrawbarCell { label, colour, level });
 slint_struct!(PanelPoolRow { index, name, cell });

@@ -793,7 +793,8 @@ impl Rack {
             None => (None, false),
         };
         let mappings = self.mappings.scene.borrow().get(&key).cloned().unwrap_or_default();
-        slot_presets::PluginExtras { preset, preset_changed, mappings }
+        let values = self.mappings.saved_values(key);
+        slot_presets::PluginExtras { preset, preset_changed, mappings, values }
     }
 
     /// The chain row of a loaded plugin.
@@ -1059,11 +1060,11 @@ impl Rack {
             Some(_) => {}
         }
         let (cells, drawbars, pool) = match current {
-            Some(SlotPanel { key, panel, .. }) => (
-                slot_view::panel_cells(engine, *key, panel),
-                slot_view::panel_drawbars(engine, *key, panel),
-                slot_view::panel_pool(panel),
-            ),
+            Some(SlotPanel { key, panel, .. }) => {
+                let mut cells = slot_view::panel_cells(engine, *key, panel);
+                self.mappings.decorate(engine, *key, panel, &mut cells);
+                (cells, slot_view::panel_drawbars(engine, *key, panel), slot_view::panel_pool(panel))
+            }
             None => Default::default(),
         };
         slot_view::sync_cells(&self.cells[slot], cells);
@@ -1109,6 +1110,9 @@ impl Rack {
     fn write_control(&self, engine: &RefCell<Engine>, key: PluginKey, control: &profiles::Control, value: profiles::CellValue) {
         if control.read(&engine.borrow(), key) == value {
             return;
+        }
+        if let profiles::CellValue::Position(position) = value {
+            self.mappings.edited(&engine.borrow(), key, control, position);
         }
         let for_gui = control.write(&mut engine.borrow_mut(), key, value);
         let engine = engine.borrow();
@@ -3001,6 +3005,9 @@ fn load_slot_preset(
     }
     for (key, plugin) in pairs {
         let result = engine.borrow_mut().load_state_file(key, &stored.dir.join(&plugin.state));
+        if result.is_ok() {
+            restore_values(&mut engine.borrow_mut(), key, &plugin.values);
+        }
         // The preset's mappings replace the plugin's, loaded or not.
         rack.mappings.set_scene(key, plugin.mappings.clone());
         match result {
@@ -3026,6 +3033,27 @@ fn load_slot_preset(
         }),
     );
     errors
+}
+
+/// Puts back the bases of `key`'s modulated targets that its slot preset kept
+/// (its state file has them as the modulation left them).
+fn restore_values(engine: &mut Engine, key: PluginKey, values: &[mappings::SavedValue]) {
+    for saved in values {
+        match &saved.target {
+            mappings::PluginTarget::Param { symbol } => {
+                let id = engine
+                    .plugin(key)
+                    .and_then(|meta| meta.params.iter().find(|param| param.symbol == *symbol))
+                    .map(|param| param.id);
+                if let Some(id) = id {
+                    engine.set_param(key, id, saved.value);
+                }
+            }
+            mappings::PluginTarget::Setbfree { function } => {
+                engine.restore_setbfree(key, function, saved.value.round().clamp(0.0, 127.0) as u8);
+            }
+        }
+    }
 }
 
 /// Saves the slots as scene `name`, with `modes` per slot, and makes it the

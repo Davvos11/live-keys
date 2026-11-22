@@ -72,10 +72,19 @@ pub enum MapperReport {
     /// A control-surface event, mapped or not (for drawing the panel, and
     /// learning).
     Event(SurfaceEvent),
-    /// A mapping moved a target of setup `generation`: to `position`, which is
-    /// `value` for its output. `for_gui`: for setBfree, the messages its open
-    /// GUI needs to show it (filled by the engine).
-    Applied { generation: u64, target: TargetId, output: Output, position: f32, value: f32, for_gui: Vec<PortEvent> },
+    /// A mapping moved a target of setup `generation`: to effective position
+    /// `position`, which is `value` for its output, with its base (what the
+    /// user set, under any modulation) at `base`. `for_gui`: for setBfree,
+    /// the messages its open GUI needs to show it (filled by the engine).
+    Applied {
+        generation: u64,
+        target: TargetId,
+        output: Output,
+        position: f32,
+        base: f32,
+        value: f32,
+        for_gui: Vec<PortEvent>,
+    },
     /// A fader or knob's target is elsewhere than the hardware (`at`, as a
     /// position of the control: draw the hardware as a ghost) or no longer is.
     Waiting { generation: u64, device: Arc<str>, control: usize, at: Option<f32> },
@@ -185,6 +194,10 @@ impl State {
             }
             MapperInput::Position { generation, target, position } => {
                 if generation == self.generation {
+                    // The target has that value now, whatever was sent last.
+                    if let Some(target) = self.targets.get_mut(target) {
+                        target.last = None;
+                    }
                     self.mappings.set_position(target, position);
                 }
             }
@@ -199,9 +212,7 @@ impl State {
             for write in writes {
                 let Some(target) = self.targets.get_mut(write.target) else { continue };
                 let value = (target.to_value)(write.position);
-                if target.last == Some(value) {
-                    continue;
-                }
+                let send = target.last != Some(value);
                 target.last = Some(value);
                 let command = match &target.output {
                     Output::Param { key, param } => {
@@ -209,7 +220,7 @@ impl State {
                     }
                     Output::Volume { slot } => Some(MapperCommand::Volume { slot: *slot, gain: value }),
                     Output::Setbfree { function, .. } => {
-                        if let Some(sink) = &target.setbfree {
+                        if send && let Some(sink) = &target.setbfree {
                             sink.send(function, value.round().clamp(0.0, 127.0) as u8);
                         }
                         None
@@ -217,7 +228,8 @@ impl State {
                     Output::Gui => None,
                 };
                 // No stream, or the audio thread isn't draining: dropped.
-                if let Some(command) = command
+                if send
+                    && let Some(command) = command
                     && let Some(Some(rack)) = rack.as_deref_mut()
                 {
                     let _ = rack.push(command);
@@ -227,6 +239,7 @@ impl State {
                     target: write.target,
                     output: target.output.clone(),
                     position: write.position,
+                    base: write.base,
                     value,
                     for_gui: Vec::new(),
                 });

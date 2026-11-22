@@ -622,11 +622,14 @@ behind format-agnostic cores:
   - **MIDI learn** (`docs/design/midi-learn.md`): `mapping.rs` is the logic alone, unit-tested
     — `Mappings` from surfaces and `ControlSetup`s (a control, its `Takeover` — jump, glide,
     pick up —, glide time, pass-through, and `Link`s to targets with a `Mode`: a range —
-    mirrored is from > to —, toggle levels, momentary), all in positions 0..1: `event` turns
-    a surface event into target positions (`take_writes`), `set_position` is a target moved
-    elsewhere (links whose control is elsewhere lose it: pick up waits for a crossing, glide
-    slides over the glide time, `tick` moving it on), and `take_waiting` reports faders and
-    knobs whose target is elsewhere, for the GUI's ghost. `mapper.rs` runs it on the
+    mirrored is from > to —, modulate, toggle levels, momentary, momentary modulate), all in
+    positions 0..1. Each target has **layers**: a base (set by ranges, toggles and edits
+    from elsewhere), the offsets of its modulating links, a momentary override, and the
+    effective value they make, which is what it gets. `event` turns a surface event into
+    effective values (`take_writes`, each with its base), `set_position` is a target set
+    elsewhere — its new base — (links whose control is elsewhere lose it: pick up waits for
+    a crossing, glide slides over the glide time, `tick` moving it on), and `take_waiting`
+    reports faders and knobs whose target's base is elsewhere, for the GUI's ghost. `mapper.rs` runs it on the
     `midi-mapping` thread, which blocks on its input channel (2 ms ticks while gliding):
     `Engine::set_mappings(MapperSetup)` (surfaces, controls, `TargetSpec`s: an `Output` —
     `Param { key, param }`, `Setbfree { key, function }`, `Volume { slot }`, or `Gui` — a
@@ -636,7 +639,7 @@ behind format-agnostic cores:
     (`SharedMapperTx`, set while a stream runs; the `Rack` resolves a parameter's
     `PluginKey` itself, so it can't land on a plugin that replaced it), setBfree functions
     through `SetbfreeSink` on the plugin's second atom ring — and as `MapperReport`s (every
-    surface event, `Applied`, `Waiting`) to `Engine::take_mapper_reports`, which records
+    surface event, `Applied` with the base, `Waiting`) to `Engine::take_mapper_reports`, which records
     applied values (`param_value`, setBfree's record, the slots' gains; a VST3 controller is
     told) before handing them on. `Engine::set_mapped_position` tells the thread of a target
     moved elsewhere.
@@ -856,7 +859,10 @@ behind format-agnostic cores:
   `docs/design/midi-learn.md`): `src/mappings.rs` (`MappingsUi`, in `Rack::mappings`) keeps
   the mappings — with the scene: `SceneMapping`s per plugin key, saved in each plugin's
   `PluginState.mappings` in `slot.json` (slot presets, scenes, the session, undo; through
-  `Rack::plugin_extras`) and replaced by `load_slot_preset`; in every scene:
+  `Rack::plugin_extras`) and replaced by `load_slot_preset`, with the bases of the plugin's
+  modulated targets (`PluginState.values`, `MappingsUi::saved_values`, put back after its
+  state file by `restore_values`; setBfree's through `Engine::restore_setbfree`, which sends
+  them again once the plugin reports its loaded state); in every scene:
   `GlobalMapping`s (`RackTarget`: a plugin by slot and id, a panel position, a slot's or the
   master's volume, mute or transposition, the metronome's volume, play or tempo) and
   `ControlSettings` per `surface/label`, in `AppConfig.surfaces` (`MappingsUi::store`
@@ -874,7 +880,11 @@ behind format-agnostic cores:
   a volume in the config without sending it again, and does mute/transpose/metronome
   through their `AppLogic` handlers; `Waiting`: the panel's ghost), rebuilds the setup if
   needed, tells the engine of targets moved elsewhere (`sync_positions`, against what was
-  last seen), and refreshes the view; it also handles every `learn-*` callback.
+  last seen), and refreshes the view; it also handles every `learn-*` callback. A
+  modulated target's base is kept per setup target (`MappingsUi::reported`, and `edited`
+  for a knob dragged on screen); `MappingsUi::decorate` shows it on the panel's knobs
+  (`PanelCell.modulated`/`mod-low`/`mod-high`/`mod-value`: `Knob`'s outer arc and dot),
+  and a volume's base is what the config keeps.
   `ui/learn.slint`: `LearnPane` (over the scenes pane while `AppState.learning`),
   `TargetSettings` (mode, range, levels, momentary value, kept with the scene or in every
   scene, this parameter or this panel position), and `LearnTarget`, laid over each target

@@ -155,6 +155,8 @@ fn panel_cell(engine: &Engine, key: PluginKey, control: &Control) -> PanelCell {
         index: index as i32,
         default_index: default_index as i32,
         value_text: control.value_text(engine, key).into(),
+        // Filled by `MappingsUi::decorate`.
+        ..Default::default()
     }
 }
 

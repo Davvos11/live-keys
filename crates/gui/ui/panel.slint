@@ -362,6 +362,10 @@ export component PanelCellView inherits Rectangle {
         maximum: 1;
         step: root.cell.steps > 0 ? 1 / root.cell.steps : 0;
         default-value: root.cell.default-position;
+        modulated: root.cell.modulated;
+        mod-low: root.cell.mod-low;
+        mod-high: root.cell.mod-high;
+        mod-value: root.cell.mod-value;
         value: root.cell.position;
         // Turning sets the knob's own value, replacing its binding; this keeps
         // following changes from elsewhere.

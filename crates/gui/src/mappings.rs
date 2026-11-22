@@ -51,6 +51,9 @@ pub enum MappingMode {
     Direct { from: f32, to: f32 },
     /// As direct, the other way round: the control's low end is `to`.
     Mirrored { from: f32, to: f32 },
+    /// Faders, knobs, pads: the control adds an offset between `low` and
+    /// `high` to the target's base (which can still be set elsewhere).
+    Modulate { low: f32, high: f32 },
     /// Buttons, pads: each press steps to the next level.
     Toggle { levels: Vec<f32> },
     /// Buttons, pads: `value` while held (times the pad's velocity if
@@ -60,13 +63,24 @@ pub enum MappingMode {
         #[serde(default)]
         velocity: bool,
     },
+    /// Buttons, pads: `offset` added to the target's base while held (times
+    /// the pad's velocity if `velocity`).
+    MomentaryModulate {
+        offset: f32,
+        #[serde(default)]
+        velocity: bool,
+    },
 }
 
-/// The UI's mode numbers (2 and 5, modulating, come later).
+/// The UI's mode numbers.
 const DIRECT: i32 = 0;
 const MIRRORED: i32 = 1;
+const MODULATE: i32 = 2;
 const TOGGLE: i32 = 3;
 const MOMENTARY: i32 = 4;
+const MOMENTARY_MODULATE: i32 = 5;
+/// A new modulation's reach either way, and a momentary one's offset.
+const DEFAULT_OFFSET: f32 = 0.2;
 
 impl MappingMode {
     /// A new target's mode for a control of `kind`; `steps` are the target's
@@ -83,8 +97,10 @@ impl MappingMode {
         match self {
             Self::Direct { .. } => DIRECT,
             Self::Mirrored { .. } => MIRRORED,
+            Self::Modulate { .. } => MODULATE,
             Self::Toggle { .. } => TOGGLE,
             Self::Momentary { .. } => MOMENTARY,
+            Self::MomentaryModulate { .. } => MOMENTARY_MODULATE,
         }
     }
 
@@ -97,8 +113,10 @@ impl MappingMode {
         Some(match index {
             DIRECT => Self::Direct { from, to },
             MIRRORED => Self::Mirrored { from, to },
+            MODULATE => Self::Modulate { low: -DEFAULT_OFFSET, high: DEFAULT_OFFSET },
             TOGGLE => Self::Toggle { levels: default_levels(steps) },
             MOMENTARY => Self::Momentary { value: 1.0, velocity: false },
+            MOMENTARY_MODULATE => Self::MomentaryModulate { offset: DEFAULT_OFFSET, velocity: false },
             _ => return None,
         })
     }
@@ -107,12 +125,17 @@ impl MappingMode {
         match self {
             Self::Direct { from, to } => Mode::Range { from: *from, to: *to },
             Self::Mirrored { from, to } => Mode::Range { from: *to, to: *from },
+            Self::Modulate { low, high } => Mode::Modulate { low: *low, high: *high },
             Self::Toggle { levels } => Mode::Toggle { levels: levels.clone() },
             Self::Momentary { value, velocity } => Mode::Momentary { value: *value, velocity: *velocity },
+            Self::MomentaryModulate { offset, velocity } => {
+                Mode::MomentaryModulate { offset: *offset, velocity: *velocity }
+            }
         }
     }
 
-    /// The row's chip: "Direct", "Mirrored 20–80 %", "Toggle · 3 levels".
+    /// The row's chip: "Direct", "Mirrored 20–80 %", "Modulate ±20 %",
+    /// "Toggle · 3 levels".
     fn chip(&self) -> String {
         let percent = |value: f32| (value * 100.0).round();
         let range = |name: &str, from: f32, to: f32| {
@@ -129,6 +152,11 @@ impl MappingMode {
             Self::Momentary { value, velocity } => {
                 format!("Momentary {} %{}", percent(*value), if *velocity { " · velocity" } else { "" })
             }
+            Self::Modulate { low, high } if *low == -*high => format!("Modulate ±{} %", percent(high.abs())),
+            Self::Modulate { low, high } => format!("Modulate {}…{}", signed_percent(*low), signed_percent(*high)),
+            Self::MomentaryModulate { offset, velocity } => {
+                format!("Momentary {}{}", signed_percent(*offset), if *velocity { " · velocity" } else { "" })
+            }
         }
     }
 }
@@ -139,12 +167,18 @@ fn default_levels(steps: &[f32]) -> Vec<f32> {
     if steps.len() >= 2 { steps.to_vec() } else { vec![0.0, 1.0] }
 }
 
-/// Which modes a control of `kind` offers.
+/// An offset as text: "+20 %", "-5 %".
+fn signed_percent(offset: f32) -> String {
+    format!("{:+} %", (offset * 100.0).round())
+}
+
+/// Which modes a control of `kind` offers: faders and knobs the continuous
+/// ones (0–2), buttons the pressed ones (3–5), pads all.
 fn allows(kind: ControlKind, mode: i32) -> bool {
     match kind {
-        ControlKind::Fader | ControlKind::Knob => matches!(mode, DIRECT | MIRRORED),
-        ControlKind::Button => matches!(mode, TOGGLE | MOMENTARY),
-        ControlKind::Pad => matches!(mode, DIRECT | MIRRORED | TOGGLE | MOMENTARY),
+        ControlKind::Fader | ControlKind::Knob => (DIRECT..=MODULATE).contains(&mode),
+        ControlKind::Button => (TOGGLE..=MOMENTARY_MODULATE).contains(&mode),
+        ControlKind::Pad => (DIRECT..=MOMENTARY_MODULATE).contains(&mode),
     }
 }
 
@@ -175,6 +209,14 @@ pub enum RackTarget {
     MetronomeVolume,
     MetronomePlay,
     Tempo,
+}
+
+/// A modulated target's base, as a plugin's slot preset keeps it: the
+/// parameter's value (or setBfree's 0..=127).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedValue {
+    pub target: PluginTarget,
+    pub value: f32,
 }
 
 /// A mapping kept with the scene, as one plugin's (`slot.json`).
@@ -328,6 +370,16 @@ impl Ctx<'_> {
             RackTarget::Tempo => Concrete::Tempo,
         })
     }
+}
+
+/// What `control` of the plugin `meta` drives, as a mapping target.
+fn plugin_target_of(meta: &live_keys_engine::LoadedPluginMeta, control: &profiles::Control) -> Option<PluginTarget> {
+    Some(match &control.target {
+        profiles::Target::Param(id) => {
+            PluginTarget::Param { symbol: meta.params.iter().find(|param| param.id == *id)?.symbol.clone() }
+        }
+        profiles::Target::Setbfree(function) => PluginTarget::Setbfree { function: function.clone() },
+    })
 }
 
 /// A slot's volume in dB at volume-knob `position`.
@@ -579,6 +631,14 @@ struct SetupTarget {
     resolved: Resolved,
     /// Where it was when last seen (here or reported by the mapping thread).
     seen: f32,
+    /// Its value at a position, as the mapping thread works it out.
+    to_value: ToValue,
+    /// The offsets its modulating links can add, lowest and highest (both 0
+    /// if it has none).
+    reach: (f32, f32),
+    /// Its base (under any modulation), once the mapping thread has
+    /// reported it.
+    base: Option<f32>,
 }
 
 /// Every mapping and learn mode.
@@ -718,13 +778,17 @@ impl MappingsUi {
                             let Some(resolved) = Resolved::new(ctx, concrete.clone()) else { continue };
                             let Some((output, to_value)) = resolved.output(ctx) else { continue };
                             let position = resolved.position(ctx);
-                            specs.push(TargetSpec { output, to_value, position });
-                            targets.push(SetupTarget { resolved, seen: position });
+                            specs.push(TargetSpec { output, to_value: to_value.clone(), position });
+                            targets.push(SetupTarget { resolved, seen: position, to_value, reach: (0.0, 0.0), base: None });
                             by_concrete.insert(concrete.clone(), targets.len() - 1);
                             targets.len() - 1
                         }
                     };
-                    links.push(Link { target, mode: mode.engine() });
+                    let engine_mode = mode.engine();
+                    let (low, high) = engine_mode.reach();
+                    let reach = &mut targets[target].reach;
+                    *reach = (reach.0 + low, reach.1 + high);
+                    links.push(Link { target, mode: engine_mode });
                     signed.push((concrete.clone(), mode.clone()));
                 }
                 if links.is_empty() {
@@ -796,6 +860,79 @@ impl MappingsUi {
             return None;
         }
         Some(self.targets.borrow().get(target)?.resolved.concrete.clone())
+    }
+
+    /// Notes target `target`'s base as the mapping thread reported it.
+    pub fn reported(&self, generation: u64, target: usize, base: f32) {
+        if generation == self.generation.get()
+            && let Some(setup_target) = self.targets.borrow_mut().get_mut(target)
+        {
+            setup_target.base = Some(base);
+        }
+    }
+
+    /// If `target` of plugin `key` is modulated: its base, and the lowest and
+    /// highest positions its modulation can take it to, for its knob.
+    pub fn modulation_of(&self, key: PluginKey, target: &PluginTarget) -> Option<(Option<f32>, f32, f32)> {
+        let targets = self.targets.borrow();
+        let setup_target = targets.iter().find(|t| {
+            t.reach != (0.0, 0.0)
+                && matches!(&t.resolved.concrete, Concrete::Plugin { key: k, target: t } if *k == key && t == target)
+        })?;
+        Some((setup_target.base, setup_target.reach.0, setup_target.reach.1))
+    }
+
+    /// Shows the modulation of plugin `key`'s modulated targets on `panel`'s
+    /// row `cells` (built at the targets' effective values): a knob's
+    /// position is its base, `mod-value` the effective one.
+    pub fn decorate(&self, engine: &Engine, key: PluginKey, panel: &profiles::Panel, cells: &mut [crate::PanelCell]) {
+        let Some(meta) = engine.plugin(key) else { return };
+        for (cell, &pool) in cells.iter_mut().zip(&panel.row) {
+            let Some(control) = panel.pool.get(pool) else { continue };
+            if control.widget != profiles::Widget::Knob || !control.choices.is_empty() {
+                continue;
+            }
+            let Some(target) = plugin_target_of(meta, control) else { continue };
+            let Some((base, low, high)) = self.modulation_of(key, &target) else { continue };
+            let effective = cell.position;
+            let base = base.unwrap_or(effective);
+            cell.position = base;
+            cell.modulated = true;
+            cell.mod_low = (base + low).clamp(0.0, 1.0);
+            cell.mod_high = (base + high).clamp(0.0, 1.0);
+            cell.mod_value = effective;
+        }
+    }
+
+    /// Plugin `key`'s panel control `control` was set on screen to `position`:
+    /// if its target is modulated, that's its base (the mapping thread hears
+    /// of it on the next tick; until then, the knob mustn't jump back).
+    pub fn edited(&self, engine: &Engine, key: PluginKey, control: &profiles::Control, position: f32) {
+        let Some(target) = engine.plugin(key).and_then(|meta| plugin_target_of(meta, control)) else { return };
+        for setup_target in self.targets.borrow_mut().iter_mut() {
+            if setup_target.reach != (0.0, 0.0)
+                && matches!(&setup_target.resolved.concrete, Concrete::Plugin { key: k, target: t } if *k == key && *t == target)
+            {
+                setup_target.base = Some(position);
+            }
+        }
+    }
+
+    /// The bases of plugin `key`'s modulated targets, as values, for its slot
+    /// preset: what restoring puts back under the modulation (the state file
+    /// has whatever the modulation made of them).
+    pub fn saved_values(&self, key: PluginKey) -> Vec<SavedValue> {
+        self.targets
+            .borrow()
+            .iter()
+            .filter(|t| t.reach != (0.0, 0.0))
+            .filter_map(|t| match (&t.resolved.concrete, t.base) {
+                (Concrete::Plugin { key: k, target }, Some(base)) if *k == key => {
+                    Some(SavedValue { target: target.clone(), value: (t.to_value)(base) })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Notes where target `target` is now, after a mapping moved it, so
@@ -1353,6 +1490,17 @@ impl MappingsUi {
             MappingMode::Momentary { value, velocity } => {
                 row.value = *value;
                 row.value_text = text(*value);
+                row.velocity = *velocity;
+            }
+            MappingMode::Modulate { low, high } => {
+                row.from = *low;
+                row.to = *high;
+                row.from_text = signed_percent(*low).into();
+                row.to_text = signed_percent(*high).into();
+            }
+            MappingMode::MomentaryModulate { offset, velocity } => {
+                row.value = *offset;
+                row.value_text = signed_percent(*offset).into();
                 row.velocity = *velocity;
             }
         }

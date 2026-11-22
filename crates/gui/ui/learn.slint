@@ -17,17 +17,21 @@ component Caption inherits Text {
 component TargetSettings inherits VerticalLayout {
     in property <LearnTargetRow> target;
     in property <int> row-index;
-    // The selected control's kind: faders and knobs offer direct and
-    // mirrored, buttons toggle and momentary, pads all four.
+    // The selected control's kind: faders and knobs offer the continuous
+    // modes (0–2), buttons the pressed ones (3–5), pads all six.
     property <int> kind: AppState.learn-control.kind;
 
     spacing: 8px;
 
-    Segmented {
-        options: ["Direct", "Mirrored", "Toggle", "Momentary"];
-        current: root.target.mode <= 1 ? root.target.mode : root.target.mode - 1;
-        disabled: [root.kind == 3, root.kind == 3, root.kind <= 1, root.kind <= 1];
-        picked(index) => { AppLogic.learn-set-mode(root.row-index, index <= 1 ? index : index + 1); }
+    if root.kind != 3 : Segmented {
+        options: ["Direct", "Mirrored", "Modulate"];
+        current: root.target.mode <= 2 ? root.target.mode : -1;
+        picked(index) => { AppLogic.learn-set-mode(root.row-index, index); }
+    }
+    if root.kind >= 2 : Segmented {
+        options: ["Toggle", "Momentary", "Mom. modulate"];
+        current: root.target.mode >= 3 ? root.target.mode - 3 : -1;
+        picked(index) => { AppLogic.learn-set-mode(root.row-index, index + 3); }
     }
     if root.target.mode <= 1 : VerticalLayout {
         spacing: 2px;
@@ -41,6 +45,24 @@ component TargetSettings inherits VerticalLayout {
             low: Math.round(root.target.from * 100);
             high: Math.round(root.target.to * 100);
             // Dragging sets its own values, replacing the bindings.
+            property <int> low-source: Math.round(root.target.from * 100);
+            property <int> high-source: Math.round(root.target.to * 100);
+            changed low-source => { self.low = self.low-source; }
+            changed high-source => { self.high = self.high-source; }
+            changed(low, high) => { AppLogic.learn-set-range(root.row-index, low / 100, high / 100); }
+        }
+    }
+    if root.target.mode == 2 : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            Caption { text: "Offset"; horizontal-stretch: 1; }
+            Caption { text: "\{root.target.from-text} … \{root.target.to-text}"; }
+        }
+        RangeSlider {
+            minimum: -100;
+            maximum: 100;
+            low: Math.round(root.target.from * 100);
+            high: Math.round(root.target.to * 100);
             property <int> low-source: Math.round(root.target.from * 100);
             property <int> high-source: Math.round(root.target.to * 100);
             changed low-source => { self.low = self.low-source; }
@@ -90,14 +112,29 @@ component TargetSettings inherits VerticalLayout {
             value: root.target.value;
             changed(value) => { AppLogic.learn-set-value(root.row-index, value); }
         }
-        if root.kind == 2 : CheckBox {
+    }
+    if root.target.mode == 5 : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            Caption { text: "While held, adds"; horizontal-stretch: 1; }
+            Caption { text: root.target.value-text; }
+        }
+        SingleSlider {
+            height: 24px;
+            minimum: -1;
+            maximum: 1;
+            default-value: 0;
+            value: root.target.value;
+            changed(value) => { AppLogic.learn-set-value(root.row-index, value); }
+        }
+    }
+    if root.kind == 2 && (root.target.mode == 4 || root.target.mode == 5) : CheckBox {
             text: "Velocity sensitive";
             checked: root.target.velocity;
             // Clicking sets `checked` itself, replacing the binding above.
             property <bool> source: root.target.velocity;
             changed source => { self.checked = self.source; }
             toggled => { AppLogic.learn-set-velocity(root.row-index, self.checked); }
-        }
     }
     if root.target.panel >= 0 : Segmented {
         options: ["This parameter", "This panel position"];

@@ -80,6 +80,9 @@ pub(crate) struct Setbfree {
     /// The `notify` output's port index.
     notify_port: u32,
     values: HashMap<String, u8>,
+    /// Values to put back once the plugin reports the function (see
+    /// [`Setbfree::insist`]).
+    pending: HashMap<String, u8>,
     /// The mapping thread's way in (see [`SetbfreeSink`]).
     sink: Option<SetbfreeSink>,
 }
@@ -125,6 +128,7 @@ impl Setbfree {
             control_port,
             notify_port: port("notify")?,
             values: HashMap::new(),
+            pending: HashMap::new(),
             sink: control.map(|producer| SetbfreeSink { urids, control_port, producer: Arc::new(Mutex::new(producer)) }),
         })
     }
@@ -168,6 +172,24 @@ impl Setbfree {
     /// A control message for `port`.
     fn message(&self, port: u32, function: &str, value: u8) -> Option<PortEvent> {
         control_message(self.urids, port, function, value)
+    }
+
+    /// Keeps `function` at `value` through a state load: setBfree applies a
+    /// loaded state on its next run and then reports it, so a value set right
+    /// after the load is set again when that report comes.
+    pub(crate) fn insist(&mut self, function: &str, value: u8) {
+        self.pending.insert(function.to_string(), value.min(127));
+    }
+
+    /// If `event` reports a function a value is insisted on for: that function
+    /// and value, no longer pending.
+    pub(crate) fn take_insisted(&mut self, event: &PortEvent) -> Option<(String, u8)> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let (function, _) = self.decode(event)?;
+        let value = self.pending.remove(&function)?;
+        Some((function, value))
     }
 
     pub(crate) fn value(&self, function: &str) -> Option<u8> {

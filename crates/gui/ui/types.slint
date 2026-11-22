@@ -146,6 +146,13 @@ export struct PanelCell {
     default-index: int,
     // The value as text, shown while a knob is hovered or turned.
     value-text: string,
+    // MIDI learn's modulation (a knob without choices): `position` is then
+    // the base, `mod-value` where the modulation has it now, and
+    // `mod-low`/`mod-high` how far it can take it, all 0..1.
+    modulated: bool,
+    mod-low: float,
+    mod-high: float,
+    mod-value: float,
 }
 
 // One drawbar of a slot's fixed section.

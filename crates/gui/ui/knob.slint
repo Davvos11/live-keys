@@ -23,6 +23,14 @@ export component Knob inherits Rectangle {
     in property <length> drag-range: 200px;
     // Shift divides movement by this.
     in property <float> fine-factor: 10;
+    // MIDI learn's modulation: `value` is then the base, which the knob
+    // turns; a thin outer arc shows how far the modulation can take it
+    // (`mod-low`..`mod-high`) and a dot where it has it now (`mod-value`),
+    // all as fractions of the range.
+    in property <bool> modulated;
+    in property <float> mod-low;
+    in property <float> mod-high;
+    in property <float> mod-value;
     out property <bool> pressed: touch.pressed;
     out property <bool> has-hover: touch.has-hover;
     // Fired on every change made by the user, after `value` is updated.
@@ -75,10 +83,15 @@ export component Knob inherits Rectangle {
 
     // An SVG arc on a circle of radius 40 around (50, 50), clockwise from `from` to `to`.
     function arc(from: angle, to: angle) -> string {
+        return root.arc-at(40, from, to);
+    }
+
+    // The same on a circle of radius `r`.
+    function arc-at(r: float, from: angle, to: angle) -> string {
         let a = min(from, to);
         let b = max(from, to);
         let large = b - a > 180deg ? 1 : 0;
-        return "M \{50 + 40 * Math.sin(a)} \{50 - 40 * Math.cos(a)} A 40 40 0 \{large} 1 \{50 + 40 * Math.sin(b)} \{50 - 40 * Math.cos(b)}";
+        return "M \{50 + r * Math.sin(a)} \{50 - r * Math.cos(a)} A \{r} \{r} 0 \{large} 1 \{50 + r * Math.sin(b)} \{50 - r * Math.cos(b)}";
     }
 
     min-width: 24px;
@@ -116,6 +129,29 @@ export component Knob inherits Rectangle {
             stroke: Theme.accent;
             stroke-width: max(2px, root.size / 14);
             stroke-line-cap: round;
+        }
+
+        // Modulation: its reach outside the track, and where it is now.
+        if root.modulated && root.mod-high > root.mod-low : Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: root.arc-at(49, root.angle-at(root.mod-low), root.angle-at(root.mod-high));
+            stroke: Theme.accent.with-alpha(0.7);
+            stroke-width: 1.5px;
+            stroke-line-cap: round;
+        }
+        if root.modulated : Rectangle {
+            property <angle> at: root.angle-at(Math.clamp(root.mod-value, 0, 1));
+            x: parent.width / 2 + parent.width * 0.4 * Math.sin(self.at) - self.width / 2;
+            y: parent.height / 2 - parent.height * 0.4 * Math.cos(self.at) - self.height / 2;
+            width: max(5px, root.size / 9);
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.text;
+            border-width: 1px;
+            border-color: Theme.accent;
         }
 
         // Body
@@ -190,6 +226,11 @@ export component LabelledKnob inherits VerticalLayout {
     in property <float> default-value: 0;
     // As `Knob.step`.
     in property <float> step: 0;
+    // As `Knob`'s.
+    in property <bool> modulated;
+    in property <float> mod-low;
+    in property <float> mod-high;
+    in property <float> mod-value;
     callback changed(/* value */ float);
 
     width: 56px;
@@ -204,6 +245,10 @@ export component LabelledKnob inherits VerticalLayout {
             maximum: root.maximum;
             default-value: root.default-value;
             step: root.step;
+            modulated: root.modulated;
+            mod-low: root.mod-low;
+            mod-high: root.mod-high;
+            mod-value: root.mod-value;
             changed(value) => { root.changed(value); }
         }
     }

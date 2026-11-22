@@ -33,6 +33,7 @@ struct Applied {
     target: usize,
     output: Output,
     position: f32,
+    base: f32,
     value: f32,
     for_gui: Vec<PortEvent>,
 }
@@ -61,9 +62,9 @@ impl Learn {
         for report in reports {
             match report {
                 MapperReport::Event(event) => events.push(event),
-                MapperReport::Applied { generation, target, output, position, value, for_gui } => {
+                MapperReport::Applied { generation, target, output, position, base, value, for_gui } => {
                     applied.retain(|a| (a.generation, a.target) != (generation, target));
-                    applied.push(Applied { generation, target, output, position, value, for_gui });
+                    applied.push(Applied { generation, target, output, position, base, value, for_gui });
                 }
                 MapperReport::Waiting { generation, device, control, at } => {
                     if generation == self.rack.mappings.generation() {
@@ -98,13 +99,17 @@ impl Learn {
     /// Shows (and for the GUI's own targets, does) what a mapping did.
     fn apply(&self, applied: Applied) {
         let Some(concrete) = self.rack.mappings.concrete(applied.generation, applied.target) else { return };
+        // First, so a modulated knob shows its new base.
+        self.rack.mappings.reported(applied.generation, applied.target, applied.base);
         let app = self.app.upgrade();
         let logic = app.as_ref().map(|app| app.global::<AppLogic>());
         let position = applied.position;
         match concrete {
             Concrete::Plugin { key, .. } => self.show_plugin_value(key, &applied),
             Concrete::Volume(slot) => {
-                let db = mappings::volume_db(position);
+                // The config (and so scenes) keeps the base; the engine plays
+                // the effective volume already.
+                let db = mappings::volume_db(applied.base);
                 let mut config = self.config.borrow_mut();
                 if slot == MASTER_SLOT {
                     config.master_volume_db = db;
@@ -203,6 +208,10 @@ impl Learn {
         let generation = self.engine.borrow_mut().set_mappings(setup);
         self.rack.mappings.install(installed, generation);
         self.surfaces.clear_waiting();
+        // Knobs show their modulation, or no longer.
+        for slot in 0..SLOT_COUNT {
+            self.rack.refresh_panel(&self.engine.borrow(), slot, false);
+        }
         self.rack.mappings.view_dirty.set(true);
     }
 
@@ -345,8 +354,12 @@ impl Learn {
         let learn = self.clone();
         logic.on_learn_set_range(move |row, from, to| {
             learn.edit(row, |mode, _| {
-                if let MappingMode::Direct { from: f, to: t } | MappingMode::Mirrored { from: f, to: t } = mode {
-                    (*f, *t) = (from.clamp(0.0, 1.0), to.clamp(0.0, 1.0));
+                match mode {
+                    MappingMode::Direct { from: f, to: t } | MappingMode::Mirrored { from: f, to: t } => {
+                        (*f, *t) = (from.clamp(0.0, 1.0), to.clamp(0.0, 1.0));
+                    }
+                    MappingMode::Modulate { low, high } => (*low, *high) = (from.clamp(-1.0, 1.0), to.clamp(-1.0, 1.0)),
+                    _ => {}
                 }
             });
         });
@@ -383,15 +396,17 @@ impl Learn {
         let learn = self.clone();
         logic.on_learn_set_value(move |row, position| {
             learn.edit(row, |mode, _| {
-                if let MappingMode::Momentary { value, .. } = mode {
-                    *value = position.clamp(0.0, 1.0);
+                match mode {
+                    MappingMode::Momentary { value, .. } => *value = position.clamp(0.0, 1.0),
+                    MappingMode::MomentaryModulate { offset, .. } => *offset = position.clamp(-1.0, 1.0),
+                    _ => {}
                 }
             });
         });
         let learn = self.clone();
         logic.on_learn_set_velocity(move |row, on| {
             learn.edit(row, |mode, _| {
-                if let MappingMode::Momentary { velocity, .. } = mode {
+                if let MappingMode::Momentary { velocity, .. } | MappingMode::MomentaryModulate { velocity, .. } = mode {
                     *velocity = on;
                 }
             });

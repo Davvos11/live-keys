@@ -39,15 +39,38 @@ pub enum Takeover {
 /// What a control does to one target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
-    /// Faders, knobs, pads: the target goes to `from + p·(to − from)` for the
-    /// control at `p`. Mirrored is `from > to`.
+    /// Faders, knobs, pads: the target's base goes to `from + p·(to − from)`
+    /// for the control at `p`. Mirrored is `from > to`.
     Range { from: f32, to: f32 },
-    /// Buttons, pads: each press moves the target to the level after the one
-    /// nearest where it is now, wrapping.
+    /// Faders, knobs, pads: the control adds an offset of `low + p·(high −
+    /// low)` to the target's base (a pad: while held, by its velocity and
+    /// pressure).
+    Modulate { low: f32, high: f32 },
+    /// Buttons, pads: each press moves the target's base to the level after
+    /// the one nearest it, wrapping.
     Toggle { levels: Vec<f32> },
     /// Buttons, pads: while held, the target is at `value` (times the pad's
-    /// velocity if `velocity`); let go, it goes back.
+    /// velocity if `velocity`), whatever its base; let go, it's back at it.
     Momentary { value: f32, velocity: bool },
+    /// Buttons, pads: while held, `offset` (times the velocity if
+    /// `velocity`) is added to the target's base.
+    MomentaryModulate { offset: f32, velocity: bool },
+}
+
+impl Mode {
+    /// Whether it adds an offset rather than setting the base.
+    pub fn modulates(&self) -> bool {
+        matches!(self, Mode::Modulate { .. } | Mode::MomentaryModulate { .. })
+    }
+
+    /// The offsets it can add, lowest and highest (0 for other modes).
+    pub fn reach(&self) -> (f32, f32) {
+        match *self {
+            Mode::Modulate { low, high } => (low.min(high), low.max(high)),
+            Mode::MomentaryModulate { offset, .. } => (offset.min(0.0), offset.max(0.0)),
+            _ => (0.0, 0.0),
+        }
+    }
 }
 
 /// One of a control's targets.
@@ -73,11 +96,12 @@ pub struct ControlSetup {
     pub links: Vec<Link>,
 }
 
-/// A position a mapping gave a target.
+/// A target's new effective position (what it gets), and its base under it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Write {
     pub target: TargetId,
     pub position: f32,
+    pub base: f32,
 }
 
 /// A fader or knob whose target is elsewhere than the hardware (`at`: the
@@ -95,8 +119,10 @@ struct LinkState {
     engaged: bool,
     /// Sliding to the control since then, from this position.
     glide: Option<(Instant, f32)>,
-    /// Where the control last wanted the target.
+    /// Where the control last wanted the target's base.
     desired: Option<f32>,
+    /// What a modulating link adds now.
+    offset: f32,
 }
 
 #[derive(Debug)]
@@ -117,12 +143,18 @@ impl ControlState {
     }
 }
 
+/// A target's layers (see "Values" in the design notes): the base the user
+/// set, the offsets of modulating links and a momentary override on top,
+/// and the effective position they make, which is what the target gets.
 #[derive(Debug)]
 struct TargetState {
-    position: f32,
-    /// While momentary buttons hold it: the position to go back to.
-    base: Option<f32>,
+    base: f32,
+    /// Momentary links holding it, and the latest one's value.
     held: u32,
+    hold: f32,
+    effective: f32,
+    /// The effective position and base last written.
+    written: (f32, f32),
 }
 
 /// Every mapping of one setup, and their state.
@@ -142,7 +174,10 @@ impl Mappings {
     pub fn new(surfaces: Vec<Arc<Surface>>, controls: Vec<ControlSetup>, positions: Vec<f32>) -> Self {
         let targets: Vec<TargetState> = positions
             .into_iter()
-            .map(|position| TargetState { position: position.clamp(0.0, 1.0), base: None, held: 0 })
+            .map(|position| {
+                let position = position.clamp(0.0, 1.0);
+                TargetState { base: position, held: 0, hold: 0.0, effective: position, written: (position, position) }
+            })
             .collect();
         let mut by_control = HashMap::new();
         let mut states = Vec::new();
@@ -167,7 +202,6 @@ impl Mappings {
         }
         Self { surfaces, controls: states, by_control, targets, writes: Vec::new(), waiting: Vec::new() }
     }
-
 
     /// Applies a MIDI event from surface `surface`.
     pub fn event(&mut self, surface: usize, event: &MidiEvent, now: Instant) {
@@ -198,8 +232,10 @@ impl Mappings {
                 }
                 self.controls[index].hardware = Some(value);
                 for link in 0..self.controls[index].links.len() {
-                    if let Mode::Range { .. } = self.controls[index].setup.links[link].mode {
-                        self.range(index, link, value, now);
+                    match self.controls[index].setup.links[link].mode {
+                        Mode::Range { .. } => self.range(index, link, value, now),
+                        Mode::Modulate { low, high } => self.offset(index, link, low + value * (high - low)),
+                        _ => {}
                     }
                 }
             }
@@ -207,18 +243,19 @@ impl Mappings {
                 self.controls[index].pressed = true;
                 self.controls[index].hardware = Some(velocity);
                 for link in 0..self.controls[index].links.len() {
+                    let target = self.controls[index].setup.links[link].target;
                     match self.controls[index].setup.links[link].mode.clone() {
                         Mode::Range { .. } => self.range(index, link, velocity, now),
+                        Mode::Modulate { low, high } => self.offset(index, link, low + velocity * (high - low)),
                         Mode::Toggle { levels } => self.toggle(index, link, &levels),
                         Mode::Momentary { value, velocity: sensitive } => {
-                            let target = self.controls[index].setup.links[link].target;
                             let state = &mut self.targets[target];
-                            if state.held == 0 {
-                                state.base = Some(state.position);
-                            }
                             state.held += 1;
-                            let position = if sensitive { value * velocity } else { value };
-                            self.set(target, position, Some((index, link)));
+                            state.hold = if sensitive { value * velocity } else { value };
+                            self.recompute(target);
+                        }
+                        Mode::MomentaryModulate { offset, velocity: sensitive } => {
+                            self.offset(index, link, if sensitive { offset * velocity } else { offset });
                         }
                     }
                 }
@@ -226,20 +263,17 @@ impl Mappings {
             Reading::Release => {
                 self.controls[index].pressed = false;
                 for link in 0..self.controls[index].links.len() {
+                    let target = self.controls[index].setup.links[link].target;
                     match self.controls[index].setup.links[link].mode {
                         Mode::Range { .. } if self.controls[index].setup.release_to_zero => {
                             self.controls[index].hardware = Some(0.0);
                             self.range(index, link, 0.0, now);
                         }
+                        Mode::Modulate { .. } | Mode::MomentaryModulate { .. } => self.offset(index, link, 0.0),
                         Mode::Momentary { .. } => {
-                            let target = self.controls[index].setup.links[link].target;
                             let state = &mut self.targets[target];
                             state.held = state.held.saturating_sub(1);
-                            if state.held == 0
-                                && let Some(base) = state.base.take()
-                            {
-                                self.set(target, base, Some((index, link)));
-                            }
+                            self.recompute(target);
                         }
                         _ => {}
                     }
@@ -247,6 +281,13 @@ impl Mappings {
             }
         }
         self.update_waiting(index);
+    }
+
+    /// A modulating link now adds `offset`.
+    fn offset(&mut self, index: usize, link: usize, offset: f32) {
+        self.controls[index].links[link].offset = offset;
+        let target = self.controls[index].setup.links[link].target;
+        self.recompute(target);
     }
 
     /// The control at `hardware`, for its range link `link`.
@@ -257,13 +298,13 @@ impl Mappings {
         let jumps = control.jumps();
         let takeover = control.setup.takeover;
         let desired = from + hardware * (to - from);
-        let current = self.targets[target].position;
+        let current = self.targets[target].base;
         let state = &mut self.controls[index].links[link];
         let previous = state.desired.replace(desired);
         if state.engaged || jumps {
             state.engaged = true;
             state.glide = None;
-            return self.write(target, desired, (index, link));
+            return self.set_base(target, desired, Some((index, link)));
         }
         match takeover {
             Takeover::Jump => {}
@@ -271,7 +312,7 @@ impl Mappings {
                 let crossed = previous.is_some_and(|previous| (previous - current) * (desired - current) <= 0.0);
                 if crossed || (desired - current).abs() <= TOLERANCE {
                     state.engaged = true;
-                    self.write(target, desired, (index, link));
+                    self.set_base(target, desired, Some((index, link)));
                 }
             }
             Takeover::Glide => {
@@ -291,16 +332,15 @@ impl Mappings {
         if progress >= 1.0 {
             state.glide = None;
             state.engaged = true;
-            self.write(target, desired, (index, link));
+            self.set_base(target, desired, Some((index, link)));
         } else {
-            self.write(target, from + (desired - from) * progress, (index, link));
+            self.set_base(target, from + (desired - from) * progress, Some((index, link)));
         }
     }
 
     fn toggle(&mut self, index: usize, link: usize, levels: &[f32]) {
         let target = self.controls[index].setup.links[link].target;
-        let state = &self.targets[target];
-        let current = state.base.unwrap_or(state.position);
+        let current = self.targets[target].base;
         let Some(nearest) = levels
             .iter()
             .enumerate()
@@ -309,42 +349,50 @@ impl Mappings {
         else {
             return;
         };
-        self.write(target, levels[(nearest + 1) % levels.len()], (index, link));
+        self.set_base(target, levels[(nearest + 1) % levels.len()], Some((index, link)));
     }
 
-    /// A mapping moves `target`: while a momentary button holds it, that's
-    /// where it goes back to; otherwise it goes there.
-    fn write(&mut self, target: TargetId, position: f32, by: (usize, usize)) {
-        let state = &mut self.targets[target];
-        if state.held > 0 {
-            state.base = Some(position.clamp(0.0, 1.0));
-        } else {
-            self.set(target, position, Some(by));
-        }
-    }
-
-    /// Puts `target` at `position`. Other controls' links to it lose it (it
-    /// moved away from them).
-    fn set(&mut self, target: TargetId, position: f32, by: Option<(usize, usize)>) {
-        let position = position.clamp(0.0, 1.0);
-        self.targets[target].position = position;
-        self.writes.push(Write { target, position });
+    /// Puts `target`'s base at `position`. Other controls' links to it lose
+    /// it (it moved away from them).
+    fn set_base(&mut self, target: TargetId, position: f32, by: Option<(usize, usize)>) {
+        self.targets[target].base = position.clamp(0.0, 1.0);
+        self.recompute(target);
         self.lose(target, by);
     }
 
+    /// Works out `target`'s effective position from its layers, and writes
+    /// it if it or the base changed.
+    fn recompute(&mut self, target: TargetId) {
+        let offsets: f32 = self
+            .controls
+            .iter()
+            .flat_map(|control| control.setup.links.iter().zip(&control.links))
+            .filter(|(link, _)| link.target == target && link.mode.modulates())
+            .map(|(_, state)| state.offset)
+            .sum();
+        let state = &mut self.targets[target];
+        state.effective = if state.held > 0 { state.hold } else { state.base + offsets }.clamp(0.0, 1.0);
+        let (effective, base) = state.written;
+        if (state.effective - effective).abs() > 1e-6 || (state.base - base).abs() > 1e-6 {
+            state.written = (state.effective, state.base);
+            self.writes.push(Write { target, position: state.effective, base: state.base });
+        }
+    }
+
     /// Every link to `target` but `except` loses it, unless the control wants
-    /// it where it is anyway.
+    /// its base where it is anyway.
     fn lose(&mut self, target: TargetId, except: Option<(usize, usize)>) {
-        let position = self.targets[target].position;
+        let base = self.targets[target].base;
         for index in 0..self.controls.len() {
             let mut touches = false;
             let control = &mut self.controls[index];
             for (link, state) in control.links.iter_mut().enumerate() {
-                if control.setup.links[link].target != target || except == Some((index, link)) {
+                let mapped = &control.setup.links[link];
+                if mapped.target != target || mapped.mode.modulates() || except == Some((index, link)) {
                     continue;
                 }
                 touches = true;
-                if state.desired.is_none_or(|desired| (desired - position).abs() > TOLERANCE) {
+                if state.desired.is_none_or(|desired| (desired - base).abs() > TOLERANCE) {
                     state.engaged = false;
                     state.glide = None;
                 }
@@ -355,18 +403,19 @@ impl Mappings {
         }
     }
 
-    /// `target` was moved elsewhere (the mouse, a preset…) to `position`.
+    /// `target` was set elsewhere (the mouse, a preset…) to `position`: that's
+    /// its base now. The target has it already; with modulation on top, it
+    /// gets the effective position again.
     pub fn set_position(&mut self, target: TargetId, position: f32) {
         let Some(state) = self.targets.get_mut(target) else { return };
         let position = position.clamp(0.0, 1.0);
-        if state.held > 0 {
-            state.base = Some(position);
+        if (state.base - position).abs() < 1e-6 && (state.effective - position).abs() < 1e-6 {
             return;
         }
-        if (state.position - position).abs() < 1e-6 {
-            return;
-        }
-        state.position = position;
+        state.base = position;
+        state.effective = position;
+        state.written = (position, position);
+        self.recompute(target);
         self.lose(target, None);
     }
 
@@ -390,7 +439,7 @@ impl Mappings {
         self.controls.iter().any(|control| control.links.iter().any(|state| state.glide.is_some()))
     }
 
-    /// The positions given since the last call, oldest first.
+    /// The effective positions given since the last call, oldest first.
     pub fn take_writes(&mut self) -> Vec<Write> {
         std::mem::take(&mut self.writes)
     }
@@ -417,7 +466,7 @@ impl Mappings {
                 if state.engaged || to == from {
                     return None;
                 }
-                let at = ((self.targets[link.target].position - from) / (to - from)).clamp(0.0, 1.0);
+                let at = ((self.targets[link.target].base - from) / (to - from)).clamp(0.0, 1.0);
                 (state.glide.is_some() || (at - hardware).abs() > TOLERANCE).then_some(at)
             })
             .flatten();
@@ -514,15 +563,16 @@ mod tests {
     fn glide_slides_to_the_control_then_follows() {
         let start = Instant::now();
         let mut mappings = mappings(vec![setup(FADER, Takeover::Glide, FULL)], 0.0);
-        assert_eq!(cc(&mut mappings, 127, start), [0.0]);
+        // It starts where the target is: nothing to write yet.
+        assert!(cc(&mut mappings, 127, start).is_empty());
         assert!(mappings.gliding());
         mappings.tick(start + Duration::from_millis(50));
-        assert_eq!(mappings.take_writes(), [Write { target: 0, position: 0.5 }]);
+        assert_eq!(mappings.take_writes(), [Write { target: 0, position: 0.5, base: 0.5 }]);
         // It follows the control while sliding: 3/4 of the way to the middle.
         let moved = cc(&mut mappings, 64, start + Duration::from_millis(75));
         assert!((moved[0] - 0.75 * 64.0 / 127.0).abs() < 1e-3, "{moved:?}");
         mappings.tick(start + Duration::from_millis(100));
-        assert_eq!(mappings.take_writes(), [Write { target: 0, position: 64.0 / 127.0 }]);
+        assert_eq!(mappings.take_writes(), [Write { target: 0, position: 64.0 / 127.0, base: 64.0 / 127.0 }]);
         assert!(!mappings.gliding());
         assert_eq!(cc(&mut mappings, 127, start + Duration::from_millis(110)), [1.0]);
     }
@@ -544,8 +594,10 @@ mod tests {
         let mode = Mode::Momentary { value: 1.0, velocity: true };
         let mut mappings = mappings(vec![setup(PAD, Takeover::Glide, mode)], 0.3);
         assert_eq!(note(&mut mappings, 37, 127), [1.0]);
-        // Set elsewhere while held: that's where it goes back to.
+        // Set elsewhere while held: that's the base now, which it goes back
+        // to; while held, the button still wins.
         mappings.set_position(0, 0.6);
+        assert_eq!(mappings.take_writes().iter().map(|w| w.position).collect::<Vec<_>>(), [1.0]);
         assert_eq!(note(&mut mappings, 37, 0), [0.6]);
     }
 
@@ -562,10 +614,52 @@ mod tests {
         let mut second = setup(BUTTON, Takeover::Glide, Mode::Toggle { levels: vec![0.0, 1.0] });
         second.links[0].target = 0;
         let mut mappings = mappings(vec![setup(FADER, Takeover::PickUp, FULL), second], 0.0);
-        assert_eq!(cc(&mut mappings, 0, now), [0.0]);
+        assert!(cc(&mut mappings, 0, now).is_empty());
         assert_eq!(cc(&mut mappings, 30, now).len(), 1);
         // The button moves it away: the fader has to pick it up again.
         assert_eq!(note(&mut mappings, 36, 100), [1.0]);
         assert!(cc(&mut mappings, 40, now).is_empty());
+    }
+
+    fn writes(mappings: &mut Mappings) -> Vec<(f32, f32)> {
+        mappings.take_writes().iter().map(|w| (w.position, w.base)).collect()
+    }
+
+    fn close(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5)
+    }
+
+    #[test]
+    fn modulation_rides_on_the_base() {
+        let now = Instant::now();
+        let modulate = setup(FADER, Takeover::Glide, Mode::Modulate { low: -0.2, high: 0.2 });
+        let mut push = setup(BUTTON, Takeover::Glide, Mode::MomentaryModulate { offset: 0.1, velocity: false });
+        push.links[0].target = 0;
+        let mut mappings = mappings(vec![modulate, push], 0.5);
+        assert!(close(&cc(&mut mappings, 127, now), &[0.7]));
+        // A new base: the modulation stays on top of it.
+        mappings.set_position(0, 0.4);
+        let written = writes(&mut mappings);
+        assert!(close(&[written[0].0, written[0].1], &[0.6, 0.4]), "{written:?}");
+        // Offsets add up, and clamp.
+        assert!(close(&note(&mut mappings, 36, 100), &[0.7]));
+        mappings.set_position(0, 0.95);
+        assert_eq!(writes(&mut mappings), [(1.0, 0.95)]);
+        // Still clamped without the button's offset: only the base was new.
+        assert!(note(&mut mappings, 36, 0).is_empty());
+    }
+
+    #[test]
+    fn a_range_moves_the_base_under_a_momentary_override() {
+        let now = Instant::now();
+        let mut hold = setup(BUTTON, Takeover::Jump, Mode::Momentary { value: 1.0, velocity: false });
+        hold.links[0].target = 0;
+        let mut mappings = mappings(vec![setup(FADER, Takeover::Jump, FULL), hold], 0.0);
+        assert_eq!(note(&mut mappings, 36, 100), [1.0]);
+        // The fader moves the base while the button holds the target.
+        assert_eq!(cc(&mut mappings, 127, now), [1.0]);
+        assert_eq!(mappings.targets[0].base, 1.0);
+        assert_eq!(note(&mut mappings, 36, 0), Vec::<f32>::new());
+        assert!(close(&cc(&mut mappings, 64, now), &[64.0 / 127.0]));
     }
 }

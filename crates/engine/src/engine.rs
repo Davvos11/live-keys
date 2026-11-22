@@ -879,11 +879,18 @@ impl Engine {
             for meta in chain.plugins_mut() {
                 if let PluginEditor::Lv2 { ui_channel: Some(channel), .. } = &mut meta.editor {
                     while let Ok(event) = channel.from_plugin.pop() {
-                        if let Some(setbfree) = &mut meta.setbfree
-                            && setbfree.observe(&event)
-                            && !self.setbfree_changed.contains(&meta.key)
-                        {
-                            self.setbfree_changed.push(meta.key);
+                        if let Some(setbfree) = &mut meta.setbfree {
+                            let mut changed = setbfree.observe(&event);
+                            // A loaded state reported over a value to keep.
+                            if let Some((function, value)) = setbfree.take_insisted(&event)
+                                && let Some((to_plugin, _)) = setbfree.set(&function, value)
+                            {
+                                let _ = channel.to_plugin.push(to_plugin);
+                                changed = true;
+                            }
+                            if changed && !self.setbfree_changed.contains(&meta.key) {
+                                self.setbfree_changed.push(meta.key);
+                            }
                         }
                         forward(meta.key, event.port, &event);
                     }
@@ -899,6 +906,16 @@ impl Engine {
     /// doesn't report what the host sets). Empty if the plugin isn't setBfree.
     pub fn send_setbfree(&mut self, key: PluginKey, function: &str, value: u8) -> Vec<PortEvent> {
         self.send_setbfree_inner(key, function, value).unwrap_or_default()
+    }
+
+    /// [`Engine::send_setbfree`] right after loading a state into the plugin
+    /// with `key`: setBfree applies the state later and reports it, so the
+    /// value is set again then.
+    pub fn restore_setbfree(&mut self, key: PluginKey, function: &str, value: u8) {
+        self.send_setbfree(key, function, value);
+        if let Some(setbfree) = self.plugin_mut(key).and_then(|meta| meta.setbfree.as_mut()) {
+            setbfree.insist(function, value);
+        }
     }
 
     fn send_setbfree_inner(&mut self, key: PluginKey, function: &str, value: u8) -> Option<Vec<PortEvent>> {
