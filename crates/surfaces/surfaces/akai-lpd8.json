@@ -5,7 +5,7 @@
   "banks": [
     {
       "name": "Pads", "kind": "pad", "x": 0, "y": 0, "rows": 2, "columns": 4,
-      "numbering": "bottom-first", "prefix": "P", "channel": 1,
+      "numbering": "bottom-first", "prefix": "P", "channel": 1, "feedback": true,
       "controls": [
         { "note": 36 }, { "note": 37 }, { "note": 38 }, { "note": 39 },
         { "note": 40 }, { "note": 41 }, { "note": 42 }, { "note": 43 }

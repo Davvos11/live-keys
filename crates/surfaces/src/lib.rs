@@ -31,8 +31,9 @@ use serde::{Deserialize, Serialize};
 /// The shipped surfaces, by file name.
 ///
 /// Their MIDI messages come from the makers' published defaults where those
-/// could be found (the LX88+'s faders and pots); the rest (the LX88+'s pads, the
-/// LPD8) are best guesses still to be checked on the hardware.
+/// could be found (the LX88+'s faders and pots) or the hardware (the original
+/// LPD8, pad lights included); the LX88+'s pads are a best guess still to be
+/// checked.
 pub const SHIPPED: &[(&str, &str)] = &[
     ("nektar-impact-lx88plus.json", include_str!("../surfaces/nektar-impact-lx88plus.json")),
     ("akai-lpd8.json", include_str!("../surfaces/akai-lpd8.json")),

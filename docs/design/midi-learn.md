@@ -96,8 +96,9 @@ Looked for on 2026-11-22; **none fits**, so we keep our own (shipped + user, see
 What a controller sends is a fact in its maker's published MIDI chart, so our shipped surfaces
 are written from those charts (no one's mapping files copied), and checked on the hardware
 where we have it. As shipped in phase 1: the LX88+'s faders and pots follow Nektar's user
-guide; its pads (notes 36–43, channel 10) and the LPD8 (pads notes 36–43, knobs CC 1–8,
-channel 1) are guesses still to be checked on the hardware. The first two are the developer's own: **Nektar Impact LX88+** and **Akai
+guide; its pads (notes 36–43, channel 10) are a guess still to be checked on the hardware.
+The LPD8 (original; pads notes 36–43, knobs CC 1–8, channel 1, pads lit by the same notes)
+was checked on the developer's (2026-11-22). The first two are the developer's own: **Nektar Impact LX88+** and **Akai
 LPD8**. More come from users' own surfaces (an "export" is just the JSON file).
 
 ## Concepts
@@ -519,13 +520,16 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    format. As built:
    - A bank (or a control, overriding it) with `"feedback": true` shows values sent back
      as its own message; pads and buttons are lit with `lit` (velocity or CC value, default
-     127) and unlit with 0 / a note-off. The shipped surfaces have none yet (unknown which of
-     the LX88+'s or LPD8's controls light up from outside).
+     127) and unlit with 0 / a note-off. Shipped: the LPD8's pads (checked on the hardware);
+     the LX88+ has none yet (unknown which of its controls light up from outside).
    - A control with feedback always jumps (the learn pane says so instead of offering
      takeover). It's sent its first target's base along its range, a toggle's on/off, a
      momentary button's held state; a modulating control shows nothing (it's where it was
      turned). Its own moves aren't sent back; an incoming value equal to what it was last
-     sent is taken as its echo (a motor fader arriving) and ignored.
+     sent is taken as its echo (a motor fader arriving) and ignored. Pads and buttons that
+     light themselves while held and go dark when let go (the original LPD8 does; it lights
+     pad n on note n, channel 1) are sent their state again after their own release, past
+     the no-repeats rule.
    - The mapping thread opens the output port with the device's name on the first value
      (`midir`), sends at most every 10 ms per control (the latest value, later) and never
      the same message twice in a row. A new setup, or a change in the devices shown or

@@ -147,9 +147,10 @@ struct FeedbackOut {
 impl FeedbackOut {
     /// Sends `message` to `device`'s control `control`, or keeps it until
     /// [`FEEDBACK_INTERVAL`] after the last.
-    fn send(&mut self, device: &Arc<str>, control: usize, message: [u8; 3], now: Instant) {
+    /// `again`: even if it's the message sent last.
+    fn send(&mut self, device: &Arc<str>, control: usize, message: [u8; 3], again: bool, now: Instant) {
         let key = (device.clone(), control);
-        if self.last.get(&key) == Some(&message) {
+        if !again && self.last.get(&key) == Some(&message) {
             self.waiting.remove(&key);
             return;
         }
@@ -177,7 +178,7 @@ impl FeedbackOut {
             .map(|(key, message)| (key.clone(), *message))
             .collect();
         for ((device, control), message) in due {
-            self.send(&device, control, message, now);
+            self.send(&device, control, message, true, now);
         }
     }
 }
@@ -351,7 +352,7 @@ impl State {
                 continue;
             };
             if let Some(message) = surface.feedback(feedback.control, feedback.shown) {
-                self.feedback.send(device, feedback.control, message, now);
+                self.feedback.send(device, feedback.control, message, feedback.again, now);
                 let _ = self.reports.try_send(MapperReport::Feedback {
                     device: device.clone(),
                     control: feedback.control,

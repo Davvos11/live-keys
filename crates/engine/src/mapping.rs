@@ -105,6 +105,9 @@ pub struct Feedback {
     pub surface: usize,
     pub control: usize,
     pub shown: Shown,
+    /// Send it even if it's what was sent last: the control may have
+    /// changed its own light meanwhile.
+    pub again: bool,
 }
 
 /// A target's new effective position (what it gets), and its base under it.
@@ -317,6 +320,25 @@ impl Mappings {
         }
         self.update_waiting(index);
         self.show(index, true);
+        // Pads and buttons light themselves while held and go dark when let
+        // go (the LPD8 does): what they show goes to them again then.
+        if reading == Reading::Release {
+            self.show_again(index);
+        }
+    }
+
+    /// Sends a pad or button what it shows, whether or not that changed.
+    fn show_again(&mut self, index: usize) {
+        if let Some(shown @ Shown::Lit(_)) = self.feedback_value(index) {
+            let control = &mut self.controls[index];
+            control.shown = Some(shown);
+            self.feedback.push(Feedback {
+                surface: control.setup.surface,
+                control: control.setup.control,
+                shown,
+                again: true,
+            });
+        }
     }
 
     /// What control `index` should show, if it shows anything: its first
@@ -349,7 +371,12 @@ impl Mappings {
         }
         control.shown = Some(shown);
         if !(own && matches!(shown, Shown::Position(_))) {
-            self.feedback.push(Feedback { surface: control.setup.surface, control: control.setup.control, shown });
+            self.feedback.push(Feedback {
+                surface: control.setup.surface,
+                control: control.setup.control,
+                shown,
+                again: false,
+            });
         }
     }
 
@@ -787,6 +814,9 @@ mod tests {
         assert_eq!(shown(&mut mappings), [(0, Shown::Position(1.0)), (1, Shown::Lit(true))]);
         mappings.set_position(0, 0.25);
         assert_eq!(shown(&mut mappings), [(0, Shown::Position(0.25))]);
+        // Let go, a button is sent its light again (it turned it off itself).
+        note(&mut mappings, 36, 0);
+        assert_eq!(shown(&mut mappings), [(1, Shown::Lit(true))]);
     }
 
     #[test]

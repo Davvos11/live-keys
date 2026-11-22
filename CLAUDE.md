@@ -1226,8 +1226,9 @@ behind format-agnostic cores:
   of faders, knobs, pads and buttons, each control knowing its message (CC, note, pitch bend,
   channel pressure) and channel; see `docs/design/midi-learn.md`. JSON (format in the crate's
   doc comment), shipped ones compiled in (`SHIPPED`: Nektar Impact LX88+ and Akai LPD8 — the
-  LX88+'s faders/pots from Nektar's guide, its pads and the LPD8 still guesses to check on the
-  hardware) and the user's in `<data dir>/live-keys/surfaces/` replacing a shipped one by `id`
+  LX88+'s faders/pots from Nektar's guide, its pads still a guess; the original LPD8 checked
+  on the hardware, pad lights included: it lights pad n on note n, channel 1, and turns a pad
+  off itself when let go) and the user's in `<data dir>/live-keys/surfaces/` replacing a shipped one by `id`
   (`Library::load`). `Surface::from_json` places every control (`ControlKind::cell_size`,
   `Numbering` top/bottom-first) and indexes them by `(channel, message)`; `Surface::matches`
   picks a surface for a device name (case-insensitive substrings), `Surface::read` turns a
