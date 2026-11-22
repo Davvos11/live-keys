@@ -510,3 +510,44 @@ export component ScrollIndicator inherits Rectangle {
         background: Theme.control-border;
     }
 }
+
+// A row of mutually exclusive options (the scene form's Restore/Clear/
+// Unchanged look): the `current` one in the primary colour. Options whose
+// `disabled` entry is true can't be picked.
+export component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in property <int> current;
+    in property <[bool]> disabled;
+    callback picked(/* index */ int);
+
+    height: 26px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: Theme.control;
+
+    HorizontalLayout {
+        padding: 1px;
+        spacing: 1px;
+        for option[index] in root.options : Rectangle {
+            property <bool> active: index == root.current;
+            property <bool> enabled: !root.disabled[index];
+            horizontal-stretch: 1;
+            border-radius: Theme.radius;
+            background: self.active ? Theme.accent : area.has-hover && self.enabled ? Theme.control-hover : transparent;
+            area := TouchArea {
+                enabled: parent.enabled;
+                mouse-cursor: pointer;
+                clicked => { root.picked(index); }
+            }
+            Text {
+                text: option;
+                font-size: Theme.small-font-size;
+                color: parent.active ? Theme.on-accent : parent.enabled ? Theme.text : Theme.text-faint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}

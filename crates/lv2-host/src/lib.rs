@@ -408,6 +408,12 @@ impl Lv2Host {
             let (ui_out, from_plugin) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
             (Some(UiChannel { to_plugin, from_plugin }), Some((ui_in, ui_out)))
         };
+        let (control_channel, control_in) = if atom_in_ports.is_empty() {
+            (None, None)
+        } else {
+            let (producer, consumer) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
+            (Some(producer), Some(consumer))
+        };
         let mut lv2 = Lv2Plugin {
             params,
             name,
@@ -420,6 +426,8 @@ impl Lv2Host {
             atom_out_ports,
             ui_channel,
             ui_ends,
+            control_channel,
+            control_in,
             midi_urid: self.features.midi_urid(),
             output_buffers,
             frames_rendered: 0,
@@ -467,6 +475,10 @@ pub struct Lv2Plugin {
     ui_channel: Option<UiChannel>,
     /// The audio thread's end: atoms from the GUI, and atom output for it.
     ui_ends: Option<(rtrb::Consumer<PortEvent>, rtrb::Producer<PortEvent>)>,
+    /// A second way into the atom inputs, until taken (see
+    /// [`Lv2Plugin::take_control_channel`]), and the audio thread's end.
+    control_channel: Option<rtrb::Producer<PortEvent>>,
+    control_in: Option<rtrb::Consumer<PortEvent>>,
     midi_urid: u32,
     output_buffers: Vec<Vec<f32>>,
     frames_rendered: usize,
@@ -537,6 +549,14 @@ impl Lv2Plugin {
         self.ui_channel.take()
     }
 
+    /// A second producer of atoms for the plugin's atom inputs, for a plugin
+    /// that has any (once; `None` after): the GUI channel's belongs to one
+    /// thread, and the mapping thread (MIDI learn) sends setBfree's control
+    /// messages too. Passed on after the GUI channel's, at frame 0.
+    pub fn take_control_channel(&mut self) -> Option<rtrb::Producer<PortEvent>> {
+        self.control_channel.take()
+    }
+
     /// Where the plugin's GUIs get their [`GuiLease`]s.
     pub fn gui_leases(&self) -> GuiLeases {
         GuiLeases(Arc::downgrade(&self.gui_leases))
@@ -589,9 +609,11 @@ impl HostedPlugin for Lv2Plugin {
         for sequence in &mut self.atom_in {
             sequence.clear();
         }
-        // The GUI's atoms first, at frame 0, so each sequence stays in time order.
-        if let Some((ui_in, _)) = &mut self.ui_ends {
-            while let Ok(event) = ui_in.pop() {
+        // The GUI's (and the mapping thread's) atoms first, at frame 0, so each
+        // sequence stays in time order.
+        let ui_in = self.ui_ends.as_mut().map(|(ui_in, _)| ui_in);
+        for queue in ui_in.into_iter().chain(self.control_in.as_mut()) {
+            while let Ok(event) = queue.pop() {
                 let Some(index) = self.atom_in_ports.iter().position(|&port| port == event.port) else {
                     continue;
                 };

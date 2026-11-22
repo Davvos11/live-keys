@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use live_keys_core::{MidiEvent, Producer};
+use live_keys_surfaces::Message;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+
+use crate::mapper::MapperInput;
 
 /// Most MIDI inputs the engine routes (bits of [`MidiFilter::inputs`](live_keys_core::MidiFilter)).
 pub const MAX_MIDI_INPUTS: usize = 8;
@@ -21,8 +24,8 @@ pub(crate) struct RoutedMidi {
 /// (none of them the audio thread, so a lock is fine).
 pub(crate) type SharedMidiTx = Arc<Mutex<Option<Producer<RoutedMidi>>>>;
 
-/// A MIDI event from a device shown as a control surface, for the panel that
-/// draws it (see [`Engine::set_surface_devices`](crate::Engine::set_surface_devices)).
+/// A MIDI event from a device shown as a control surface (see
+/// [`Engine::set_surface_devices`](crate::Engine::set_surface_devices)).
 #[derive(Debug, Clone)]
 pub struct SurfaceEvent {
     /// The device's [`midi_device_name`].
@@ -30,9 +33,59 @@ pub struct SurfaceEvent {
     pub event: MidiEvent,
 }
 
-/// How many surface events may wait for the control thread; more are dropped
-/// (they only move the panel's drawing).
-const SURFACE_QUEUE: usize = 1024;
+/// One device's messages that belong to mapped controls (MIDI learn), so they
+/// don't reach the slots. Read by the device's MIDI callback, set from the
+/// control thread: atomics.
+#[derive(Default)]
+pub(crate) struct Claims {
+    /// Per channel, a bit per controller.
+    cc: [[AtomicU64; 2]; 16],
+    /// Per channel, a bit per note (its note-ons, note-offs and poly pressure).
+    notes: [[AtomicU64; 2]; 16],
+    /// Per channel: bit 0 pitch bend, bit 1 channel pressure.
+    other: [AtomicU8; 16],
+}
+
+impl Claims {
+    fn clear(&self) {
+        for channel in 0..16 {
+            for word in 0..2 {
+                self.cc[channel][word].store(0, Ordering::Relaxed);
+                self.notes[channel][word].store(0, Ordering::Relaxed);
+            }
+            self.other[channel].store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn claim(&self, channel: u8, message: Message) {
+        let channel = usize::from(channel & 0x0F);
+        let bit = |bits: &[AtomicU64; 2], number: u8| {
+            bits[usize::from(number >> 6) & 1].fetch_or(1 << (number & 63), Ordering::Relaxed);
+        };
+        match message {
+            Message::Cc(number) => bit(&self.cc[channel], number),
+            Message::Note(number) => bit(&self.notes[channel], number),
+            Message::PitchBend => drop(self.other[channel].fetch_or(1, Ordering::Relaxed)),
+            Message::ChannelPressure => drop(self.other[channel].fetch_or(2, Ordering::Relaxed)),
+        }
+    }
+
+    fn claimed(&self, event: &MidiEvent) -> bool {
+        let bytes = event.as_slice();
+        let (Some(&status), number) = (bytes.first(), bytes.get(1).copied().unwrap_or(0)) else { return false };
+        let channel = usize::from(status & 0x0F);
+        let bit = |bits: &[AtomicU64; 2]| {
+            bits[usize::from(number >> 6) & 1].load(Ordering::Relaxed) & (1 << (number & 63)) != 0
+        };
+        match status & 0xF0 {
+            0xB0 => bit(&self.cc[channel]),
+            0x80 | 0x90 | 0xA0 => bit(&self.notes[channel]),
+            0xE0 => self.other[channel].load(Ordering::Relaxed) & 1 != 0,
+            0xD0 => self.other[channel].load(Ordering::Relaxed) & 2 != 0,
+            _ => false,
+        }
+    }
+}
 
 /// Lists MIDI input port names.
 pub fn list_midi_ports() -> Result<Vec<String>> {
@@ -84,7 +137,7 @@ pub fn find_midi_port(name_filter: Option<&str>) -> Result<String> {
 struct Connection {
     /// The inputs its events go to; changed in place when assignments change.
     inputs: Arc<AtomicU32>,
-    /// Whether its events also go to the surface queue.
+    /// Whether its events also go to the mapping thread.
     surface: Arc<AtomicBool>,
     _connection: midir::MidiInputConnection<()>,
 }
@@ -95,31 +148,46 @@ struct Connection {
 /// lets go of ones that disappeared. A device on several inputs is connected
 /// once, its events tagged with all of them. Independent of the audio stream:
 /// without one, events are dropped. Devices shown as control surfaces are
-/// connected too (on an input or not), and their events also go to the surface
-/// queue.
+/// connected too (on an input or not), and their events also go to the mapping
+/// thread; those it claims (see [`MidiInputs::set_claims`]) don't reach the
+/// slots.
 pub(crate) struct MidiInputs {
     pub tx: SharedMidiTx,
     /// Per input, its devices.
     devices: Vec<Vec<String>>,
     /// Devices shown as control surfaces.
     surfaces: Vec<String>,
-    surface_tx: mpsc::SyncSender<SurfaceEvent>,
+    mapper_tx: mpsc::SyncSender<MapperInput>,
+    /// By device name; kept once made, so connections can hold on to theirs.
+    claims: HashMap<String, Arc<Claims>>,
     /// By full port name.
     connections: HashMap<String, Connection>,
 }
 
 impl MidiInputs {
-    /// Also returns the surface queue's receiving end.
-    pub fn new() -> (Self, mpsc::Receiver<SurfaceEvent>) {
-        let (surface_tx, surface_rx) = mpsc::sync_channel(SURFACE_QUEUE);
-        let inputs = Self {
+    pub fn new(mapper_tx: mpsc::SyncSender<MapperInput>) -> Self {
+        Self {
             tx: Arc::new(Mutex::new(None)),
             devices: Vec::new(),
             surfaces: Vec::new(),
-            surface_tx,
+            mapper_tx,
+            claims: HashMap::new(),
             connections: HashMap::new(),
-        };
-        (inputs, surface_rx)
+        }
+    }
+
+    /// Sets the messages each device's mapped controls claim (by device name).
+    pub fn set_claims(&mut self, claims: &[(String, u8, Message)]) {
+        for table in self.claims.values() {
+            table.clear();
+        }
+        for (device, channel, message) in claims {
+            self.claims_of(device).claim(*channel, *message);
+        }
+    }
+
+    fn claims_of(&mut self, device: &str) -> Arc<Claims> {
+        self.claims.entry(device.to_string()).or_default().clone()
     }
 
     /// Sets the devices shown as control surfaces and connects accordingly.
@@ -168,7 +236,8 @@ impl MidiInputs {
             if self.connections.contains_key(port) {
                 continue;
             }
-            match connect(port, inputs, surface, self.tx.clone(), self.surface_tx.clone()) {
+            let claims = self.claims_of(midi_device_name(port));
+            match connect(port, inputs, surface, claims, self.tx.clone(), self.mapper_tx.clone()) {
                 Ok(connection) => {
                     log::info!("MIDI input connected: {port}");
                     self.connections.insert(port.to_string(), connection);
@@ -194,8 +263,9 @@ fn connect(
     port_name: &str,
     inputs: u32,
     surface: bool,
+    claims: Arc<Claims>,
     tx: SharedMidiTx,
-    surface_tx: mpsc::SyncSender<SurfaceEvent>,
+    mapper_tx: mpsc::SyncSender<MapperInput>,
 ) -> Result<Connection> {
     let midi_input = midir::MidiInput::new("live-keys")?;
     let port = midi_input
@@ -218,12 +288,14 @@ fn connect(
                 let Some(event) = MidiEvent::from_raw(0, bytes) else {
                     return;
                 };
-                if callback_surface.load(Ordering::Relaxed) {
-                    // Full: the panel misses a move, nothing else.
-                    let _ = surface_tx.try_send(SurfaceEvent { device: device.clone(), event });
+                let surface = callback_surface.load(Ordering::Relaxed);
+                if surface {
+                    // Full: the mapping thread has stalled; the move is lost.
+                    let _ = mapper_tx.try_send(MapperInput::Event(SurfaceEvent { device: device.clone(), event }));
                 }
                 let inputs = callback_inputs.load(Ordering::Relaxed);
                 if inputs != 0
+                    && !(surface && claims.claimed(&event))
                     && let Ok(mut tx) = tx.lock()
                     && let Some(tx) = tx.as_mut()
                     && let Err(err) = tx.push(RoutedMidi { inputs, event })
@@ -256,5 +328,18 @@ mod tests {
         assert_eq!(midi_device_name("Some Keyboard"), "Some Keyboard");
         assert_eq!(midi_device_name("Port 2:x"), "Port 2:x");
         assert_eq!(midi_device_name("Foo :1"), "Foo :1");
+    }
+
+    #[test]
+    fn claims_by_channel_and_number() {
+        let claims = Claims::default();
+        claims.claim(9, Message::Note(36));
+        claims.claim(0, Message::Cc(100));
+        let claimed = |bytes: &[u8]| claims.claimed(&MidiEvent::from_raw(0, bytes).unwrap());
+        assert!(claimed(&[0x99, 36, 100]) && claimed(&[0x89, 36, 0]) && claimed(&[0xA9, 36, 5]));
+        assert!(!claimed(&[0x90, 36, 100]) && !claimed(&[0x99, 37, 100]));
+        assert!(claimed(&[0xB0, 100, 1]) && !claimed(&[0xB0, 36, 1]) && !claimed(&[0xE0, 0, 64]));
+        claims.clear();
+        assert!(!claimed(&[0xB0, 100, 1]));
     }
 }

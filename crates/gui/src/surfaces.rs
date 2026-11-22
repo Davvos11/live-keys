@@ -1,13 +1,17 @@
 //! The control surfaces panel: which MIDI devices it shows, and their controls'
-//! last values, from the events the engine hands over (see
-//! `Engine::take_surface_events`). See `docs/design/midi-learn.md`.
+//! last values, from the events the mapping thread hands over (see
+//! `Engine::take_mapper_reports`); and for MIDI learn, which control is
+//! selected, which drive something, and which have their target elsewhere.
+//! See `docs/design/midi-learn.md`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use live_keys_engine::{SurfaceEvent, midi_device_name};
-use live_keys_surfaces::{ControlKind, Library, Message, Reading};
+use live_keys_surfaces::{ControlKind, Library, Message, Reading, Surface};
 use slint::{Model, ModelRc, VecModel};
 
 use crate::config::AppConfig;
@@ -29,6 +33,8 @@ struct Shown {
 
 pub struct SurfacesUi {
     library: Library,
+    /// The library's surfaces, shared with the mapping thread.
+    shared: Vec<Arc<Surface>>,
     /// `AppState.surfaces`.
     pub views: Rc<VecModel<SurfaceView>>,
     /// `AppState.surface-devices`.
@@ -39,11 +45,14 @@ pub struct SurfacesUi {
     /// The devices last handed to the engine.
     applied: RefCell<Option<Vec<String>>>,
     last_event: Cell<Option<Instant>>,
+    /// The shown devices changed since [`SurfacesUi::take_changed`].
+    changed: Cell<bool>,
 }
 
 impl SurfacesUi {
     pub fn new(library: Library) -> Self {
         Self {
+            shared: library.surfaces.iter().cloned().map(Arc::new).collect(),
             library,
             views: Rc::new(VecModel::default()),
             devices: Rc::new(VecModel::default()),
@@ -51,7 +60,14 @@ impl SurfacesUi {
             present: RefCell::default(),
             applied: RefCell::default(),
             last_event: Cell::new(None),
+            changed: Cell::new(true),
         }
+    }
+
+    /// Whether the shown devices changed since the last call (MIDI learn's
+    /// setup covers them).
+    pub fn take_changed(&self) -> bool {
+        self.changed.replace(false)
     }
 
     /// The devices shown: the user's choice, or, until they choose, every
@@ -124,6 +140,7 @@ impl SurfacesUi {
             .collect();
         sync_model(&self.devices, device_rows);
 
+        self.changed.set(true);
         let mut shown = self.shown.borrow_mut();
         let mut old: Vec<Shown> = shown.drain(..).collect();
         for device in &shown_devices {
@@ -175,6 +192,9 @@ impl SurfacesUi {
                             pressed: false,
                             moving: false,
                             mapped: false,
+                            selected: false,
+                            waiting: false,
+                            target: 0.0,
                         }
                     })
                     .collect()
@@ -188,18 +208,82 @@ impl SurfacesUi {
         }
     }
 
-    /// Moves the controls `events` came from.
-    pub fn apply(&self, events: &[SurfaceEvent]) {
+    /// The shown devices that have a surface, and their surfaces.
+    pub fn shown_surfaces(&self) -> Vec<(Arc<str>, Arc<Surface>)> {
+        self.shown
+            .borrow()
+            .iter()
+            .filter_map(|item| Some((item.device.as_str().into(), self.shared[item.surface?].clone())))
+            .collect()
+    }
+
+    /// The surface of shown device `device`.
+    pub fn surface_of(&self, device: &str) -> Option<Arc<Surface>> {
+        let shown = self.shown.borrow();
+        let item = shown.iter().find(|item| item.device == device)?;
+        Some(self.shared[item.surface?].clone())
+    }
+
+    /// Marks MIDI learn's selected control and the controls that drive
+    /// something (both as device and control index).
+    pub fn set_learn(&self, selected: Option<&(String, usize)>, mapped: &HashSet<(String, usize)>) {
+        for item in self.shown.borrow().iter() {
+            for control in 0..item.controls.row_count() {
+                let Some(mut row) = item.controls.row_data(control) else { continue };
+                let key = (item.device.clone(), control);
+                let (is_selected, is_mapped) = (selected == Some(&key), mapped.contains(&key));
+                if row.selected != is_selected || row.mapped != is_mapped {
+                    row.selected = is_selected;
+                    row.mapped = is_mapped;
+                    item.controls.set_row_data(control, row);
+                }
+            }
+        }
+    }
+
+    /// Shows control `control` of `device` with its target at `at` (as a
+    /// position of the control) and the hardware as a ghost, or not.
+    pub fn set_waiting(&self, device: &str, control: usize, at: Option<f32>) {
+        let shown = self.shown.borrow();
+        let Some(item) = shown.iter().find(|item| item.device == device) else { return };
+        if let Some(mut row) = item.controls.row_data(control) {
+            row.waiting = at.is_some();
+            row.target = at.unwrap_or_default();
+            item.controls.set_row_data(control, row);
+        }
+    }
+
+    /// Shows no control's target as elsewhere (a new setup starts over).
+    pub fn clear_waiting(&self) {
+        for item in self.shown.borrow().iter() {
+            for control in 0..item.controls.row_count() {
+                if let Some(mut row) = item.controls.row_data(control)
+                    && row.waiting
+                {
+                    row.waiting = false;
+                    item.controls.set_row_data(control, row);
+                }
+            }
+        }
+    }
+
+    /// Moves the controls `events` came from; returns the last one moved or
+    /// pressed (device, control), for MIDI learn to select.
+    pub fn apply(&self, events: &[SurfaceEvent]) -> Option<(String, usize)> {
         if events.is_empty() {
-            return;
+            return None;
         }
         let now = Instant::now();
+        let mut moved = None;
         let mut shown = self.shown.borrow_mut();
         for event in events {
             let Some(item) = shown.iter_mut().find(|item| *item.device == *event.device) else { continue };
             let Some(surface) = item.surface.map(|index| &self.library.surfaces[index]) else { continue };
             self.last_event.set(Some(now));
             if let Some((control, reading)) = surface.read(&event.event) {
+                if !matches!(reading, Reading::Release) {
+                    moved = Some((item.device.clone(), control));
+                }
                 let Some(mut row) = item.controls.row_data(control) else { continue };
                 match reading {
                     Reading::Value(value) => {
@@ -228,6 +312,7 @@ impl SurfacesUi {
                 }
             }
         }
+        moved
     }
 
     /// Lets faders and knobs that stopped moving stop showing it; returns

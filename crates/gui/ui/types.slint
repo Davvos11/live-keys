@@ -203,6 +203,14 @@ export struct SlotState {
     velocity-low: int,
     velocity-high: int,
     volume-db: float,
+    // MIDI learn: per row cell and drawbar, and for the volume, mute and
+    // transposition, 0 not a target, 1 a possible one, 2 the selected
+    // control's (see `AppState.learning`).
+    cell-learn: [int],
+    drawbar-learn: [int],
+    volume-learn: int,
+    mute-learn: int,
+    transpose-learn: int,
     // The slot preset last loaded or saved; empty if none.
     slot-preset-name: string,
     // Whether the chain or a parameter changed since.
@@ -232,6 +240,53 @@ export struct SurfaceControlView {
     moving: bool,
     // Whether it drives anything (MIDI learn).
     mapped: bool,
+    // MIDI learn's selected control.
+    selected: bool,
+    // Its target is elsewhere (`target`, as a position of the control): the
+    // control is drawn there, the hardware's `value` as a ghost.
+    waiting: bool,
+    target: float,
+}
+
+// One level of a MIDI-learn toggle: its position 0..1 along the target's
+// control, and that as the target's value.
+export struct LearnLevel {
+    position: float,
+    text: string,
+}
+
+// One target of MIDI learn's selected control (a row of the targets pane, or
+// the right-click popup's). `mode`: 0 direct, 1 mirrored, 3 toggle, 4
+// momentary. `kept`: 0 with the scene, 1 in every scene. `panel`: -1 not a
+// panel control, 0 this parameter, 1 this panel position.
+export struct LearnTargetRow {
+    name: string,
+    place: string,
+    chip: string,
+    greyed: bool,
+    mode: int,
+    from: float,
+    to: float,
+    from-text: string,
+    to-text: string,
+    levels: [LearnLevel],
+    value: float,
+    value-text: string,
+    velocity: bool,
+    kept: int,
+    can-keep-with-scene: bool,
+    panel: int,
+}
+
+// MIDI learn's selected control. `kind`: 0 fader, 1 knob, 2 pad, 3 button.
+// `takeover`: 0 jump, 1 glide, 2 pick up.
+export struct LearnControl {
+    selected: bool,
+    label: string,
+    detail: string,
+    kind: int,
+    takeover: int,
+    pass-through: bool,
 }
 
 // A MIDI device shown in the control surfaces panel.

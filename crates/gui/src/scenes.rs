@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use live_keys_engine::{Engine, PluginKey, PresetInfo};
+use live_keys_engine::{Engine, PluginKey};
 use serde::{Deserialize, Serialize};
 
 use crate::config::SlotRouting;
@@ -204,13 +204,13 @@ pub fn list() -> Vec<Stored> {
 /// Saves `slots` as scene `name`, replacing one of the same name; slots set to
 /// restore have their setup saved. Other slots keep the setup they have in
 /// `previous` (the scene being overwritten, if any), so they can still be set
-/// back to restore. `plugin_preset` is as for [`slot_presets::save`].
+/// back to restore. `plugin_extras` is as for [`slot_presets::save`].
 pub fn save(
     engine: &mut Engine,
     name: &str,
     slots: &[SlotToSave],
     previous: Option<&Stored>,
-    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+    plugin_extras: impl Fn(PluginKey) -> slot_presets::PluginExtras,
 ) -> Result<Stored> {
     anyhow::ensure!(
         slots.iter().any(|to_save| to_save.mode != SlotMode::Leave),
@@ -229,7 +229,7 @@ pub fn save(
                 let chain = format!("slot-{}", to_save.slot + 1);
                 let chain_dir = temp.join(&chain);
                 fs::create_dir(&chain_dir)?;
-                slot_presets::write(engine, to_save.slot, name, &chain_dir, &plugin_preset)
+                slot_presets::write(engine, to_save.slot, name, &chain_dir, &plugin_extras)
                     .with_context(|| format!("slot {}", to_save.slot + 1))?;
                 Some(SavedSlot {
                     routing: to_save.routing,

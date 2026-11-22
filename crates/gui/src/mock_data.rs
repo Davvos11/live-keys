@@ -11,7 +11,8 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
     AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
-    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow,
+    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel,
+    LearnTargetRow,
 };
 
 /// Where to write the mock data, if asked to.
@@ -119,7 +120,15 @@ slint_struct!(EffectRow {
 slint_struct!(SlotPresetRow { name, folder, count, current });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
-slint_struct!(SurfaceControlView { kind, label, x, y, width, height, value, pressed, moving, mapped });
+slint_struct!(SurfaceControlView {
+    kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target,
+});
+slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through });
+slint_struct!(LearnLevel { position, text });
+slint_struct!(LearnTargetRow {
+    name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, kept,
+    can_keep_with_scene, panel,
+});
 slint_struct!(SurfaceView { name, device, known, connected, width, height, controls });
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
@@ -130,8 +139,8 @@ slint_struct!(DrawbarCell { label, colour, level });
 slint_struct!(PanelPoolRow { index, name, cell });
 slint_struct!(SlotState {
     artwork, muted, transpose, closed_name, drawbars, cells, pool, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
-    note_high, velocity_low, velocity_high, volume_db, slot_preset_name, slot_preset_changed,
-    slot_preset_folder, slot_preset_rows,
+    note_high, velocity_low, velocity_high, volume_db, cell_learn, drawbar_learn, volume_learn, mute_learn,
+    transpose_learn, slot_preset_name, slot_preset_changed, slot_preset_folder, slot_preset_rows,
 });
 
 /// One `out property` of the `MockData` global.
@@ -150,7 +159,8 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
          import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView } from \"types.slint\";\n\n\
+         SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } \
+         from \"types.slint\";\n\n\
          export global MockData {\n",
     );
     property(&mut out, "[string]", "audio-devices", &state.get_audio_devices());
@@ -159,6 +169,9 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "[SurfaceView]", "surfaces", &state.get_surfaces());
     property(&mut out, "[MidiDeviceRow]", "surface-devices", &state.get_surface_devices());
     property(&mut out, "string", "surface-summary", &state.get_surface_summary());
+    property(&mut out, "bool", "learning", &state.get_learning());
+    property(&mut out, "LearnControl", "learn-control", &state.get_learn_control());
+    property(&mut out, "[LearnTargetRow]", "learn-rows", &state.get_learn_rows());
     property(&mut out, "[SceneRow]", "scene-rows", &state.get_scene_rows());
     property(&mut out, "int", "scene-count", &state.get_scene_count());
     property(&mut out, "string", "current-scene", &state.get_current_scene());

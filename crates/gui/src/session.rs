@@ -14,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_engine::{ChainPosition, Engine, MASTER_SLOT, PluginKey, PresetInfo};
+use live_keys_engine::{ChainPosition, Engine, MASTER_SLOT, PluginKey};
 use serde::{Deserialize, Serialize};
 
 use crate::scenes::SlotPresetRef;
@@ -94,12 +94,12 @@ fn marker() -> Option<PathBuf> {
 }
 
 /// Saves every slot (`slots`, by slot index) and the current scene.
-/// `plugin_preset` is as for [`slot_presets::save`].
+/// `plugin_extras` is as for [`slot_presets::save`].
 pub fn save(
     engine: &mut Engine,
     slots: Vec<SlotToSave>,
     current_scene: Option<CurrentSceneRef>,
-    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+    plugin_extras: impl Fn(PluginKey) -> slot_presets::PluginExtras,
 ) -> Result<()> {
     let dir = dir().context("no data folder to save the session in")?;
     fs::create_dir_all(dir.parent().context("no parent folder")?)?;
@@ -113,7 +113,7 @@ pub fn save(
             let chain = if slot == MASTER_SLOT { "master".to_string() } else { format!("slot-{}", slot + 1) };
             let chain_dir = temp.join(&chain);
             fs::create_dir(&chain_dir)?;
-            slot_presets::write(engine, slot, "Session", &chain_dir, &plugin_preset)
+            slot_presets::write(engine, slot, "Session", &chain_dir, &plugin_extras)
                 .with_context(|| chain.clone())?;
             session.slots.push(SessionSlot {
                 slot,

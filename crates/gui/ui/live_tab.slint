@@ -1,6 +1,7 @@
 import { AppState } from "globals.slint";
 import { Theme } from "theme.slint";
 import { ScenesPane } from "scenes.slint";
+import { LearnPane } from "learn.slint";
 import { SlotPanel } from "slot_panel.slint";
 
 // How many slots there are per row of the grid.
@@ -8,7 +9,8 @@ export global SlotGrid {
     out property <int> columns: 3;
 }
 
-// The scenes on the left, then the slots in a grid of `SlotGrid.columns`.
+// The scenes on the left (MIDI learn's targets while learning), then the slots
+// in a grid of `SlotGrid.columns`.
 export component LiveTab inherits Rectangle {
     // As `SlotPanel.squeeze`.
     in property <float> squeeze;
@@ -17,7 +19,10 @@ export component LiveTab inherits Rectangle {
     background: Theme.background;
 
     HorizontalLayout {
-        ScenesPane {
+        if !AppState.learning : ScenesPane {
+            width: 300px;
+        }
+        if AppState.learning : LearnPane {
             width: 300px;
         }
         VerticalLayout {

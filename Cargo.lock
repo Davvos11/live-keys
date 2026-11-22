@@ -3001,6 +3001,7 @@ dependencies = [
  "live-keys-clap-host",
  "live-keys-core",
  "live-keys-lv2-host",
+ "live-keys-surfaces",
  "live-keys-vst3-host",
  "log",
  "midir",

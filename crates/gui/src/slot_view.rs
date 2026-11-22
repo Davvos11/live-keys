@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PresetInfo};
+use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::profiles::{CellValue, Control, DrawbarColour, Panel, Target, Widget};
@@ -247,7 +247,7 @@ pub struct Closed {
 pub fn snapshot(
     engine: &mut Engine,
     slot: usize,
-    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+    plugin_extras: impl Fn(PluginKey) -> slot_presets::PluginExtras,
 ) -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .context("no data folder to keep the cleared slot in")?
@@ -255,7 +255,7 @@ pub fn snapshot(
         .join("undo")
         .join(format!("slot-{}", slot + 1));
     std::fs::create_dir_all(dir.parent().context("no parent folder")?)?;
-    slot_presets::replace_dir(&dir, |temp| slot_presets::write(engine, slot, "Undo", temp, plugin_preset))?;
+    slot_presets::replace_dir(&dir, |temp| slot_presets::write(engine, slot, "Undo", temp, plugin_extras))?;
     Ok(dir)
 }
 

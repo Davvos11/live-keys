@@ -1,0 +1,395 @@
+// MIDI learn (Penpot: "MIDI learn 2" and "3"): the targets pane over the scenes
+// pane, a target's settings, and the outline over every on-screen control that
+// can be a target. See `docs/design/midi-learn.md`.
+import { CheckBox, ScrollView } from "std-widgets.slint";
+import { AppState, AppLogic, LearnTargetRow } from "globals.slint";
+import { Theme, Icons, KButton, Segmented } from "widgets.slint";
+import { RangeSlider, SingleSlider } from "range_slider.slint";
+
+component Caption inherits Text {
+    color: Theme.text-muted;
+    font-size: Theme.small-font-size;
+}
+
+// One target's settings (a row of the pane expanded, or the popup's): its
+// mode and the mode's settings, and where the mapping is kept. `row-index` is
+// the pane's row, -1 the popup's target.
+component TargetSettings inherits VerticalLayout {
+    in property <LearnTargetRow> target;
+    in property <int> row-index;
+    // The selected control's kind: faders and knobs offer direct and
+    // mirrored, buttons toggle and momentary, pads all four.
+    property <int> kind: AppState.learn-control.kind;
+
+    spacing: 8px;
+
+    Segmented {
+        options: ["Direct", "Mirrored", "Toggle", "Momentary"];
+        current: root.target.mode <= 1 ? root.target.mode : root.target.mode - 1;
+        disabled: [root.kind == 3, root.kind == 3, root.kind <= 1, root.kind <= 1];
+        picked(index) => { AppLogic.learn-set-mode(root.row-index, index <= 1 ? index : index + 1); }
+    }
+    if root.target.mode <= 1 : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            Caption { text: "Range"; horizontal-stretch: 1; }
+            Caption { text: root.target.mode == 0 ? "\{root.target.from-text} – \{root.target.to-text}" : "\{root.target.to-text} – \{root.target.from-text}"; }
+        }
+        RangeSlider {
+            minimum: 0;
+            maximum: 100;
+            low: Math.round(root.target.from * 100);
+            high: Math.round(root.target.to * 100);
+            // Dragging sets its own values, replacing the bindings.
+            property <int> low-source: Math.round(root.target.from * 100);
+            property <int> high-source: Math.round(root.target.to * 100);
+            changed low-source => { self.low = self.low-source; }
+            changed high-source => { self.high = self.high-source; }
+            changed(low, high) => { AppLogic.learn-set-range(root.row-index, low / 100, high / 100); }
+        }
+    }
+    if root.target.mode == 3 : VerticalLayout {
+        spacing: 4px;
+        Caption { text: "Each press goes to the next level"; }
+        for level[index] in root.target.levels : HorizontalLayout {
+            spacing: 6px;
+            SingleSlider {
+                height: 24px;
+                horizontal-stretch: 1;
+                value: level.position;
+                changed(value) => { AppLogic.learn-set-level(root.row-index, index, value); }
+            }
+            Caption {
+                width: 70px;
+                text: level.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            KButton {
+                icon: Icons.close;
+                enabled: root.target.levels.length > 2;
+                clicked => { AppLogic.learn-remove-level(root.row-index, index); }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            KButton {
+                text: "+ Level";
+                clicked => { AppLogic.learn-add-level(root.row-index); }
+            }
+        }
+    }
+    if root.target.mode == 4 : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            Caption { text: "While held"; horizontal-stretch: 1; }
+            Caption { text: root.target.value-text; }
+        }
+        SingleSlider {
+            height: 24px;
+            value: root.target.value;
+            changed(value) => { AppLogic.learn-set-value(root.row-index, value); }
+        }
+        if root.kind == 2 : CheckBox {
+            text: "Velocity sensitive";
+            checked: root.target.velocity;
+            // Clicking sets `checked` itself, replacing the binding above.
+            property <bool> source: root.target.velocity;
+            changed source => { self.checked = self.source; }
+            toggled => { AppLogic.learn-set-velocity(root.row-index, self.checked); }
+        }
+    }
+    if root.target.panel >= 0 : Segmented {
+        options: ["This parameter", "This panel position"];
+        current: root.target.panel;
+        picked(index) => { AppLogic.learn-set-kept(root.row-index, index == 1 ? 1 : root.target.kept, index == 1); }
+    }
+    if root.target.can-keep-with-scene : VerticalLayout {
+        spacing: 2px;
+        Caption { text: "Mapping kept"; }
+        Segmented {
+            options: ["With the scene", "In every scene"];
+            current: root.target.kept;
+            // A panel position is the same in every scene.
+            disabled: [root.target.panel == 1, false];
+            picked(index) => { AppLogic.learn-set-kept(root.row-index, index, root.target.panel == 1); }
+        }
+    }
+}
+
+// The name, where it is, and the mode as a chip.
+component TargetHeader inherits HorizontalLayout {
+    in property <LearnTargetRow> target;
+
+    spacing: 8px;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        Text {
+            text: root.target.name;
+            color: root.target.greyed ? Theme.text-faint : Theme.text;
+            font-size: Theme.small-font-size;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.target.place;
+            color: Theme.text-faint;
+            font-size: Theme.tiny-font-size;
+            overflow: elide;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            height: 18px;
+            width: chip.preferred-width + 12px;
+            border-radius: 9px;
+            background: Theme.accent.with-alpha(0.2);
+            chip := Text {
+                text: root.target.chip;
+                color: Theme.text;
+                font-size: Theme.tiny-font-size;
+            }
+        }
+    }
+}
+
+// One target in the pane: its header, and its settings while expanded.
+component TargetRow inherits Rectangle {
+    in property <LearnTargetRow> target;
+    in property <int> index;
+    in property <bool> expanded;
+
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.expanded ? Theme.accent : Theme.control-border;
+    background: Theme.control;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+        Rectangle {
+            header-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.learn-expand(root.index); }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                TargetHeader {
+                    target: root.target;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    KButton {
+                        icon: Icons.close;
+                        clicked => { AppLogic.learn-remove(root.index); }
+                    }
+                }
+            }
+        }
+        if root.expanded : TargetSettings {
+            target: root.target;
+            row-index: root.index;
+        }
+    }
+}
+
+// The pane over the scenes while learning: the selected control and its
+// targets.
+export component LearnPane inherits Rectangle {
+    background: Theme.background;
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.divider;
+    }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "MIDI learn";
+                color: Theme.text;
+                font-size: Theme.font-size;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            KButton {
+                text: "Done";
+                active: true;
+                clicked => { AppLogic.set-learning(false); }
+            }
+        }
+        if !AppState.learn-control.selected : Text {
+            text: "Move a control on your controller, or click one in the panel below. Then click the controls it should drive: they're outlined.";
+            color: Theme.text-muted;
+            font-size: Theme.small-font-size;
+            wrap: word-wrap;
+        }
+        if AppState.learn-control.selected : Rectangle {
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.control-border;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                Text {
+                    text: AppState.learn-control.label;
+                    color: Theme.accent;
+                    font-size: 24px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: AppState.learn-control.detail;
+                    color: Theme.text-muted;
+                    font-size: Theme.small-font-size;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        // Faders and knobs: how they take over a target that's elsewhere.
+        if AppState.learn-control.selected && AppState.learn-control.kind <= 1 : VerticalLayout {
+            spacing: 2px;
+            Caption { text: "When the target is elsewhere"; }
+            Segmented {
+                options: ["Jump", "Glide", "Pick up"];
+                current: AppState.learn-control.takeover;
+                picked(index) => { AppLogic.learn-set-takeover(index); }
+            }
+        }
+        if AppState.learn-control.selected : CheckBox {
+            text: "Also pass to the slots";
+            checked: AppState.learn-control.pass-through;
+            property <bool> source: AppState.learn-control.pass-through;
+            changed source => { self.checked = self.source; }
+            toggled => { AppLogic.learn-set-pass-through(self.checked); }
+        }
+        if AppState.learn-control.selected : Text {
+            text: AppState.learn-rows.length == 0
+                ? "No targets yet: click an outlined control to add it, right-click one to set it up first."
+                : "Click an outlined control to add or remove it; click a target below for its settings.";
+            color: Theme.text-faint;
+            font-size: Theme.small-font-size;
+            wrap: word-wrap;
+        }
+        if AppState.learn-control.selected : ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 6px;
+                alignment: start;
+                for row[index] in AppState.learn-rows : TargetRow {
+                    target: row;
+                    index: index;
+                    expanded: index == AppState.learn-expanded;
+                }
+            }
+        }
+        if !AppState.learn-control.selected : Rectangle { vertical-stretch: 1; }
+        if AppState.learn-control.selected : HorizontalLayout {
+            alignment: start;
+            KButton {
+                text: "Remove all targets";
+                enabled: AppState.learn-rows.length > 0;
+                clicked => { AppLogic.learn-remove-all(); }
+            }
+        }
+    }
+}
+
+// Laid over a control that can be a target while learning: outlined, filled
+// and badged with the selected control's label if it's one of its targets.
+// A click adds or removes it; a right-click sets it up (the popup).
+// `state`: 1 a possible target, 2 the selected control's.
+export component LearnTarget inherits Rectangle {
+    in property <int> state;
+    in property <int> kind;
+    in property <int> slot;
+    in property <int> index;
+
+    border-radius: 4px;
+    border-width: root.state == 2 ? 2px : 1px;
+    border-color: root.state == 2 ? Theme.accent : Theme.accent.with-alpha(area.has-hover ? 1 : 0.5);
+    background: root.state == 2 ? Theme.accent.with-alpha(0.2) : area.has-hover ? Theme.accent.with-alpha(0.12) : transparent;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { AppLogic.learn-click(root.kind, root.slot, root.index); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                AppLogic.learn-menu(root.kind, root.slot, root.index);
+                popup.show();
+            }
+        }
+        // The control under it mustn't change while learning.
+        scroll-event(event) => { accept }
+    }
+    if root.state == 2 && AppState.learn-control.label != "" : Rectangle {
+        x: root.width - self.width + 4px;
+        y: -6px;
+        width: badge.preferred-width + 8px;
+        height: 14px;
+        border-radius: 7px;
+        background: Theme.accent;
+        badge := Text {
+            text: AppState.learn-control.label;
+            color: Theme.on-accent;
+            font-size: 9px;
+            font-weight: 600;
+        }
+    }
+
+    popup := PopupWindow {
+        x: root.width + 4px;
+        y: 0;
+        width: 300px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        Rectangle {
+            background: Theme.background;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.control-border;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000060;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 10px;
+                TargetHeader { target: AppState.learn-popup; }
+                if !AppState.learn-control.selected : Text {
+                    text: "Select a control first: move it, or click it in the panel below.";
+                    color: Theme.text-muted;
+                    font-size: Theme.small-font-size;
+                    wrap: word-wrap;
+                }
+                if AppState.learn-control.selected : TargetSettings {
+                    target: AppState.learn-popup;
+                    row-index: -1;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 6px;
+                    if AppState.learn-control.selected && !AppState.learn-popup-assigned : KButton {
+                        text: "Assign to \{AppState.learn-control.label}";
+                        active: true;
+                        clicked => { AppLogic.learn-assign-popup(); }
+                    }
+                    if AppState.learn-popup-assigned : KButton {
+                        text: "Remove";
+                        clicked => {
+                            AppLogic.learn-remove(-1);
+                            popup.close();
+                        }
+                    }
+                    KButton {
+                        text: "Close";
+                        clicked => { popup.close(); }
+                    }
+                }
+            }
+        }
+    }
+}

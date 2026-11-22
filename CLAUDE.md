@@ -83,6 +83,7 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, master volume + mute + transpose, the metronome's tempo, time
 # signature, subdivision and volume, the control surfaces panel's devices and whether it's collapsed,
+# MIDI learn's mappings kept in every scene and its surface controls' settings,
 # and per slot: MIDI inputs + filter, volume), saved as they change. User control surfaces are
 # ~/.local/share/live-keys/surfaces/*.json.
 # The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
@@ -329,7 +330,9 @@ behind format-agnostic cores:
   `rtrb` rings of fixed-size `PortEvent`s (an atom body up to `PORT_EVENT_BYTES`, its type
   and port index; larger ones are dropped), whose control-thread end (`UiChannel`) is taken
   once with `Lv2Plugin::take_ui_channel`. `process` puts the GUI's atoms into the matching atom
-  input at frame 0, ahead of the block's MIDI. Some GUIs talk to their DSP only this way —
+  input at frame 0, ahead of the block's MIDI. A plugin with atom inputs has a second input
+  ring too, whose producer `Lv2Plugin::take_control_channel` hands out once (MIDI learn's
+  mapping thread sends setBfree's control messages on it); its atoms follow the GUI's. Some GUIs talk to their DSP only this way —
   setBfree has no control ports at all: settings go GUI → `control` input, and its state and
   lit keys come back on `notify` (`ui:portNotification`). Atom buffers are
   `MIDI_EVENT_BUFFER_BYTES`, or a port's `rsz:minimumSize` if larger (x42-eq wants 4320). CV
@@ -563,8 +566,9 @@ behind format-agnostic cores:
     `[Option<BoxedPlugin>; 1 + MAX_EFFECTS]` (index 0 = instrument, effects contiguous from 1),
     the slot's `MidiRouter`, pre-allocated MIDI buffers, and its gain. `Rack::apply` takes one
     `RackCommand` (`SetInstrument`, `InsertEffect`/`RemoveEffect`/`MoveEffect` with a
-    `Section`, `Param { slot, position: ChainPosition, .. }`, `Filter`, `Gain`, `MasterGain`,
-    `Metronome`, `Panic`) —
+    `Section`, `Param { slot, position: ChainPosition, .. }`, `Filter`, `Gain`/`Mute`,
+    `MasterGain`/`MasterMute` — volume and mute are apart, so a volume set from elsewhere can't
+    unmute —, `Metronome`, `Panic`) —
     insert/remove/move are `rotate_left`/`rotate_right` on the section's slice of the fixed
     array, so no allocation; out-of-range indices are ignored rather than trusted (a panic
     would kill the audio thread). `Rack::render` drains MIDI, runs it through each slot's
@@ -611,9 +615,31 @@ behind format-agnostic cores:
     away; both return the ports present. So a missing device never fails a plugin load.
     **Control surfaces**: `Engine::set_surface_devices(devices)` names the devices the GUI's
     surfaces panel shows; they're connected too (on an input or not), and the callback also
-    sends their events (`SurfaceEvent`: device name + `MidiEvent`) down a bounded `mpsc`
-    channel (full = dropped), which `Engine::take_surface_events` drains. Not the audio path:
-    MIDI learn's mapping thread will take this channel over (`docs/design/midi-learn.md`).
+    sends their events (`SurfaceEvent`: device name + `MidiEvent`) to the mapping thread
+    (below; a bounded `mpsc` channel, full = dropped). Events of mapped controls are
+    **claimed** (`Claims`: per device, atomic bits per channel for CCs, notes, pitch bend and
+    channel pressure) and don't reach the slots, unless their control passes through.
+  - **MIDI learn** (`docs/design/midi-learn.md`): `mapping.rs` is the logic alone, unit-tested
+    — `Mappings` from surfaces and `ControlSetup`s (a control, its `Takeover` — jump, glide,
+    pick up —, glide time, pass-through, and `Link`s to targets with a `Mode`: a range —
+    mirrored is from > to —, toggle levels, momentary), all in positions 0..1: `event` turns
+    a surface event into target positions (`take_writes`), `set_position` is a target moved
+    elsewhere (links whose control is elsewhere lose it: pick up waits for a crossing, glide
+    slides over the glide time, `tick` moving it on), and `take_waiting` reports faders and
+    knobs whose target is elsewhere, for the GUI's ghost. `mapper.rs` runs it on the
+    `midi-mapping` thread, which blocks on its input channel (2 ms ticks while gliding):
+    `Engine::set_mappings(MapperSetup)` (surfaces, controls, `TargetSpec`s: an `Output` —
+    `Param { key, param }`, `Setbfree { key, function }`, `Volume { slot }`, or `Gui` — a
+    `ToValue` closure from position to value, and the position now) sets the claims and
+    hands the setup over, returning its generation; a target's values go out at once —
+    parameters and volumes as `MapperCommand`s on a ring of their own to the audio thread
+    (`SharedMapperTx`, set while a stream runs; the `Rack` resolves a parameter's
+    `PluginKey` itself, so it can't land on a plugin that replaced it), setBfree functions
+    through `SetbfreeSink` on the plugin's second atom ring — and as `MapperReport`s (every
+    surface event, `Applied`, `Waiting`) to `Engine::take_mapper_reports`, which records
+    applied values (`param_value`, setBfree's record, the slots' gains; a VST3 controller is
+    told) before handing them on. `Engine::set_mapped_position` tells the thread of a target
+    moved elsewhere.
   - `engine.rs` — the control side. `Engine::start` builds the MIDI/command/retired ring
     buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream
     (`build_stream`) whose callback is just "apply pending commands, then `rack.render`"
@@ -640,7 +666,8 @@ behind format-agnostic cores:
     stays valid however the chain is reordered; param changes and plugin GUIs address plugins by
     key, resolved to `(slot, ChainPosition)` on the control thread at send time — consistent
     with the queue order since the mirror is updated as commands are queued. Per-slot
-    `SlotSettings` (filter + linear gain, set via `set_slot_filter`/`set_slot_gain`) belong to
+    `SlotSettings` (filter, linear gain and mute, set via `set_slot_filter`/`set_slot_gain`/
+    `set_slot_muted`) belong to
     the slot, not its plugins: the engine keeps them even while stopped or empty and seeds each
     new stream with them.
   A plugin taken out of a chain is never dropped on the audio thread — it's pushed onto a
@@ -812,17 +839,47 @@ behind format-agnostic cores:
   44 px row whose button shows it expanded over the bottom of the slots. Whatever the panel
   takes beyond the 995 px the slots need, the slots give up as padding: `SlotPanel.squeeze`
   (0..1, through `LiveTab`) shrinks the header by up to 30 px and the first tab's padding and
-  spacing. F11 (a `KeyBinding` in a `FocusScope` the window forwards focus to) and the button
-  at the end of the sidebar's transpose row toggle `full-screen`. **The surfaces panel**
+  spacing. F11 and the button at the end of the sidebar's transpose row toggle `full-screen`;
+  Escape leaves MIDI learn — both in the `key-pressed` of a `FocusScope` around the whole
+  window (key events go up from the focused element through its parents; `KeyBinding`s in it
+  didn't fire), which gets the focus back when learn mode starts or stops. **The surfaces panel**
   (`src/surfaces.rs`: `SurfacesUi`): the devices shown are `AppConfig.surfaces.devices`, or,
   until the user picks (`None`), every device plugged in that has a known surface; a
   checklist like a MIDI input's (`AppState.surface-devices`, `toggle-surface-device`) picks
   them, and `sync_surfaces` hands the list to `Engine::set_surface_devices`. Each shown device
   is a `SurfaceView` of `SurfaceControlView`s (kind, label, cell, last value, pressed/moving),
   drawn by `SurfaceDrawing` (`SurfaceFader`/`Knob`/`Pad`/`Button`), or a note that no surface
-  is known for it; the poll timer feeds `Engine::take_surface_events` to `SurfacesUi::apply`
-  (`Surface::read`; a pad's channel pressure goes to the held pads) and `tick` (faders/knobs
-  stop showing as moving after 250 ms; `AppState.surface-activity` lights the row's dot). **Look:** the Live view and sidebar follow the Penpot
+  is known for it; the poll timer's `learn::Learn::poll` feeds the surface events of
+  `Engine::take_mapper_reports` to `SurfacesUi::apply` (`Surface::read`; a pad's channel
+  pressure goes to the held pads) and `tick` (faders/knobs stop showing as moving after
+  250 ms; `AppState.surface-activity` lights the row's dot). **MIDI learn** (see
+  `docs/design/midi-learn.md`): `src/mappings.rs` (`MappingsUi`, in `Rack::mappings`) keeps
+  the mappings — with the scene: `SceneMapping`s per plugin key, saved in each plugin's
+  `PluginState.mappings` in `slot.json` (slot presets, scenes, the session, undo; through
+  `Rack::plugin_extras`) and replaced by `load_slot_preset`; in every scene:
+  `GlobalMapping`s (`RackTarget`: a plugin by slot and id, a panel position, a slot's or the
+  master's volume, mute or transposition, the metronome's volume, play or tempo) and
+  `ControlSettings` per `surface/label`, in `AppConfig.surfaces` (`MappingsUi::store`
+  writes them back) — resolves them against what's loaded (`Concrete`; a plugin target's
+  conversions go through its panel control, `profiles::Control::to_value`/`position`/
+  `steps`/`text_at`, or a plain one) into the engine's setup (`build_setup`; not handed over
+  if it does what the last did, so takeover state survives; rebuilt when `setup_dirty`, set
+  by `refresh_slot`, panel rebuilds, surface changes and edits), and runs learn mode: the
+  selected control (clicked in the panel — `learn-select` — or moved), the targets pane's
+  rows (`LearnTargetRow`s), the right-click popup (a draft until "Assign"), and `LearnFlags`
+  — per on-screen target 0/1/2 (not a target, possible, the selected control's), in
+  `SlotState`'s `cell-learn`/`drawbar-learn`/`volume-learn`/`mute-learn`/`transpose-learn`
+  and `AppState`'s master and metronome fields. `src/learn.rs` (`Learn`) is the glue: each
+  poll it applies the reports (`Applied`: shows a plugin value like a mouse edit would, sets
+  a volume in the config without sending it again, and does mute/transpose/metronome
+  through their `AppLogic` handlers; `Waiting`: the panel's ghost), rebuilds the setup if
+  needed, tells the engine of targets moved elsewhere (`sync_positions`, against what was
+  last seen), and refreshes the view; it also handles every `learn-*` callback.
+  `ui/learn.slint`: `LearnPane` (over the scenes pane while `AppState.learning`),
+  `TargetSettings` (mode, range, levels, momentary value, kept with the scene or in every
+  scene, this parameter or this panel position), and `LearnTarget`, laid over each target
+  widget while learning (outlined; filled and badged when the selected control's; click
+  adds or removes, right-click opens its popup). **Look:** the Live view and sidebar follow the Penpot
   design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
   greys in dark mode, a derived light variant otherwise — following `Palette.color-scheme` —
   with `Palette.accent-background`/`-foreground` as the primary colour, so the style's accent
@@ -1272,6 +1329,8 @@ The audio callback must never allocate, lock, or perform blocking syscalls. This
   iterators straight through to the underlying plugin API.
 - All buffers (MIDI batch, per-channel audio scratch) are pre-allocated outside the closure
   passed to `cpal`'s `build_output_stream`.
+- MIDI learn's values come on a ring of their own (`MapperCommand`, drained after the
+  engine's commands), so the mapping thread never shares the engine's producer.
 - Plugins enter the callback already instantiated (boxed on the control thread) and leave it
   via the retired ring buffer, so neither construction nor teardown runs on the audio thread.
   A new stream's callback picks its `AudioState` up with one `try_lock` (never waits; nobody
@@ -1432,7 +1491,8 @@ extension), recommended third-party plugins and their install window — are in
 `docs/design/plugins.md` (a draft; check it before working on any of these, and keep it in step
 with what's decided). Ideas for our own instruments (the Salamander piano first) are in
 `docs/design/own-plugins.md`. MIDI learn — control surfaces in a bottom panel, hardware controls mapped to
-on-screen targets — is designed in `docs/design/midi-learn.md` (a draft, not built yet).
+on-screen targets — is designed in `docs/design/midi-learn.md` (phases 1 and 2 built: the
+panel, mappings and learn mode; the rest still a draft).
 
 ## GUI
 

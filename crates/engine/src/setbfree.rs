@@ -13,7 +13,9 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::sync::{Arc, Mutex};
 
+use live_keys_core::Producer;
 use live_keys_lv2_host::{PORT_EVENT_BYTES, PortEvent, livi};
 
 /// setBfree's LV2 URI.
@@ -78,21 +80,57 @@ pub(crate) struct Setbfree {
     /// The `notify` output's port index.
     notify_port: u32,
     values: HashMap<String, u8>,
+    /// The mapping thread's way in (see [`SetbfreeSink`]).
+    sink: Option<SetbfreeSink>,
+}
+
+/// Sends control messages to one setBfree instance from the mapping thread,
+/// through the plugin's second atom channel
+/// ([`Lv2Plugin::take_control_channel`](live_keys_lv2_host::Lv2Plugin::take_control_channel)).
+#[derive(Clone)]
+pub struct SetbfreeSink {
+    urids: Urids,
+    control_port: u32,
+    /// Only the mapping thread locks it.
+    producer: Arc<Mutex<Producer<PortEvent>>>,
+}
+
+impl SetbfreeSink {
+    /// Queues `function` = `value` for the plugin's next block; `false` if
+    /// the queue is full.
+    pub(crate) fn send(&self, function: &str, value: u8) -> bool {
+        let Some(event) = control_message(self.urids, self.control_port, function, value.min(127)) else {
+            return false;
+        };
+        self.producer.lock().is_ok_and(|mut producer| producer.push(event).is_ok())
+    }
 }
 
 impl Setbfree {
     /// For a loaded plugin, if it's setBfree.
-    pub(crate) fn new(plugin: &livi::Plugin, features: &livi::Features) -> Option<Self> {
+    /// `control` is the plugin's second atom channel, for the mapping thread.
+    pub(crate) fn new(
+        plugin: &livi::Plugin,
+        features: &livi::Features,
+        control: Option<Producer<PortEvent>>,
+    ) -> Option<Self> {
         if plugin.uri() != SETBFREE_URI {
             return None;
         }
         let port = |symbol: &str| Some(plugin.ports().find(|port| port.symbol == symbol)?.index.0 as u32);
+        let urids = Urids::new(features);
+        let control_port = port("control")?;
         Some(Self {
-            urids: Urids::new(features),
-            control_port: port("control")?,
+            urids,
+            control_port,
             notify_port: port("notify")?,
             values: HashMap::new(),
+            sink: control.map(|producer| SetbfreeSink { urids, control_port, producer: Arc::new(Mutex::new(producer)) }),
         })
+    }
+
+    pub(crate) fn sink(&self) -> Option<SetbfreeSink> {
+        self.sink.clone()
     }
 
     /// The empty `sb3:uiinit` object that starts reporting (and a dump).
@@ -108,8 +146,15 @@ impl Setbfree {
     /// ignores, also gets the `rotary.speed-select` it derives (the GUI's
     /// horn and drum levers).
     pub(crate) fn set(&mut self, function: &str, value: u8) -> Option<(PortEvent, Vec<PortEvent>)> {
+        let to_plugin = self.message(self.control_port, function, value.min(127))?;
+        Some((to_plugin, self.record(function, value)?))
+    }
+
+    /// Records `function` = `value` as sent (by the mapping thread, through
+    /// the [`SetbfreeSink`]); returns the messages for its GUI, as
+    /// [`Setbfree::set`].
+    pub(crate) fn record(&mut self, function: &str, value: u8) -> Option<Vec<PortEvent>> {
         let value = value.min(127);
-        let to_plugin = self.message(self.control_port, function, value)?;
         let mut for_gui = vec![self.message(self.notify_port, function, value)?];
         self.values.insert(function.to_string(), value);
         if function == SPEED_PRESET {
@@ -117,17 +162,12 @@ impl Setbfree {
             for_gui.push(self.message(self.notify_port, SPEED_SELECT, select)?);
             self.values.insert(SPEED_SELECT.to_string(), select);
         }
-        Some((to_plugin, for_gui))
+        Some(for_gui)
     }
 
     /// A control message for `port`.
     fn message(&self, port: u32, function: &str, value: u8) -> Option<PortEvent> {
-        let mut writer = ObjectWriter::new(port, self.urids.object, self.urids.controlmsg);
-        let mut key = function.as_bytes().to_vec();
-        key.push(0);
-        writer.property(self.urids.controlkey, self.urids.string, &key)?;
-        writer.property(self.urids.controlval, self.urids.int, &i32::from(value).to_ne_bytes())?;
-        Some(writer.finish())
+        control_message(self.urids, port, function, value)
     }
 
     pub(crate) fn value(&self, function: &str) -> Option<u8> {
@@ -181,6 +221,16 @@ impl Setbfree {
         }
         Some((key?, value.unwrap_or(0)))
     }
+}
+
+/// A control message setting `function` to `value`, for `port`.
+fn control_message(urids: Urids, port: u32, function: &str, value: u8) -> Option<PortEvent> {
+    let mut writer = ObjectWriter::new(port, urids.object, urids.controlmsg);
+    let mut key = function.as_bytes().to_vec();
+    key.push(0);
+    writer.property(urids.controlkey, urids.string, &key)?;
+    writer.property(urids.controlval, urids.int, &i32::from(value).to_ne_bytes())?;
+    Some(writer.finish())
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {

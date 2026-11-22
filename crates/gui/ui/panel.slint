@@ -7,6 +7,7 @@ import { ListView } from "std-widgets.slint";
 import { AppState, PanelCell, PanelPoolRow, DrawbarCell } from "globals.slint";
 import { Theme, ListItem, TextField, Icons } from "widgets.slint";
 import { LabelledKnob } from "knob.slint";
+import { LearnTarget } from "learn.slint";
 
 // The design's colours for these controls beyond the theme's: the dark wells a
 // switch's light and a lever's track sit in, and the drawbars.
@@ -300,6 +301,10 @@ export component Drawbar inherits Rectangle {
 // The fixed section's drawbars, spread across the width.
 export component DrawbarSection inherits Rectangle {
     in property <[DrawbarCell]> drawbars;
+    // MIDI learn: each drawbar's state (see `SlotState.drawbar-learn`), and
+    // the slot's index.
+    in property <[int]> learn;
+    in property <int> slot-index;
     callback set-level(/* drawbar */ int, /* level */ int);
 
     // Spaced evenly: the same gap between the bars and at either end.
@@ -316,6 +321,18 @@ export component DrawbarSection inherits Rectangle {
         label: bar.label;
         set-level(level) => { root.set-level(index, level); }
     }
+    if AppState.learning : Rectangle {
+        for bar[index] in root.drawbars : LearnTarget {
+            x: root.gap + index * (root.bar-width + root.gap) - 3px;
+            y: -3px;
+            width: root.bar-width + 6px;
+            height: root.height + 6px;
+            state: root.learn[index];
+            kind: 1;
+            slot: root.slot-index;
+            index: index;
+        }
+    }
 }
 
 // One cell of the row: its control by kind, and its context menu (right-click;
@@ -324,6 +341,10 @@ export component PanelCellView inherits Rectangle {
     in property <PanelCell> cell;
     in property <int> cell-index;
     in property <[PanelPoolRow]> pool;
+    // MIDI learn: the cell's state (see `SlotState.cell-learn`), and the
+    // slot's index.
+    in property <int> learn;
+    in property <int> slot-index;
     callback set-position(/* 0..1 */ float);
     callback set-on(bool);
     callback set-index(int);
@@ -417,6 +438,14 @@ export component PanelCellView inherits Rectangle {
             }
         }
     }
+    if AppState.learning && root.learn > 0 : LearnTarget {
+        width: 100%;
+        height: 100%;
+        state: root.learn;
+        kind: 0;
+        slot: root.slot-index;
+        index: root.cell-index;
+    }
 }
 
 // "More parameters…": a search over every parameter of the instrument
@@ -481,6 +510,9 @@ export component PanelControls inherits Rectangle {
     in property <[PanelPoolRow]> pool;
     // One straight row (a panel with drawbars).
     in property <bool> single-row;
+    // MIDI learn: each cell's state, and the slot's index.
+    in property <[int]> learn;
+    in property <int> slot-index;
     callback set-position(/* cell */ int, /* 0..1 */ float);
     callback set-on(/* cell */ int, bool);
     callback set-index(/* cell */ int, int);
@@ -509,6 +541,8 @@ export component PanelControls inherits Rectangle {
         cell: cell;
         cell-index: index;
         pool: root.pool;
+        learn: root.learn[index];
+        slot-index: root.slot-index;
         set-position(position) => { root.set-position(index, position); }
         set-on(on) => { root.set-on(index, on); }
         set-index(option) => { root.set-index(index, option); }

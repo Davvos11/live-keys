@@ -47,18 +47,23 @@ pub struct SurfacesConfig {
     pub devices: Option<Vec<String>>,
     /// Collapsed to one row by the user.
     pub collapsed: bool,
+    /// MIDI-learn mappings kept in every scene.
+    pub mappings: Vec<crate::mappings::GlobalMapping>,
+    /// Settings of surface controls that have any, by `surface/label`
+    /// (`ControlRef::key`).
+    pub controls: std::collections::BTreeMap<String, crate::mappings::ControlSettings>,
 }
 
 impl AppConfig {
-    /// The master output's linear gain.
+    /// The master output's volume as a linear gain (muting is apart).
     pub fn master_gain(&self) -> f32 {
-        gain(self.master_volume_db, self.master_muted)
+        gain(self.master_volume_db)
     }
 }
 
-/// Linear gain for `volume_db`, or silence while muted or at the bottom.
-fn gain(volume_db: f32, muted: bool) -> f32 {
-    if muted || volume_db <= MIN_VOLUME_DB { 0.0 } else { 10f32.powf(volume_db / 20.0) }
+/// Linear gain for `volume_db`: silence at the bottom.
+pub fn gain(volume_db: f32) -> f32 {
+    if volume_db <= MIN_VOLUME_DB { 0.0 } else { 10f32.powf(volume_db / 20.0) }
 }
 
 /// One MIDI input: the devices feeding it.
@@ -168,9 +173,9 @@ impl SlotConfig {
         }
     }
 
-    /// Linear gain for [`SlotConfig::volume_db`], or silence while muted.
+    /// Linear gain for [`SlotConfig::volume_db`] (muting is apart).
     pub fn gain(&self) -> f32 {
-        gain(self.volume_db, self.muted)
+        gain(self.volume_db)
     }
 }
 

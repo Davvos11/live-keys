@@ -9,7 +9,7 @@ use live_keys_core::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::engine::{MASTER_SLOT, SLOT_COUNT, SlotSettings};
+use crate::engine::{MASTER_SLOT, PluginKey, SLOT_COUNT, SlotSettings};
 use crate::metronome::{Click, MetronomeSettings};
 use crate::midi::RoutedMidi;
 
@@ -90,21 +90,26 @@ pub enum ChainPosition {
 /// chain as it will be when the command is applied; the control side mirrors every
 /// change to know that.
 pub(crate) enum RackCommand {
-    SetInstrument { slot: usize, plugin: Option<BoxedPlugin> },
-    InsertEffect { slot: usize, section: Section, index: usize, plugin: BoxedPlugin },
+    /// `key` is the plugin's (ignored without one).
+    SetInstrument { slot: usize, key: PluginKey, plugin: Option<BoxedPlugin> },
+    InsertEffect { slot: usize, section: Section, index: usize, key: PluginKey, plugin: BoxedPlugin },
     RemoveEffect { slot: usize, section: Section, index: usize },
     MoveEffect { slot: usize, section: Section, from: usize, to: usize },
     Param { slot: usize, position: ChainPosition, change: ParamChange },
     Filter { slot: usize, filter: MidiFilter },
+    /// The slot's volume as a linear gain; muting is apart, so a volume set
+    /// from elsewhere (a mapped fader) can't unmute it.
     Gain { slot: usize, gain: f32 },
+    Mute { slot: usize, muted: bool },
     /// Takes the plugin at `position` out of the chain, leaving its place empty
     /// (the chain skips it), and hands it to the control thread for work that
     /// mustn't overlap its processing (LV2 state save/restore).
     Lend { slot: usize, position: ChainPosition },
     /// Puts a lent plugin back in its place.
     Return { slot: usize, position: ChainPosition, plugin: BoxedPlugin },
-    /// The master output's linear gain (0 when muted).
+    /// The master output's volume as a linear gain.
     MasterGain(f32),
+    MasterMute(bool),
     Metronome(MetronomeSettings),
     /// Every slot's plugins get [`PANIC`], and their routers forget held notes.
     Panic,
@@ -113,12 +118,24 @@ pub(crate) enum RackCommand {
     Detach,
 }
 
+/// A value from the mapping thread (MIDI learn), on a queue of its own (see
+/// `crate::mapper`). Plugins are addressed by key, resolved here, so a value
+/// can't land on whatever replaced its plugin, whichever queue is drained first.
+pub(crate) enum MapperCommand {
+    Param { key: PluginKey, change: ParamChange },
+    /// A slot's volume ([`MASTER_SLOT`]: the master's) as a linear gain.
+    Volume { slot: usize, gain: f32 },
+}
+
 /// One slot as the audio callback sees it.
 struct SlotRuntime {
     /// Contiguous from `[0]`, so a removal shifts the ones after it down.
     midi_chain: [Option<BoxedPlugin>; MAX_MIDI_EFFECTS],
     /// `[0]` is the instrument; audio effects follow contiguously from `[1]`.
     chain: [Option<BoxedPlugin>; CHAIN_LEN],
+    /// The keys of `midi_chain`'s and `chain`'s plugins, moved along with them.
+    midi_keys: [Option<PluginKey>; MAX_MIDI_EFFECTS],
+    keys: [Option<PluginKey>; CHAIN_LEN],
     router: MidiRouter,
     /// This callback's MIDI after `router`, rebuilt every callback.
     midi: Vec<MidiEvent>,
@@ -132,7 +149,9 @@ struct SlotRuntime {
     /// Gain applied at the end of the last rendered block; each block ramps from
     /// here to `target_gain` so fader moves don't click.
     gain: f32,
+    /// The volume; the block ramps to it, or to 0 while `muted`.
     target_gain: f32,
+    muted: bool,
 }
 
 impl SlotRuntime {
@@ -144,11 +163,26 @@ impl SlotRuntime {
         }
     }
 
-    fn section_mut(&mut self, section: Section) -> &mut [Option<BoxedPlugin>] {
+    /// A section's plugins and their keys.
+    fn section_mut(&mut self, section: Section) -> (&mut [Option<BoxedPlugin>], &mut [Option<PluginKey>]) {
         match section {
-            Section::Midi => &mut self.midi_chain,
-            Section::Audio => &mut self.chain[1..],
+            Section::Midi => (&mut self.midi_chain, &mut self.midi_keys),
+            Section::Audio => (&mut self.chain[1..], &mut self.keys[1..]),
         }
+    }
+
+    /// The plugin with `key`, wherever it is in the chain.
+    fn plugin_by_key(&mut self, key: PluginKey) -> Option<&mut BoxedPlugin> {
+        if let Some(index) = self.keys.iter().position(|&k| k == Some(key)) {
+            return self.chain[index].as_mut();
+        }
+        let index = self.midi_keys.iter().position(|&k| k == Some(key))?;
+        self.midi_chain[index].as_mut()
+    }
+
+    /// Where the gain ramps to.
+    fn target(&self) -> f32 {
+        if self.muted { 0.0 } else { self.target_gain }
     }
 
     fn place_mut(&mut self, position: ChainPosition) -> Option<&mut Option<BoxedPlugin>> {
@@ -268,6 +302,7 @@ pub(crate) struct Rack {
     /// The master gain at the end of the last block, and where it's heading.
     master_gain: f32,
     master_target: f32,
+    master_muted: bool,
     click: Click,
     midi_batch: Vec<RoutedMidi>,
     /// Plugins taken out of a chain, handed back to the control thread to drop —
@@ -285,6 +320,7 @@ impl Rack {
     pub fn new(
         settings: &[SlotSettings; SLOT_COUNT],
         master_gain: f32,
+        master_muted: bool,
         click: Click,
         retired_tx: Producer<BoxedPlugin>,
         lent_tx: Producer<BoxedPlugin>,
@@ -299,18 +335,22 @@ impl Rack {
                 SlotRuntime {
                     midi_chain: Default::default(),
                     chain: Default::default(),
+                    midi_keys: Default::default(),
+                    keys: Default::default(),
                     router: MidiRouter::new(settings.filter),
                     // Room for a full callback's input plus `PANIC`.
                     midi: Vec::with_capacity(midi_capacity + PANIC.len()),
                     midi_scratch: Vec::with_capacity(midi_capacity + PANIC.len()),
                     reset_notes: &[],
                     panic: false,
-                    gain: settings.gain,
+                    gain: if settings.muted { 0.0 } else { settings.gain },
                     target_gain: settings.gain,
+                    muted: settings.muted,
                 }
             }),
-            master_gain,
+            master_gain: if master_muted { 0.0 } else { master_gain },
             master_target: master_gain,
+            master_muted,
             click,
             midi_batch: Vec::with_capacity(midi_capacity),
             retired_tx,
@@ -343,16 +383,18 @@ impl Rack {
         match command {
             // The callback's business; never gets here.
             RackCommand::Detach => {}
-            RackCommand::SetInstrument { slot, plugin } => {
+            RackCommand::SetInstrument { slot, key, plugin } => {
                 let Some(runtime) = self.slots.get_mut(slot) else {
                     return;
                 };
                 // The new instrument never got the old one's note-ons.
                 runtime.router.clear_held();
+                runtime.keys[0] = plugin.is_some().then_some(key);
                 let old = std::mem::replace(&mut runtime.chain[0], plugin);
                 self.retire(old);
             }
             RackCommand::MasterGain(gain) => self.master_target = gain,
+            RackCommand::MasterMute(muted) => self.master_muted = muted,
             RackCommand::Metronome(settings) => self.click.set(settings),
             RackCommand::Panic => {
                 for runtime in &mut self.slots[..SLOT_COUNT] {
@@ -365,15 +407,18 @@ impl Rack {
                 slot,
                 section,
                 index,
+                key,
                 plugin,
             } => {
                 let Some(runtime) = self.slots.get_mut(slot) else {
                     return self.retire(Some(plugin));
                 };
-                let chain = runtime.section_mut(section);
+                let (chain, keys) = runtime.section_mut(section);
                 if index < chain.len() && chain[chain.len() - 1].is_none() {
                     chain[index..].rotate_right(1);
                     chain[index] = Some(plugin);
+                    keys[index..].rotate_right(1);
+                    keys[index] = Some(key);
                     runtime.reset_notes_if(section == Section::Midi);
                 } else {
                     self.retire(Some(plugin));
@@ -387,12 +432,14 @@ impl Rack {
                 let Some(runtime) = self.slots.get_mut(slot) else {
                     return;
                 };
-                let chain = runtime.section_mut(section);
+                let (chain, keys) = runtime.section_mut(section);
                 if index >= chain.len() {
                     return;
                 }
                 let old = chain[index].take();
                 chain[index..].rotate_left(1);
+                keys[index] = None;
+                keys[index..].rotate_left(1);
                 runtime.reset_notes_if(section == Section::Midi);
                 self.retire(old);
             }
@@ -405,12 +452,14 @@ impl Rack {
                 let Some(runtime) = self.slots.get_mut(slot) else {
                     return;
                 };
-                let chain = runtime.section_mut(section);
+                let (chain, keys) = runtime.section_mut(section);
                 if from < chain.len() && to < chain.len() {
                     if from < to {
                         chain[from..=to].rotate_left(1);
+                        keys[from..=to].rotate_left(1);
                     } else {
                         chain[to..=from].rotate_right(1);
+                        keys[to..=from].rotate_right(1);
                     }
                     runtime.reset_notes_if(section == Section::Midi);
                 }
@@ -438,6 +487,11 @@ impl Rack {
                     runtime.target_gain = gain;
                 }
             }
+            RackCommand::Mute { slot, muted } => {
+                if let Some(runtime) = self.slots.get_mut(slot) {
+                    runtime.muted = muted;
+                }
+            }
             RackCommand::Lend { slot, position } => {
                 let Some(place) = self.slots.get_mut(slot).and_then(|runtime| runtime.place_mut(position))
                 else {
@@ -463,6 +517,24 @@ impl Rack {
                 match runtime.place_mut(position) {
                     Some(place) if place.is_none() => *place = Some(plugin),
                     _ => self.retire(Some(plugin)),
+                }
+            }
+        }
+    }
+
+    /// Applies a value from the mapping thread; one for a plugin that's gone
+    /// (removed, or lent meanwhile) is dropped.
+    pub fn apply_mapped(&mut self, command: MapperCommand) {
+        match command {
+            MapperCommand::Param { key, change } => {
+                if let Some(plugin) = self.slots.iter_mut().find_map(|runtime| runtime.plugin_by_key(key)) {
+                    plugin.set_param(change.param_id, change.value);
+                }
+            }
+            MapperCommand::Volume { slot, gain } if slot == MASTER_SLOT => self.master_target = gain,
+            MapperCommand::Volume { slot, gain } => {
+                if let Some(runtime) = self.slots[..SLOT_COUNT].get_mut(slot) {
+                    runtime.target_gain = gain;
                 }
             }
         }
@@ -517,8 +589,9 @@ impl Rack {
                 };
                 let output_stage = runtime.chain[last].as_deref().unwrap();
                 let output_channels = output_stage.audio_output_count();
+                let target_gain = runtime.target();
                 if output_channels > 0 {
-                    let gain_step = (runtime.target_gain - runtime.gain) / frames as f32;
+                    let gain_step = (target_gain - runtime.gain) / frames as f32;
                     let mut peak = 0.0f32;
                     for channel in 0..channels {
                         let rendered = output_stage.audio_output(channel % output_channels);
@@ -533,7 +606,7 @@ impl Rack {
                     // `max` drops NaN; a NaN-producing plugin reads as silent.
                     self.peaks[slot].fetch_max(peak.to_bits(), Ordering::Relaxed);
                 }
-                runtime.gain = runtime.target_gain;
+                runtime.gain = target_gain;
             }
             self.render_master(data_chunk, frames);
             self.click.render(data_chunk, channels);
@@ -558,12 +631,13 @@ impl Rack {
                 }
             }
         }
-        let gain_step = (self.master_target - self.master_gain) / frames as f32;
+        let target = if self.master_muted { 0.0 } else { self.master_target };
+        let gain_step = (target - self.master_gain) / frames as f32;
         for (frame_index, frame) in data.chunks_mut(channels).enumerate() {
             let gain = self.master_gain + gain_step * frame_index as f32;
             frame.iter_mut().for_each(|sample| *sample *= gain);
         }
-        self.master_gain = self.master_target;
+        self.master_gain = target;
     }
 }
 
@@ -574,9 +648,11 @@ mod tests {
 
     const BLOCK: usize = 16;
 
-    /// Outputs `op` applied to its input (a source ignores input). Stereo in/out.
+    /// Outputs `op` applied to its input (a source ignores input), plus its one
+    /// parameter. Stereo in/out.
     struct Fake {
         op: fn(f32) -> f32,
+        offset: f32,
         inputs: Vec<Vec<f32>>,
         outputs: Vec<Vec<f32>>,
         frames: usize,
@@ -585,6 +661,7 @@ mod tests {
     fn fake(op: fn(f32) -> f32) -> BoxedPlugin {
         Box::new(Fake {
             op,
+            offset: 0.0,
             inputs: vec![vec![0.0; BLOCK]; 2],
             outputs: vec![vec![0.0; BLOCK]; 2],
             frames: 0,
@@ -607,7 +684,7 @@ mod tests {
         fn process(&mut self, _midi_in: &[MidiEvent], frames: usize) {
             for (input, output) in self.inputs.iter().zip(&mut self.outputs) {
                 for (i, o) in input[..frames].iter().zip(&mut output[..frames]) {
-                    *o = (self.op)(*i);
+                    *o = (self.op)(*i) + self.offset;
                 }
             }
             self.frames = frames;
@@ -615,14 +692,22 @@ mod tests {
         fn audio_output(&self, channel: usize) -> &[f32] {
             &self.outputs[channel][..self.frames]
         }
-        fn set_param(&mut self, _id: u32, _value: f32) {}
+        fn set_param(&mut self, _id: u32, value: f32) {
+            self.offset = value;
+        }
     }
 
     fn rack() -> Rack {
         let (retired_tx, _retired_rx) = ring_buffer(64);
         let (lent_tx, _lent_rx) = ring_buffer(4);
         let click = Click::new(Default::default(), 48_000.0, Arc::default());
-        Rack::new(&Default::default(), 1.0, click, retired_tx, lent_tx, 2, BLOCK, 16, Default::default())
+        Rack::new(&Default::default(), 1.0, false, click, retired_tx, lent_tx, 2, BLOCK, 16, Default::default())
+    }
+
+    /// A fresh plugin key.
+    fn key() -> PluginKey {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Renders one block and returns slot 0's first output sample (every slot but
@@ -635,13 +720,22 @@ mod tests {
         data[0]
     }
 
-    fn insert(rack: &mut Rack, index: usize, op: fn(f32) -> f32) {
+    /// Returns the effect's key.
+    fn insert(rack: &mut Rack, index: usize, op: fn(f32) -> f32) -> PluginKey {
+        let key = key();
         rack.apply(RackCommand::InsertEffect {
             slot: 0,
             section: Section::Audio,
             index,
+            key,
             plugin: fake(op),
         });
+        key
+    }
+
+    fn mapped_param(rack: &mut Rack, key: PluginKey, value: f32) {
+        let change = ParamChange { param_id: 0, value };
+        rack.apply_mapped(MapperCommand::Param { key, change });
     }
 
     const ONE: fn(f32) -> f32 = |_| 1.0;
@@ -653,6 +747,7 @@ mod tests {
         let mut rack = rack();
         rack.apply(RackCommand::SetInstrument {
             slot: 0,
+            key: key(),
             plugin: Some(fake(ONE)),
         });
         assert_eq!(render(&mut rack), 1.0);
@@ -680,22 +775,59 @@ mod tests {
     }
 
     #[test]
+    fn mapped_params_follow_their_plugin() {
+        let mut rack = rack();
+        rack.apply(RackCommand::SetInstrument { slot: 0, key: key(), plugin: Some(fake(ONE)) });
+        let plus = insert(&mut rack, 0, PLUS_ONE);
+        let times = insert(&mut rack, 1, TIMES_TWO);
+        assert_eq!(render(&mut rack), 4.0); // (1 + 1) * 2
+        rack.apply(RackCommand::MoveEffect { slot: 0, section: Section::Audio, from: 1, to: 0 });
+        mapped_param(&mut rack, plus, 10.0);
+        assert_eq!(render(&mut rack), 13.0); // 1 * 2 + 1 + 10
+        rack.apply(RackCommand::RemoveEffect { slot: 0, section: Section::Audio, index: 1 });
+        // Gone: dropped, not applied to what took its place.
+        mapped_param(&mut rack, plus, 20.0);
+        assert_eq!(render(&mut rack), 2.0);
+        mapped_param(&mut rack, times, 1.0);
+        assert_eq!(render(&mut rack), 3.0);
+    }
+
+    #[test]
+    fn mute_holds_whatever_the_volume() {
+        let mut rack = rack();
+        rack.apply(RackCommand::SetInstrument { slot: 0, key: key(), plugin: Some(fake(ONE)) });
+        rack.apply(RackCommand::Mute { slot: 0, muted: true });
+        render_ramp(&mut rack);
+        rack.apply_mapped(MapperCommand::Volume { slot: 0, gain: 0.5 });
+        render_ramp(&mut rack);
+        assert_eq!(render(&mut rack), 0.0);
+        rack.apply(RackCommand::Mute { slot: 0, muted: false });
+        render_ramp(&mut rack);
+        assert_eq!(render(&mut rack), 0.5);
+    }
+
+    /// Renders a block, for a gain change to ramp in.
+    fn render_ramp(rack: &mut Rack) {
+        let (_midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(1);
+        rack.render(&mut midi_rx, &mut [0.0; 2 * BLOCK]);
+    }
+
+    #[test]
     fn master_chain_processes_the_mix() {
         let mut rack = rack();
         for slot in [0, 1] {
-            rack.apply(RackCommand::SetInstrument { slot, plugin: Some(fake(ONE)) });
+            rack.apply(RackCommand::SetInstrument { slot, key: key(), plugin: Some(fake(ONE)) });
         }
         rack.apply(RackCommand::InsertEffect {
             slot: MASTER_SLOT,
             section: Section::Audio,
             index: 0,
+            key: key(),
             plugin: fake(TIMES_TWO),
         });
         assert_eq!(render(&mut rack), 4.0); // (1 + 1) * 2
         rack.apply(RackCommand::MasterGain(0.5));
-        // One block ramps to it.
-        let (_midi_tx, mut midi_rx) = ring_buffer::<RoutedMidi>(1);
-        rack.render(&mut midi_rx, &mut [0.0; 2 * BLOCK]);
+        render_ramp(&mut rack);
         assert_eq!(render(&mut rack), 2.0);
     }
 
@@ -706,6 +838,7 @@ mod tests {
         assert_eq!(render(&mut rack), 1.0);
         rack.apply(RackCommand::SetInstrument {
             slot: 0,
+            key: key(),
             plugin: Some(fake(ONE)),
         });
         assert_eq!(render(&mut rack), 2.0);
@@ -801,6 +934,7 @@ mod tests {
         let mut rack = rack();
         rack.apply(RackCommand::SetInstrument {
             slot: 0,
+            key: key(),
             plugin: Some(Box::new(FakeInstrument {
                 level: 0.0,
                 outputs: vec![0.0; BLOCK],
@@ -811,6 +945,7 @@ mod tests {
                 slot: 0,
                 section: Section::Midi,
                 index,
+                key: key(),
                 plugin: Box::new(FakeMidiEffect {
                     op,
                     out: Vec::with_capacity(16),

@@ -11,6 +11,7 @@ live-keys-core = { path = "../core" }
 live-keys-lv2-host = { path = "../lv2-host" }
 live-keys-vst3-host = { path = "../vst3-host" }
 live-keys-clap-host = { path = "../clap-host" }
+live-keys-surfaces = { path = "../surfaces" }
 cpal = "0.18"
 midir = "0.11"
 anyhow = "1"

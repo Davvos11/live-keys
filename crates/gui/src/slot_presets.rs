@@ -15,6 +15,8 @@ use anyhow::{Context, Result};
 use live_keys_engine::{Engine, LoadedPluginMeta, PluginKey, PresetInfo, Section};
 use serde::{Deserialize, Serialize};
 
+use crate::mappings::SceneMapping;
+
 const FILE_NAME: &str = "slot.json";
 /// The folder of presets of slots without an instrument.
 pub const NO_INSTRUMENT: &str = "No instrument";
@@ -60,6 +62,17 @@ pub struct PluginState {
     pub preset: Option<PresetRef>,
     #[serde(default)]
     pub preset_changed: bool,
+    /// Its MIDI-learn mappings kept with the scene.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mappings: Vec<SceneMapping>,
+}
+
+/// What saving a plugin into a slot preset needs besides its state: its
+/// current plugin preset and whether it changed since, and its mappings.
+pub struct PluginExtras {
+    pub preset: Option<PresetInfo>,
+    pub preset_changed: bool,
+    pub mappings: Vec<SceneMapping>,
 }
 
 /// A [`PresetInfo`], as stored.
@@ -146,13 +159,13 @@ struct Loaded {
 }
 
 /// Saves slot `slot`'s chain as slot preset `name`, replacing one of the same
-/// name for the same instrument. `plugin_preset` gives each plugin's current
-/// plugin preset and whether it was changed since.
+/// name for the same instrument. `plugin_extras` gives what each plugin needs
+/// saving besides its state.
 pub fn save(
     engine: &mut Engine,
     slot: usize,
     name: &str,
-    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+    plugin_extras: impl Fn(PluginKey) -> PluginExtras,
 ) -> Result<Stored> {
     let chain = engine.slot(slot).context("no such slot")?;
     anyhow::ensure!(chain.plugins().next().is_some(), "the slot is empty");
@@ -160,7 +173,7 @@ pub fn save(
     let root = root().context("no data folder to save slot presets in")?;
     let folder = root.join(file_name(instrument_name));
     let dir = folder.join(file_name(name));
-    let preset = replace_dir(&dir, |temp| write(engine, slot, name, temp, plugin_preset))?;
+    let preset = replace_dir(&dir, |temp| write(engine, slot, name, temp, plugin_extras))?;
     Ok(Stored { dir, preset })
 }
 
@@ -171,7 +184,7 @@ pub fn write(
     slot: usize,
     name: &str,
     dir: &Path,
-    plugin_preset: impl Fn(PluginKey) -> (Option<PresetInfo>, bool),
+    plugin_extras: impl Fn(PluginKey) -> PluginExtras,
 ) -> Result<SlotPreset> {
     let chain = engine.slot(slot).context("no such slot")?;
     let loaded = |meta: &LoadedPluginMeta| Loaded {
@@ -187,13 +200,14 @@ pub fn write(
         let path = engine
             .save_state_file(plugin.key, dir, stem)
             .with_context(|| format!("saving {}'s settings failed", plugin.name))?;
-        let (preset, preset_changed) = plugin_preset(plugin.key);
+        let extras = plugin_extras(plugin.key);
         Ok(PluginState {
             id: plugin.id.clone(),
             name: plugin.name.clone(),
             state: path.strip_prefix(dir)?.display().to_string(),
-            preset: preset.as_ref().map(PresetRef::from),
-            preset_changed,
+            preset: extras.preset.as_ref().map(PresetRef::from),
+            preset_changed: extras.preset_changed,
+            mappings: extras.mappings,
         })
     };
     let instrument = instrument.as_ref().map(|plugin| save_plugin(plugin, "instrument")).transpose()?;

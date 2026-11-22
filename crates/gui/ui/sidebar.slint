@@ -7,6 +7,7 @@ import { LabelledKnob } from "knob.slint";
 import { SingleSlider } from "range_slider.slint";
 import { FxStrip, PopupFrame } from "slot_panel.slint";
 import { PresetPopup } from "preset_bar.slint";
+import { LearnTarget } from "learn.slint";
 
 // A horizontal line between sections.
 component Divider inherits Rectangle {
@@ -81,14 +82,27 @@ component TransposeSection inherits HorizontalLayout {
         vertical-alignment: center;
         horizontal-stretch: 1;
     }
-    Stepper {
-        minimum: -AppState.max-transpose;
-        maximum: AppState.max-transpose;
-        value: AppState.master-transpose;
-        // Stepping sets its own value, replacing the binding.
-        property <int> source: AppState.master-transpose;
-        changed source => { self.value = self.source; }
-        changed(value) => { AppLogic.set-master-transpose(value); }
+    Rectangle {
+        width: transpose.preferred-width;
+        height: transpose.preferred-height;
+        transpose := Stepper {
+            width: 100%;
+            height: 100%;
+            minimum: -AppState.max-transpose;
+            maximum: AppState.max-transpose;
+            value: AppState.master-transpose;
+            // Stepping sets its own value, replacing the binding.
+            property <int> source: AppState.master-transpose;
+            changed source => { self.value = self.source; }
+            changed(value) => { AppLogic.set-master-transpose(value); }
+        }
+        if AppState.learning : LearnTarget {
+            width: 100%;
+            height: 100%;
+            state: AppState.master-transpose-learn;
+            kind: 4;
+            slot: AppState.master-slot;
+        }
     }
     Rectangle { width: 6px; }
     KButton {
@@ -110,18 +124,29 @@ component MetronomeSection inherits VerticalLayout {
             alignment: center;
             HorizontalLayout {
                 alignment: center;
-                volume := LabelledKnob {
+                Rectangle {
                     width: 80px;
-                    label: "Metronome";
-                    value-text: Math.round(AppState.metronome-volume * 100) + "%";
-                    minimum: 0;
-                    maximum: 1;
-                    default-value: 0.5;
-                    value: AppState.metronome-volume;
-                    // Turning sets the knob's own value, replacing its binding.
-                    property <float> source: AppState.metronome-volume;
-                    changed source => { self.value = self.source; }
-                    changed(value) => { AppLogic.set-metronome-volume(value); }
+                    height: volume.preferred-height;
+                    volume := LabelledKnob {
+                        width: 100%;
+                        height: 100%;
+                        label: "Metronome";
+                        value-text: Math.round(AppState.metronome-volume * 100) + "%";
+                        minimum: 0;
+                        maximum: 1;
+                        default-value: 0.5;
+                        value: AppState.metronome-volume;
+                        // Turning sets the knob's own value, replacing its binding.
+                        property <float> source: AppState.metronome-volume;
+                        changed source => { self.value = self.source; }
+                        changed(value) => { AppLogic.set-metronome-volume(value); }
+                    }
+                    if AppState.learning : LearnTarget {
+                        width: 100%;
+                        height: 100%;
+                        state: AppState.metronome-volume-learn;
+                        kind: 5;
+                    }
                 }
             }
         }
@@ -140,16 +165,28 @@ component MetronomeSection inherits VerticalLayout {
             }
             HorizontalLayout {
                 alignment: center;
-                Stepper {
-                    signed: false;
-                    minimum: AppState.min-bpm;
-                    maximum: AppState.max-bpm;
-                    value: AppState.metronome-bpm;
-                    // Stepping sets its own value, replacing the binding (Tap
-                    // changes it from elsewhere).
-                    property <int> source: AppState.metronome-bpm;
-                    changed source => { self.value = self.source; }
-                    changed(value) => { AppLogic.set-metronome-bpm(value); }
+                Rectangle {
+                    width: bpm.preferred-width;
+                    height: bpm.preferred-height;
+                    bpm := Stepper {
+                        width: 100%;
+                        height: 100%;
+                        signed: false;
+                        minimum: AppState.min-bpm;
+                        maximum: AppState.max-bpm;
+                        value: AppState.metronome-bpm;
+                        // Stepping sets its own value, replacing the binding (Tap
+                        // changes it from elsewhere).
+                        property <int> source: AppState.metronome-bpm;
+                        changed source => { self.value = self.source; }
+                        changed(value) => { AppLogic.set-metronome-bpm(value); }
+                    }
+                    if AppState.learning : LearnTarget {
+                        width: 100%;
+                        height: 100%;
+                        state: AppState.tempo-learn;
+                        kind: 7;
+                    }
                 }
             }
         }
@@ -159,10 +196,22 @@ component MetronomeSection inherits VerticalLayout {
         HorizontalLayout {
             width: 118px;
             alignment: center;
-            KButton {
-                icon: AppState.metronome-playing ? Icons.stop : Icons.play;
-                active: AppState.metronome-playing;
-                clicked => { AppLogic.toggle-metronome(); }
+            Rectangle {
+                width: play.preferred-width;
+                height: Theme.control-height;
+                play := KButton {
+                    width: 100%;
+                    height: 100%;
+                    icon: AppState.metronome-playing ? Icons.stop : Icons.play;
+                    active: AppState.metronome-playing;
+                    clicked => { AppLogic.toggle-metronome(); }
+                }
+                if AppState.learning : LearnTarget {
+                    width: 100%;
+                    height: 100%;
+                    state: AppState.metronome-play-learn;
+                    kind: 6;
+                }
             }
         }
         HorizontalLayout {
@@ -227,13 +276,24 @@ component MasterSection inherits VerticalLayout {
             font-size: Theme.small-font-size;
         }
     }
-    master-volume := SingleSlider {
+    Rectangle {
         height: 32px;
-        minimum: AppState.min-volume-db;
-        maximum: AppState.max-volume-db;
-        default-value: 0;
-        value: AppState.master-volume-db;
-        changed(value) => { AppLogic.set-master-volume(value); }
+        master-volume := SingleSlider {
+            width: 100%;
+            height: 100%;
+            minimum: AppState.min-volume-db;
+            maximum: AppState.max-volume-db;
+            default-value: 0;
+            value: AppState.master-volume-db;
+            changed(value) => { AppLogic.set-master-volume(value); }
+        }
+        if AppState.learning : LearnTarget {
+            width: 100%;
+            height: 100%;
+            state: AppState.master-volume-learn;
+            kind: 2;
+            slot: AppState.master-slot;
+        }
     }
     FxStrip {
         effects: AppState.master-effects;
@@ -251,10 +311,23 @@ component MasterSection inherits VerticalLayout {
     HorizontalLayout {
         padding-top: 5px;
         spacing: 5px;
-        KButton {
-            icon: AppState.master-muted ? Icons.muted : Icons.volume;
-            active: AppState.master-muted;
-            clicked => { AppLogic.toggle-master-mute(); }
+        Rectangle {
+            width: Theme.control-height;
+            height: Theme.control-height;
+            KButton {
+                width: 100%;
+                height: 100%;
+                icon: AppState.master-muted ? Icons.muted : Icons.volume;
+                active: AppState.master-muted;
+                clicked => { AppLogic.toggle-master-mute(); }
+            }
+            if AppState.learning : LearnTarget {
+                width: 100%;
+                height: 100%;
+                state: AppState.master-mute-learn;
+                kind: 3;
+                slot: AppState.master-slot;
+            }
         }
         Select {
             horizontal-stretch: 1;

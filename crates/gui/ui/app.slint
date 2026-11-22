@@ -46,12 +46,31 @@ export component AppWindow inherits Window {
         picker.show();
     }
 
+    // Swapping the scenes pane for MIDI learn's can take the keyboard focus
+    // with it: the window's keys get it back.
+    property <bool> learning: AppState.learning;
+    changed learning => { keys.focus(); }
+
+    // Around everything, so its keys work whatever has the focus (key events
+    // go up from the focused element through its parents).
     keys := FocusScope {
-        KeyBinding {
-            keys: @keys(F11);
-            activated => { root.full-screen = !root.full-screen; }
-        }
-    }
+      x: 0;
+      y: 0;
+      width: root.width;
+      height: root.height;
+      // F11 toggles fullscreen; Escape leaves MIDI learn. (Not `KeyBinding`s:
+      // those didn't fire here.)
+      key-pressed(event) => {
+          if (event.text == Key.F11) {
+              root.full-screen = !root.full-screen;
+              return accept;
+          }
+          if (event.text == Key.Escape && AppState.learning) {
+              AppLogic.set-learning(false);
+              return accept;
+          }
+          reject
+      }
 
     // Pinned to the window, so the window's height (which the panel's room is
     // computed from) doesn't come from this layout.
@@ -129,6 +148,8 @@ export component AppWindow inherits Window {
             overlay: true;
             toggle => { root.overlay-open = false; }
         }
+    }
+
     }
 
     picker := PluginPicker {

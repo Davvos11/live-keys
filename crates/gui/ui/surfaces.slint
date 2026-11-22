@@ -26,10 +26,13 @@ component ControlLabel inherits Text {
     horizontal-alignment: center;
 }
 
-// The fader's cell is 28×100.
+// The fader's cell is 28×100. While its target is elsewhere (MIDI learn's
+// pick-up or glide), the cap is drawn at the target, and the hardware's
+// position as a ghost.
 component SurfaceFader inherits Rectangle {
     in property <SurfaceControlView> control;
     property <length> track: 70px;
+    property <float> shown: root.control.waiting ? root.control.target : root.control.value;
 
     Rectangle {
         x: 12px;
@@ -41,19 +44,29 @@ component SurfaceFader inherits Rectangle {
     }
     Rectangle {
         x: 12px;
-        y: 6px + root.track * (1 - root.control.value);
+        y: 6px + root.track * (1 - root.shown);
         width: 4px;
-        height: root.track * root.control.value;
+        height: root.track * root.shown;
         border-radius: 2px;
         background: SurfaceSizes.value-colour(root.control.mapped);
     }
-    Rectangle {
+    if root.control.waiting : Rectangle {
         x: 5px;
         y: 2px + root.track * (1 - root.control.value);
         width: 18px;
         height: 8px;
         border-radius: 2px;
-        background: root.control.moving ? Theme.text : Theme.text-muted;
+        border-width: 1px;
+        border-color: Theme.text-muted;
+        background: Theme.text-muted.with-alpha(0.15);
+    }
+    Rectangle {
+        x: 5px;
+        y: 2px + root.track * (1 - root.shown);
+        width: 18px;
+        height: 8px;
+        border-radius: 2px;
+        background: root.control.moving || root.control.waiting ? Theme.text : Theme.text-muted;
     }
     ControlLabel {
         y: root.height - self.height - 2px;
@@ -62,11 +75,14 @@ component SurfaceFader inherits Rectangle {
     }
 }
 
-// The knob's cell is 44×54.
+// The knob's cell is 44×54. While its target is elsewhere, the pointer shows
+// the target, and a ghost dot the hardware's position.
 component SurfaceKnob inherits Rectangle {
     in property <SurfaceControlView> control;
     property <angle> start: -135deg;
-    property <angle> end: self.start + 270deg * root.control.value;
+    property <float> shown: root.control.waiting ? root.control.target : root.control.value;
+    property <angle> end: self.start + 270deg * root.shown;
+    property <angle> ghost: self.start + 270deg * root.control.value;
 
     // An SVG arc on a circle of radius 40 around (50, 50), clockwise.
     function arc(from: angle, to: angle) -> string {
@@ -89,7 +105,7 @@ component SurfaceKnob inherits Rectangle {
             stroke-width: 3px;
             stroke-line-cap: round;
         }
-        if root.control.value > 0.004 : Path {
+        if root.shown > 0.004 : Path {
             width: 100%;
             height: 100%;
             viewbox-width: 100;
@@ -118,6 +134,16 @@ component SurfaceKnob inherits Rectangle {
             stroke: Theme.text;
             stroke-width: 2px;
             stroke-line-cap: round;
+        }
+        if root.control.waiting : Rectangle {
+            x: parent.width / 2 + parent.width * 0.4 * Math.sin(root.ghost) - 3px;
+            y: parent.height / 2 - parent.height * 0.4 * Math.cos(root.ghost) - 3px;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.text;
+            background: Theme.background;
         }
     }
     ControlLabel {
@@ -193,15 +219,23 @@ component SurfaceDrawing inherits Rectangle {
         width: root.surface.width * 1px;
         height: root.surface.height * 1px;
         opacity: root.surface.connected ? 1 : 0.4;
-        for control in root.surface.controls : Rectangle {
+        for control[index] in root.surface.controls : Rectangle {
             x: control.x * 1px;
             y: control.y * 1px;
             width: control.width * 1px;
             height: control.height * 1px;
+            border-radius: 4px;
+            border-width: control.selected ? 2px : area.has-hover ? 1px : 0px;
+            border-color: control.selected ? Theme.accent : Theme.control-border;
             if control.kind == 0 : SurfaceFader { control: control; }
             if control.kind == 1 : SurfaceKnob { control: control; }
             if control.kind == 2 : SurfacePad { control: control; }
             if control.kind == 3 : SurfaceButton { control: control; }
+            // Clicking a control learns it (MIDI learn).
+            area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.learn-select(root.surface.device, index); }
+            }
         }
     }
     if !root.surface.known : Rectangle {
@@ -315,6 +349,11 @@ export component SurfacesPanel inherits Rectangle {
         SurfaceDevices {
             width: 280px;
         }
+        KButton {
+            text: "MIDI learn";
+            active: AppState.learning;
+            clicked => { AppLogic.set-learning(!AppState.learning); }
+        }
         Rectangle { horizontal-stretch: 1; }
         KButton {
             icon: Icons.chevron-up;
@@ -350,6 +389,13 @@ export component SurfacesPanel inherits Rectangle {
                     }
                 }
                 Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    KButton {
+                        text: "MIDI learn";
+                        active: AppState.learning;
+                        clicked => { AppLogic.set-learning(!AppState.learning); }
+                    }
+                }
                 SurfaceDevices { }
             }
         }
@@ -357,6 +403,18 @@ export component SurfacesPanel inherits Rectangle {
         Rectangle {
             horizontal-stretch: 1;
             clip: true;
+            // Mouse wheels scroll sideways. Under the surfaces, so their
+            // controls get clicks; wheel events they don't take come here.
+            TouchArea {
+                scroll-event(event) => {
+                    if (flick.content-width <= flick.width) {
+                        return reject;
+                    }
+                    let delta = event.delta-x != 0 ? event.delta-x : event.delta-y;
+                    flick.content-x = Math.clamp(flick.content-x + delta, flick.width - flick.content-width, 0);
+                    accept
+                }
+            }
             flick := Flickable {
                 content-width: row.preferred-width;
                 row := HorizontalLayout {
@@ -378,17 +436,6 @@ export component SurfacesPanel inherits Rectangle {
                         font-size: Theme.small-font-size;
                         vertical-alignment: center;
                     }
-                }
-            }
-            // Mouse wheels scroll sideways.
-            TouchArea {
-                scroll-event(event) => {
-                    if (flick.content-width <= flick.width) {
-                        return reject;
-                    }
-                    let delta = event.delta-x != 0 ? event.delta-x : event.delta-y;
-                    flick.content-x = Math.clamp(flick.content-x + delta, flick.width - flick.content-width, 0);
-                    accept
                 }
             }
         }

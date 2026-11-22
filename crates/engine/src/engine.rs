@@ -18,12 +18,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
-use crate::midi::{MidiInputs, RoutedMidi, SurfaceEvent};
+use crate::mapper::{self, MapperInput, MapperReport, MapperSetup, Output, SharedMapperTx};
+use crate::midi::{MidiInputs, RoutedMidi};
 use crate::paths::build_lv2_path;
 use crate::metronome::{Click, MetronomeSettings};
 use crate::setbfree::Setbfree;
 use crate::rack::{
-    BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, Rack, RackCommand, Section, SlotPeaks,
+    BoxedPlugin, ChainPosition, MAX_EFFECTS, MAX_MIDI_EFFECTS, MapperCommand, Rack, RackCommand, Section, SlotPeaks,
 };
 
 /// Number of plugin slots in the rack. Every slot sees the same MIDI input (each
@@ -38,6 +39,8 @@ pub const MASTER_SLOT: usize = SLOT_COUNT;
 
 const MIDI_RING_CAPACITY: usize = 1024;
 const COMMAND_RING_CAPACITY: usize = 256;
+/// Values from the mapping thread: a few per hardware move, drained every block.
+const MAPPER_RING_CAPACITY: usize = 1024;
 /// Plugins taken out of a chain, waiting to be dropped off the audio thread.
 /// Drained on every structural change, so it only needs room for a few in flight;
 /// sized so even clearing every chain at once fits.
@@ -60,8 +63,9 @@ pub type PluginKey = u64;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlotSettings {
     pub filter: MidiFilter,
-    /// Linear output gain (1.0 = unity).
+    /// The volume as a linear gain (1.0 = unity).
     pub gain: f32,
+    pub muted: bool,
 }
 
 impl Default for SlotSettings {
@@ -69,6 +73,7 @@ impl Default for SlotSettings {
         Self {
             filter: MidiFilter::default(),
             gain: 1.0,
+            muted: false,
         }
     }
 }
@@ -191,6 +196,8 @@ impl SlotChain {
 struct AudioState {
     rack: Rack,
     command_rx: Consumer<RackCommand>,
+    /// From the mapping thread.
+    mapper_rx: Consumer<MapperCommand>,
     midi_rx: Consumer<RoutedMidi>,
 }
 
@@ -307,7 +314,12 @@ pub struct Engine {
     /// with the next stream teardown (never on the audio thread).
     orphaned: Option<Box<AudioState>>,
     midi_inputs: MidiInputs,
-    surface_events: std::sync::mpsc::Receiver<SurfaceEvent>,
+    /// The mapping thread's input, reports, and queue to the audio thread.
+    mapper_tx: std::sync::mpsc::SyncSender<MapperInput>,
+    mapper_reports: std::sync::mpsc::Receiver<MapperReport>,
+    mapper_rack: SharedMapperTx,
+    /// The last setup's number (see [`Engine::set_mappings`]).
+    mapper_generation: u64,
     audio_host: cpal::Host,
     /// `None` until the first [`PluginScan`] is installed.
     hosts: Option<Hosts>,
@@ -315,8 +327,9 @@ pub struct Engine {
     /// The slots' chains, then the master chain ([`MASTER_SLOT`]).
     slots: [SlotChain; SLOT_COUNT + 1],
     settings: [SlotSettings; SLOT_COUNT],
-    /// Linear; 0 when muted.
+    /// The master volume, linear.
     master_gain: f32,
+    master_muted: bool,
     metronome: MetronomeSettings,
     next_key: PluginKey,
     /// setBfree plugins whose reported values changed, for
@@ -338,7 +351,9 @@ impl Engine {
     /// An engine that knows no plugins until a [`PluginScan`] is installed
     /// ([`Engine::install_plugins`]).
     pub fn unscanned(max_block_size: usize) -> Self {
-        let (midi_inputs, surface_events) = MidiInputs::new();
+        let mapper_rack = SharedMapperTx::default();
+        let (mapper_tx, mapper_reports) = mapper::spawn(mapper_rack.clone());
+        let midi_inputs = MidiInputs::new(mapper_tx.clone());
         Self {
             audio_host: cpal::default_host(),
             hosts: None,
@@ -346,10 +361,14 @@ impl Engine {
             running: None,
             orphaned: None,
             midi_inputs,
-            surface_events,
+            mapper_tx,
+            mapper_reports,
+            mapper_rack,
+            mapper_generation: 0,
             slots: Default::default(),
             settings: Default::default(),
             master_gain: 1.0,
+            master_muted: false,
             metronome: MetronomeSettings::default(),
             next_key: 0,
             setbfree_changed: Vec::new(),
@@ -463,7 +482,7 @@ impl Engine {
         }
     }
 
-    /// Sets `slot`'s linear output gain (1.0 = unity). Like
+    /// Sets `slot`'s volume as a linear gain (1.0 = unity). Like
     /// [`Engine::set_slot_filter`], kept across loads and restarts.
     pub fn set_slot_gain(&mut self, slot: usize, gain: f32) {
         if slot < SLOT_COUNT {
@@ -472,11 +491,25 @@ impl Engine {
         }
     }
 
-    /// Sets the master output's linear gain (0 to mute), after the master
+    /// Mutes or unmutes `slot`, whatever its volume. Kept like its gain.
+    pub fn set_slot_muted(&mut self, slot: usize, muted: bool) {
+        if slot < SLOT_COUNT {
+            self.settings[slot].muted = muted;
+            self.push_command(RackCommand::Mute { slot, muted });
+        }
+    }
+
+    /// Sets the master output's volume as a linear gain, after the master
     /// chain. Kept across restarts. The metronome's click isn't affected.
     pub fn set_master_gain(&mut self, gain: f32) {
         self.master_gain = gain;
         self.push_command(RackCommand::MasterGain(gain));
+    }
+
+    /// Mutes or unmutes the master output (not the metronome's click).
+    pub fn set_master_muted(&mut self, muted: bool) {
+        self.master_muted = muted;
+        self.push_command(RackCommand::MasterMute(muted));
     }
 
     /// Sets what the metronome plays; starting it starts a new bar. Kept
@@ -520,16 +553,93 @@ impl Engine {
 
     /// Sets which MIDI devices (by [`midi_device_name`](crate::midi_device_name))
     /// are shown as control surfaces: they're connected whether they feed a MIDI
-    /// input or not, and their events are also handed to
-    /// [`Engine::take_surface_events`]. Returns every MIDI input port present.
+    /// input or not, and their events go to the mapping thread (and, from there,
+    /// to [`Engine::take_mapper_reports`]). Returns every MIDI input port present.
     pub fn set_surface_devices(&mut self, devices: Vec<String>) -> Vec<String> {
         self.midi_inputs.set_surfaces(devices)
     }
 
-    /// The events from control-surface devices since the last call, oldest
-    /// first (at most a thousand or so are kept; more are dropped).
-    pub fn take_surface_events(&self) -> Vec<SurfaceEvent> {
-        self.surface_events.try_iter().collect()
+    /// Replaces every MIDI-learn mapping: the mapping thread applies `setup`
+    /// from now on, and the mapped controls' messages stop reaching the slots
+    /// (but for controls that pass through). Returns the setup's generation,
+    /// which its reports and [`Engine::set_mapped_position`] go by: target
+    /// indices mean nothing across setups.
+    pub fn set_mappings(&mut self, setup: MapperSetup) -> u64 {
+        let claims: Vec<(String, u8, live_keys_surfaces::Message)> = setup
+            .controls
+            .iter()
+            .filter(|control| !control.pass_through && !control.links.is_empty())
+            .filter_map(|control| {
+                let (device, surface) = setup.surfaces.get(control.surface)?;
+                let control = surface.controls.get(control.control)?;
+                Some((device.to_string(), control.channel, control.message))
+            })
+            .collect();
+        self.midi_inputs.set_claims(&claims);
+        self.mapper_generation += 1;
+        let targets = setup
+            .targets
+            .into_iter()
+            .map(|spec| {
+                let sink = match &spec.output {
+                    Output::Setbfree { key, .. } => self.plugin(*key).and_then(|meta| meta.setbfree.as_ref()?.sink()),
+                    _ => None,
+                };
+                (spec, sink)
+            })
+            .collect();
+        let setup = mapper::Setup {
+            generation: self.mapper_generation,
+            surfaces: setup.surfaces,
+            controls: setup.controls,
+            targets,
+        };
+        if self.mapper_tx.send(MapperInput::Setup(Box::new(setup))).is_err() {
+            log::error!("the MIDI mapping thread is gone");
+        }
+        self.mapper_generation
+    }
+
+    /// Tells the mapping thread that target `target` of setup `generation` was
+    /// moved elsewhere (the mouse, a preset…), to `position`.
+    pub fn set_mapped_position(&self, generation: u64, target: usize, position: f32) {
+        let _ = self.mapper_tx.try_send(MapperInput::Position { generation, target, position });
+    }
+
+    /// What the mapping thread did since the last call, oldest first: every
+    /// control-surface event, and the targets mappings moved — already
+    /// recorded here ([`Engine::param_value`], [`Engine::setbfree_value`],
+    /// the slots' gains), and a VST3 plugin's editor told. Call regularly from
+    /// the main thread.
+    pub fn take_mapper_reports(&mut self) -> Vec<MapperReport> {
+        let mut reports: Vec<MapperReport> = self.mapper_reports.try_iter().collect();
+        for report in &mut reports {
+            let MapperReport::Applied { output, value, for_gui, .. } = report else { continue };
+            match output {
+                Output::Param { key, param } => {
+                    if let Some(meta) = self.plugin_mut(*key) {
+                        if let PluginEditor::Vst3(controller) = &meta.editor {
+                            controller.set_param_normalized(*param, *value);
+                        }
+                        meta.values.insert(*param, *value);
+                    }
+                }
+                Output::Setbfree { key, function } => {
+                    let level = value.round().clamp(0.0, 127.0) as u8;
+                    if let Some(setbfree) = self.plugin_mut(*key).and_then(|meta| meta.setbfree.as_mut()) {
+                        *for_gui = setbfree.record(function, level).unwrap_or_default();
+                    }
+                }
+                Output::Volume { slot } if *slot == MASTER_SLOT => self.master_gain = *value,
+                Output::Volume { slot } => {
+                    if let Some(settings) = self.settings.get_mut(*slot) {
+                        settings.gain = *value;
+                    }
+                }
+                Output::Gui => {}
+            }
+        }
+        reports
     }
 
     /// Connects assigned MIDI devices that were plugged in since the last call
@@ -600,6 +710,9 @@ impl Engine {
     fn drop_stream_async(&mut self) {
         if let Ok(mut midi_tx) = self.midi_inputs.tx.lock() {
             *midi_tx = None;
+        }
+        if let Ok(mut mapper_tx) = self.mapper_rack.lock() {
+            *mapper_tx = None;
         }
         let orphaned = self.orphaned.take();
         if let Some(running) = self.running.take() {
@@ -1123,7 +1236,8 @@ impl Engine {
                 .instantiate(plugin_id, sample_rate)
                 .with_context(|| format!("failed to instantiate LV2 plugin '{plugin_id}'"))?;
             let mut ui_channel = plugin.take_ui_channel();
-            let setbfree = Setbfree::new(plugin.plugin(), plugin.features());
+            let control_channel = plugin.take_control_channel();
+            let setbfree = Setbfree::new(plugin.plugin(), plugin.features(), control_channel);
             // setBfree reports its settings only once asked; it then dumps them all.
             if let (Some(setbfree), Some(channel)) = (&setbfree, &mut ui_channel) {
                 let _ = channel.to_plugin.push(setbfree.uiinit());
@@ -1158,6 +1272,7 @@ impl Engine {
         let (plugin, meta) = self.instantiate(plugin_id)?;
         self.push_structural(RackCommand::SetInstrument {
             slot,
+            key: meta.key,
             plugin: Some(plugin),
         })?;
         log::info!("Loaded {} instrument into slot {slot}: {}", meta.format.label(), meta.name);
@@ -1173,7 +1288,7 @@ impl Engine {
         }
         // Without a running stream there's no audio-side chain to keep in step.
         if self.running.is_some()
-            && let Err(err) = self.push_structural(RackCommand::SetInstrument { slot, plugin: None })
+            && let Err(err) = self.push_structural(RackCommand::SetInstrument { slot, key: 0, plugin: None })
         {
             log::warn!("failed to unload slot {slot}'s instrument: {err:#}");
             return;
@@ -1197,6 +1312,7 @@ impl Engine {
             slot,
             section,
             index,
+            key: meta.key,
             plugin,
         })?;
         let place = if slot == MASTER_SLOT { "the master chain".to_string() } else { format!("slot {slot}") };
@@ -1269,12 +1385,14 @@ impl Engine {
         let peaks = SlotPeaks::default();
         let beat = Arc::new(AtomicU32::new(0));
         let (command_tx, command_rx) = ring_buffer::<RackCommand>(COMMAND_RING_CAPACITY);
+        let (mapper_tx, mapper_rx) = ring_buffer::<MapperCommand>(MAPPER_RING_CAPACITY);
         let (retired_tx, retired_rx) = ring_buffer::<BoxedPlugin>(RETIRED_RING_CAPACITY);
         let (lent_tx, lent_rx) = ring_buffer::<BoxedPlugin>(LENT_RING_CAPACITY);
 
         let rack = Rack::new(
             &self.settings,
             self.master_gain,
+            self.master_muted,
             Click::new(self.metronome, sample_rate, beat.clone()),
             retired_tx,
             lent_tx,
@@ -1286,6 +1404,7 @@ impl Engine {
         let state = Box::new(AudioState {
             rack,
             command_rx,
+            mapper_rx,
             midi_rx,
         });
         let (stream, handoff_rx) = build_stream(&output_device, output_config.into(), state)
@@ -1296,6 +1415,9 @@ impl Engine {
         self.drop_stream_async();
         if let Ok(mut shared) = self.midi_inputs.tx.lock() {
             *shared = Some(midi_tx);
+        }
+        if let Ok(mut shared) = self.mapper_rack.lock() {
+            *shared = Some(mapper_tx);
         }
         self.running = Some(RunningStream {
             stream,
@@ -1436,6 +1558,11 @@ fn build_stream(
                     break;
                 }
                 state.rack.apply(command);
+            }
+            // After the rack's own: a structural change queued before a value
+            // is in place for it (a value for a plugin not there yet is lost).
+            while let Ok(command) = state.mapper_rx.pop() {
+                state.rack.apply_mapped(command);
             }
             if detach {
                 data.fill(0.0);

@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PortEvent};
+use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PortEvent, ToValue};
 use serde::{Deserialize, Serialize};
 
 /// How many controls a panel shows at most (the UI lays them out zigzag, in
@@ -224,6 +224,79 @@ impl Control {
                     CellValue::Position(position) => format!("{}%", (position * 100.0).round()),
                 }
             }
+        }
+    }
+
+    /// The control's position, 0..1 along it, for its current value: what
+    /// MIDI learn moves (a switch is 0 or 1, a lever or drawbar steps evenly).
+    pub fn position(&self, engine: &Engine, key: PluginKey) -> f32 {
+        match self.read(engine, key) {
+            CellValue::Position(position) => position,
+            CellValue::On(on) => if on { 1.0 } else { 0.0 },
+            CellValue::Index(index) => index as f32 / self.last_index().max(1) as f32,
+        }
+    }
+
+    /// The cell a position stands for.
+    fn cell_at(&self, position: f32) -> CellValue {
+        let position = position.clamp(0.0, 1.0);
+        match self.widget {
+            Widget::Switch => CellValue::On(position >= 0.5),
+            Widget::Drawbar => CellValue::Index((position * DRAWBAR_LEVELS as f32).round() as usize),
+            _ if !self.choices.is_empty() => CellValue::Index((position * self.last_index() as f32).round() as usize),
+            Widget::Knob | Widget::Lever => CellValue::Position(position),
+        }
+    }
+
+    /// The highest [`CellValue::Index`] (0 for controls without steps).
+    fn last_index(&self) -> usize {
+        match self.widget {
+            Widget::Drawbar => DRAWBAR_LEVELS,
+            _ => self.choices.len().saturating_sub(1),
+        }
+    }
+
+    /// Positions of the control's steps (a switch's off and on, a lever's
+    /// options), for a MIDI-learn toggle's default levels; empty for a knob
+    /// without choices.
+    pub fn steps(&self) -> Vec<f32> {
+        let last = match self.widget {
+            Widget::Switch => 1,
+            _ if !self.choices.is_empty() => self.last_index(),
+            _ => return Vec::new(),
+        };
+        (0..=last).map(|index| index as f32 / last.max(1) as f32).collect()
+    }
+
+    /// Turns positions into the target's values (a parameter value, or
+    /// setBfree's 0..=127), for the mapping thread; `None` if the plugin lacks
+    /// the parameter.
+    pub fn to_value(&self, engine: &Engine, key: PluginKey) -> Option<ToValue> {
+        let control = self.clone();
+        match &self.target {
+            Target::Param(id) => {
+                let param = self.param(engine, key, *id)?;
+                Some(std::sync::Arc::new(move |position| control.param_value(&param, control.cell_at(position))))
+            }
+            Target::Setbfree(_) => {
+                Some(std::sync::Arc::new(move |position| f32::from(control.setbfree_write(control.cell_at(position)))))
+            }
+        }
+    }
+
+    /// The value at `position` as text ("-6.0 dB", "Fast", "On").
+    pub fn text_at(&self, engine: &Engine, key: PluginKey, position: f32) -> String {
+        match self.cell_at(position) {
+            CellValue::On(on) => on_off(on),
+            CellValue::Index(index) if !self.choices.is_empty() => self.choice_label(index),
+            CellValue::Index(level) => level.to_string(),
+            CellValue::Position(position) => match &self.target {
+                Target::Param(id) => match self.param(engine, key, *id) {
+                    Some(param) => engine.param_text(key, *id, self.param_value(&param, CellValue::Position(position))),
+                    None => String::new(),
+                },
+                Target::Setbfree(_) => format!("{}%", (position * 100.0).round()),
+            },
         }
     }
 

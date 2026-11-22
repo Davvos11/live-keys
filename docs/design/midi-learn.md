@@ -421,16 +421,17 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
 ```
 
 - **Input.** `MidiInputs`'s callback (midir's thread) looks each event up in a per-device
-  **claim table** (atomics: per channel, which CCs and notes belong to mapped controls, plus
-  pitch bend / pressure / program change, each with a "pass through" bit), rebuilt by the
-  mapping thread when mappings or surfaces change. Every event from a device with a surface
-  goes onto the mapping thread's ring (bounded `rtrb`; the thread is unparked when it's
-  pushed to). A **claimed** event goes only there, unless its control is set to **also pass
+  **claim table** (`midi::Claims`, atomics: per channel, which CCs and notes belong to mapped
+  controls, plus pitch bend and channel pressure), set by `Engine::set_mappings` from each
+  setup (controls that pass through claim nothing). Every event from a device with a surface
+  goes onto the mapping thread's queue (a bounded `std::sync::mpsc` channel it blocks on;
+  full = dropped). A **claimed** event goes only there, unless its control is set to **also pass
   to the slots** (per control, default off — a sustain pedal or mod wheel mapped *and* played);
   unclaimed events reach the slots' MIDI ring directly, as now, so keys on a keyboard that's
   also a surface lose nothing. Notes are never claimed unless a pad's note is, on that device
   and channel.
-- **The mapping thread** (`Mapper`, in `crates/engine`, so the CLI could use it too) owns the
+- **The mapping thread** (`crates/engine/src/mapper.rs` around the pure logic of `mapping.rs`,
+  in the engine so the CLI could use it too) owns the
   mappings, the value layers and the takeover state of every mapped target. It blocks until
   events arrive (or, while a glide runs, wakes every ~2 ms to advance it), applies each
   target's mode, and sends the effective value:
@@ -439,11 +440,16 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
     parameters are addressed by `PluginKey`, which the `Rack` resolves to a chain position on
     the audio thread (a scan of at most 6 × 17 entries, allocation-free; an unknown key — a
     plugin removed meanwhile — is dropped), so a change can't land on whatever replaced its
-    plugin, whatever order the two queues are drained in. Slot and master gain, mute,
-    transpose (the `MidiFilter`) and the metronome's level are rack commands too.
-  - **setBfree's functions** travel as atoms on the plugin's control input; the plugin gets a
-    second GUI-channel ring whose producer is the mapping thread's (the existing one belongs
-    to the GUI thread).
+    plugin, whatever order the two queues are drained in. Slot and master volumes are mapper
+    commands too (the rack keeps mute apart from volume, so a fader can't unmute a muted
+    slot). **As built**, mute, transpose and the metronome (volume, play, tempo) go through
+    the GUI thread instead — one poll tick (16 ms) later, through the same handlers as the
+    on-screen controls: they're buttons and steps, where that doesn't show, and the GUI owns
+    their state (config, the slots' `MidiFilter` with the master transposition).
+  - **setBfree's functions** travel as atoms on the plugin's control input; every LV2 plugin
+    with atom inputs has a second input ring (`Lv2Plugin::take_control_channel`) whose
+    producer is the mapping thread's (`SetbfreeSink`; the GUI channel belongs to the GUI
+    thread).
   - **To the GUI thread**, afterwards, a ring of applied values and the raw events: the GUI
     updates the panel, on-screen controls, the record (`Engine::param_value`), an open VST3
     editor (`set_param_normalized` must be on the main thread; the processor already has the
@@ -451,12 +457,23 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
   - **To the hardware**: feedback, through `midir` output connections the mapping thread owns.
   - Things that aren't values — recalling a scene, starting the metronome, panic — are
     forwarded to the GUI thread, which already does them.
-- **Edits from elsewhere** (mouse, a plugin's GUI, presets, scenes) to a target that has a
+- **Edits from elsewhere** (mouse, a plugin's GUI, presets, scenes). **As built (phase 2)**:
+  the GUI's poll timer reads every mapped target's position and tells the mapping thread of
+  any that moved since it last saw it (`Engine::set_mapped_position`), which is what pick up
+  and glide compare against; a position a mapping set is noted as seen first, so it doesn't
+  count. **With the value layers (phase 3)**: edits to a target that has a
   mapping go through the mapping thread as base changes (a ring from the GUI thread), which
   re-sends the effective value — otherwise a mouse edit would overwrite a modulated value with
   its bare base. Unmapped targets keep today's path. Saving reads the bases from the mapping
   thread (a request answered over the same rings).
 - **Learn mode** reads the raw events the GUI gets: the last control moved is selected.
+- **Setups**: the GUI resolves every mapping against what's loaded (`src/mappings.rs`) into a
+  `MapperSetup` — the shown surfaces, each mapped control's settings and links, each
+  target's output, its position and how a position becomes its value (a closure from the
+  panel control's own mapping, so a mapped knob covers what the on-screen one does) — and
+  hands it over whole when mappings, surfaces or the chains change; one that does the same
+  as the last isn't handed over, so the takeover state survives. Each has a generation:
+  target numbers in reports from an older setup are ignored.
 - **Unit tests** for the `Mapper`'s logic (modes, ranges, layering, pick-up crossing, glide
   timing, toggle levels following the target): pure functions of events and time, kept apart
   from the threads.
@@ -466,11 +483,16 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
 1. **Done (2026-11-22).** Surfaces only: the format, shipped LX88+/LPD8, the bottom panel with live values, the device
    checklist, the surface ring and display; the panel's three height tiers and the fullscreen
    button. No mappings yet; worth having alone to see a controller talking.
-2. Mappings, direct/mirrored/toggle/momentary, to plugin parameters (panel controls and the
-   parameter window), panel positions and rack targets; learn mode with the targets pane,
-   highlighting, click to assign, the right-click popup; the mapping thread, its audio ring
-   and the claim table with pass-through; storage with the
-   scene (`slot.json`) or in every scene (config); jump, glide and pick up with the ghost.
+2. **Done (2026-11-22).** Mappings, direct/mirrored/toggle/momentary, to plugin parameters
+   (panel controls, drawbars), panel positions and rack targets; learn mode with the targets
+   pane, highlighting, click to assign, the right-click popup; the mapping thread, its audio
+   ring and the claim table with pass-through; storage with the scene (`slot.json`) or in
+   every scene (config); jump, glide and pick up with the ghost. Left for later: the
+   parameter window's rows as targets (so an effect's parameters can't be mapped yet), "Learn
+   MIDI…" in a slot control's context menu, scene and panic targets, selection lock. Learn
+   mode is entered from the panel's "MIDI learn" button or by clicking a surface control, and
+   left with Done or Escape; the popup of a target not mapped yet has "Assign to <control>"
+   (its settings so far apply), one mapped edits it live.
 3. The value layers: modulate and momentary modulate, the knob's modulation display, bases
    saved in `slot.json`.
 4. Feedback: output connections, per-bank feedback in the surface format.

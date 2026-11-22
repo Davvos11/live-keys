@@ -2,6 +2,8 @@ slint::include_modules!();
 
 mod config;
 mod inline_displays;
+mod learn;
+mod mappings;
 mod metronome;
 mod midi_inputs;
 mod mock_data;
@@ -443,10 +445,14 @@ struct Rack {
     app: std::cell::OnceCell<slint::Weak<AppWindow>>,
     /// Effects' inline displays (their FX squares' pictures).
     inline: RefCell<inline_displays::InlineDisplays>,
+    /// MIDI learn's mappings and learn mode.
+    mappings: mappings::MappingsUi,
+    /// The learn flags last shown, to change only what differs.
+    learn_flags: RefCell<mappings::LearnFlags>,
 }
 
 impl Rack {
-    fn new() -> Self {
+    fn new(config: &config::AppConfig) -> Self {
         fn models<T: 'static>() -> Vec<Rc<VecModel<T>>> {
             (0..SLOT_COUNT).map(|_| Rc::new(VecModel::default())).collect()
         }
@@ -503,6 +509,8 @@ impl Rack {
             master_effects: Rc::new(VecModel::default()),
             app: std::cell::OnceCell::new(),
             inline: RefCell::new(inline_displays::InlineDisplays::new()),
+            mappings: mappings::MappingsUi::new(config),
+            learn_flags: RefCell::default(),
         }
     }
 
@@ -522,6 +530,9 @@ impl Rack {
     /// from the engine. `error`, if given, is shown as the slot's status line.
     /// The master chain ([`MASTER_SLOT`]) only has its effects to show.
     fn refresh_slot(&self, engine: &Engine, slot: usize, error: Option<String>) {
+        // The chain may have changed: mappings resolve against it.
+        self.mappings.setup_dirty.set(true);
+        self.mappings.view_dirty.set(true);
         if slot == MASTER_SLOT {
             return self.refresh_master(engine, error);
         }
@@ -774,13 +785,15 @@ impl Rack {
         *self.slot_store.borrow_mut() = slot_presets::list();
     }
 
-    /// `key`'s current plugin preset and whether it changed since, for saving in
-    /// a slot preset.
-    fn plugin_preset_state(&self, key: PluginKey) -> (Option<PresetInfo>, bool) {
-        match self.current_presets.borrow().get(&key) {
+    /// What saving `key` in a slot preset needs besides its state: its current
+    /// plugin preset and whether it changed since, and its scene mappings.
+    fn plugin_extras(&self, key: PluginKey) -> slot_presets::PluginExtras {
+        let (preset, preset_changed) = match self.current_presets.borrow().get(&key) {
             Some(current) => (Some(current.preset.clone()), current.changed),
             None => (None, false),
-        }
+        };
+        let mappings = self.mappings.scene.borrow().get(&key).cloned().unwrap_or_default();
+        slot_presets::PluginExtras { preset, preset_changed, mappings }
     }
 
     /// The chain row of a loaded plugin.
@@ -1034,6 +1047,9 @@ impl Rack {
         match instrument {
             None => *current = None,
             Some(meta) if rebuild || current.as_ref().is_none_or(|panel| panel.key != meta.key) => {
+                // Panel positions and learn targets go by the panel.
+                self.mappings.setup_dirty.set(true);
+                self.mappings.view_dirty.set(true);
                 *current = Some(SlotPanel {
                     key: meta.key,
                     plugin_id: meta.id.clone(),
@@ -1237,12 +1253,12 @@ fn main() -> anyhow::Result<()> {
     for (slot, slot_config) in config.borrow().slots.iter().enumerate() {
         let mut engine = engine.borrow_mut();
         engine.set_slot_filter(slot, slot_config.filter(config.borrow().master_transpose));
-        engine.set_slot_gain(slot, slot_config.gain());
+        set_slot_mix(&mut engine, slot, slot_config);
     }
     {
         let config = config.borrow();
         let mut engine = engine.borrow_mut();
-        engine.set_master_gain(config.master_gain());
+        set_master_mix(&mut engine, &config);
         engine.set_metronome(config.metronome.settings(false, config.master_muted));
     }
     // Whether the metronome is playing; it always starts stopped.
@@ -1267,7 +1283,7 @@ fn main() -> anyhow::Result<()> {
     // timer below, since only one thread may drive the audio engine's command
     // queue.
     let (edit_tx, edit_rx) = mpsc::channel::<GuiEdit>();
-    let rack = Rc::new(Rack::new());
+    let rack = Rc::new(Rack::new(&config.borrow()));
     let picker = Rc::new(Picker::new());
 
     let app = AppWindow::new()?;
@@ -1290,6 +1306,7 @@ fn main() -> anyhow::Result<()> {
     state.set_surface_summary(surfaces.summary(&config.borrow()).into());
     state.set_surfaces_collapsed(config.borrow().surfaces.collapsed);
     state.set_scene_rows(ModelRc::from(rack.scene_rows.clone()));
+    state.set_learn_rows(ModelRc::from(rack.mappings.rows.clone()));
     state.set_scene_form_slots(ModelRc::from(rack.scene_form_slots.clone()));
     state.set_max_midi_inputs(MAX_MIDI_INPUTS as i32);
 
@@ -1322,6 +1339,16 @@ fn main() -> anyhow::Result<()> {
     state.set_max_transpose(config::MAX_TRANSPOSE);
 
     let logic = app.global::<AppLogic>();
+    let learn = Rc::new(learn::Learn {
+        engine: engine.clone(),
+        config: config.clone(),
+        config_dirty: config_dirty.clone(),
+        rack: rack.clone(),
+        surfaces: surfaces.clone(),
+        metronome_playing: metronome_playing.clone(),
+        app: app.as_weak(),
+    });
+    learn.connect(&logic);
 
     {
         let config = config.clone();
@@ -1350,7 +1377,7 @@ fn main() -> anyhow::Result<()> {
         logic.on_set_master_volume(move |volume_db| {
             let mut config = config.borrow_mut();
             config.master_volume_db = volume_db.clamp(config::MIN_VOLUME_DB, config::MAX_VOLUME_DB);
-            engine.borrow_mut().set_master_gain(config.master_gain());
+            set_master_mix(&mut engine.borrow_mut(), &config);
             if let Some(app) = app_weak.upgrade() {
                 app.global::<AppState>().set_master_volume_db(config.master_volume_db);
             }
@@ -1388,7 +1415,7 @@ fn main() -> anyhow::Result<()> {
             let mut config = config.borrow_mut();
             config.master_muted = !config.master_muted;
             let mut engine = engine.borrow_mut();
-            engine.set_master_gain(config.master_gain());
+            set_master_mix(&mut engine, &config);
             // The click follows the mute too.
             engine.set_metronome(config.metronome.settings(playing.get(), config.master_muted));
             if let Some(app) = app_weak.upgrade() {
@@ -2318,7 +2345,7 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
             let result = slot_presets::save(&mut engine.borrow_mut(), slot, name, |key| {
-                rack.plugin_preset_state(key)
+                rack.plugin_extras(key)
             });
             let error = match result {
                 Ok(stored) => {
@@ -2587,7 +2614,7 @@ fn main() -> anyhow::Result<()> {
                 instrument.or_else(|| chain.plugins().next().map(|meta| meta.name.clone()))
             });
             let closed = name.and_then(|name| {
-                let dir = slot_view::snapshot(&mut engine.borrow_mut(), slot, |key| rack.plugin_preset_state(key));
+                let dir = slot_view::snapshot(&mut engine.borrow_mut(), slot, |key| rack.plugin_extras(key));
                 match dir {
                     Ok(dir) => Some(slot_view::Closed {
                         name,
@@ -2629,7 +2656,7 @@ fn main() -> anyhow::Result<()> {
                 let slot_config = &config.slots[slot];
                 let mut engine = engine.borrow_mut();
                 engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
-                engine.set_slot_gain(slot, slot_config.gain());
+                set_slot_mix(&mut engine, slot, slot_config);
                 rack.set_routing(slot, slot_config, config.midi_inputs.len());
                 log_on_err(config::save(&config));
             }
@@ -2688,7 +2715,7 @@ fn main() -> anyhow::Result<()> {
             let mut config = config.borrow_mut();
             let slot_config = &mut config.slots[slot];
             slot_config.muted = !slot_config.muted;
-            engine.borrow_mut().set_slot_gain(slot, slot_config.gain());
+            set_slot_mix(&mut engine.borrow_mut(), slot, slot_config);
             rack.mark_scene_changed(slot);
             let input_count = config.midi_inputs.len();
             rack.set_routing(slot, &config.slots[slot], input_count);
@@ -2747,7 +2774,7 @@ fn main() -> anyhow::Result<()> {
                 rack.mark_scene_changed(slot);
             }
             slot_config.volume_db = volume_db;
-            engine.borrow_mut().set_slot_gain(slot, slot_config.gain());
+            set_slot_mix(&mut engine.borrow_mut(), slot, slot_config);
             let input_count = config.midi_inputs.len();
             rack.set_routing(slot, &config.slots[slot], input_count);
             config_dirty.set(true);
@@ -2761,8 +2788,9 @@ fn main() -> anyhow::Result<()> {
         let rack = rack.clone();
         let app_weak = app.as_weak();
         let surfaces = surfaces.clone();
+        let learn = learn.clone();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
-            surfaces.apply(&engine.borrow().take_surface_events());
+            learn.poll();
             let activity = surfaces.tick();
             if let Some(app) = app_weak.upgrade() {
                 let state = app.global::<AppState>();
@@ -2973,6 +3001,8 @@ fn load_slot_preset(
     }
     for (key, plugin) in pairs {
         let result = engine.borrow_mut().load_state_file(key, &stored.dir.join(&plugin.state));
+        // The preset's mappings replace the plugin's, loaded or not.
+        rack.mappings.set_scene(key, plugin.mappings.clone());
         match result {
             Ok(()) => {
                 let current = plugin.preset.as_ref().map(PresetInfo::from);
@@ -3023,7 +3053,7 @@ fn save_scene(
         })
         .collect();
     let stored = scenes::save(&mut engine.borrow_mut(), name, &slots, previous, |key| {
-        rack.plugin_preset_state(key)
+        rack.plugin_extras(key)
     })?;
     *rack.current_scene.borrow_mut() = Some(CurrentScene::of(&stored, false));
     Ok(())
@@ -3079,7 +3109,7 @@ fn load_scene(
         let slot_config = &config.slots[slot];
         let mut engine = engine.borrow_mut();
         engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
-        engine.set_slot_gain(slot, slot_config.gain());
+        set_slot_mix(&mut engine, slot, slot_config);
         rack.set_routing(slot, slot_config, config.midi_inputs.len());
         rack.refresh_slot(&engine, slot, (!errors.is_empty()).then(|| errors.join("\n")));
     }
@@ -3143,7 +3173,7 @@ fn save_session(engine: &RefCell<Engine>, rack: &Rack) -> bool {
         changed: current.changed,
     });
     let result = session::save(&mut engine.borrow_mut(), slots, current_scene, |key| {
-        rack.plugin_preset_state(key)
+        rack.plugin_extras(key)
     });
     if let Err(err) = &result {
         log::error!("saving the session failed: {err:#}");
@@ -3252,7 +3282,7 @@ fn clear_slot(engine: &RefCell<Engine>, config: &RefCell<config::AppConfig>, rac
         let slot_config = &config.slots[slot];
         let mut engine = engine.borrow_mut();
         engine.set_slot_filter(slot, slot_config.filter(config.master_transpose));
-        engine.set_slot_gain(slot, slot_config.gain());
+        set_slot_mix(&mut engine, slot, slot_config);
         rack.set_routing(slot, slot_config, config.midi_inputs.len());
     }
     rack.session_changed();
@@ -3332,6 +3362,18 @@ fn sync_surfaces(engine: &mut Engine, config: &config::AppConfig, surfaces: &sur
     if let Some(app) = app {
         app.global::<AppState>().set_surface_summary(surfaces.summary(config).into());
     }
+}
+
+/// Gives the engine `slot`'s volume and mute.
+fn set_slot_mix(engine: &mut Engine, slot: usize, slot_config: &config::SlotConfig) {
+    engine.set_slot_gain(slot, slot_config.gain());
+    engine.set_slot_muted(slot, slot_config.muted);
+}
+
+/// Gives the engine the master volume and mute.
+fn set_master_mix(engine: &mut Engine, config: &config::AppConfig) {
+    engine.set_master_gain(config.master_gain());
+    engine.set_master_muted(config.master_muted);
 }
 
 /// Each MIDI input's devices, as the engine takes them.
