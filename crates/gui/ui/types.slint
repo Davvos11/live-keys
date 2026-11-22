@@ -212,3 +212,39 @@ export struct SlotState {
     slot-preset-folder: string,
     slot-preset-rows: [SlotPresetRow],
 }
+
+// One control of a control surface, as drawn in the bottom panel.
+export struct SurfaceControlView {
+    // 0 fader, 1 knob, 2 pad, 3 button.
+    kind: int,
+    label: string,
+    // Its cell in the surface's drawing, in pixels.
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    // What it last sent, 0..1: a fader's or knob's position, a pad's velocity
+    // or pressure.
+    value: float,
+    // A pad or button held down.
+    pressed: bool,
+    // A fader or knob moved a moment ago.
+    moving: bool,
+    // Whether it drives anything (MIDI learn).
+    mapped: bool,
+}
+
+// A MIDI device shown in the control surfaces panel.
+export struct SurfaceView {
+    // The surface's name, or the device's when there's no surface for it.
+    name: string,
+    device: string,
+    // Whether a surface is known for the device.
+    known: bool,
+    // Whether the device is plugged in.
+    connected: bool,
+    // Its drawing's size, in pixels.
+    width: float,
+    height: float,
+    controls: [SurfaceControlView],
+}

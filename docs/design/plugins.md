@@ -14,7 +14,7 @@ options. Started 2026-11-10.
   for live-keys alone, with native, interactive inline views. See Part C.
 - **"Which controls drive a plugin" means on-screen controls** — the slot's knobs, drawbars,
   buttons — set up per plugin. Hardware control (MIDI learn) comes in a later stage, with its
-  own design.
+  own design: `midi-learn.md`.
 - **No macros**: one on-screen control drives one parameter (or one MIDI CC).
 - **Presets of our instruments are visible to other hosts**: they're stored in the standalone
   format's own preset mechanism, not only in live-keys.

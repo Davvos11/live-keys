@@ -1,0 +1,23 @@
+{
+  "id": "akai-lpd8",
+  "name": "Akai LPD8",
+  "devices": ["LPD8"],
+  "banks": [
+    {
+      "name": "Pads", "kind": "pad", "x": 0, "y": 0, "rows": 2, "columns": 4,
+      "numbering": "bottom-first", "prefix": "P", "channel": 1,
+      "controls": [
+        { "note": 36 }, { "note": 37 }, { "note": 38 }, { "note": 39 },
+        { "note": 40 }, { "note": 41 }, { "note": 42 }, { "note": 43 }
+      ]
+    },
+    {
+      "name": "Knobs", "kind": "knob", "x": 188, "y": 0, "rows": 2, "columns": 4,
+      "prefix": "K", "channel": 1,
+      "controls": [
+        { "cc": 1 }, { "cc": 2 }, { "cc": 3 }, { "cc": 4 },
+        { "cc": 5 }, { "cc": 6 }, { "cc": 7 }, { "cc": 8 }
+      ]
+    }
+  ]
+}

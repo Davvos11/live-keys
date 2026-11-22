@@ -10,6 +10,8 @@ export global SlotGrid {
 
 // The scenes on the left, then the slots in a grid of `SlotGrid.columns`.
 export component LiveTab inherits Rectangle {
+    // As `SlotPanel.squeeze`.
+    in property <float> squeeze;
     callback choose-plugin(/* slot */ int, /* category */ int);
 
     background: Theme.background;
@@ -24,6 +26,7 @@ export component LiveTab inherits Rectangle {
                     property <int> index: row-index * SlotGrid.columns + column-index;
                     slot-index: self.index;
                     slot: AppState.slots[self.index];
+                    squeeze: root.squeeze;
                     visible: self.index < AppState.slots.length;
                     choose-plugin(category) => { root.choose-plugin(self.index, category); }
                     // Equal sizes regardless of what each slot's content prefers.

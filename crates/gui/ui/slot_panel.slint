@@ -405,6 +405,10 @@ component RowLabel inherits Text {
 export component SlotPanel inherits Rectangle {
     in property <int> slot-index;
     in property <SlotState> slot;
+    // 0..1: how far the window's height makes it give up padding (the header's
+    // height, the gaps in the first tab), to make room for the control
+    // surfaces panel; 0 = none.
+    in property <float> squeeze;
     // Asks for the plugin picker, opened on `category`.
     callback choose-plugin(/* category */ int);
 
@@ -491,7 +495,7 @@ export component SlotPanel inherits Rectangle {
     if root.slot.closed-name == "" && !root.is-empty : VerticalLayout {
         // The header: photo, name, buttons, volume and presets.
         Rectangle {
-            height: 154px;
+            height: 154px - 30px * root.squeeze;
             clip: true;
             Image {
                 width: 100%;
@@ -614,10 +618,10 @@ export component SlotPanel inherits Rectangle {
                     // spaces its own items, so it has no side padding.
                     height: root.tab == 0 ? flick.height : self.preferred-height;
                     alignment: root.tab == 0 ? LayoutAlignment.space-evenly : LayoutAlignment.start;
-                    padding: 10px;
+                    padding: 10px - 6px * root.squeeze;
                     padding-left: root.tab == 0 ? 0px : 10px;
                     padding-right: root.tab == 0 ? 0px : 14px;
-                    spacing: 12px;
+                    spacing: 12px - 8px * root.squeeze;
 
                     if root.slot.status != "" : Text {
                         text: root.slot.status;

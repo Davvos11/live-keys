@@ -1,0 +1,396 @@
+// The control surfaces panel at the bottom of the window (Penpot: "MIDI learn
+// 1"): the MIDI devices shown, each drawn as its surface's banks of faders,
+// knobs, pads and buttons, moving as the hardware does. See
+// `docs/design/midi-learn.md`.
+import { CheckBox } from "std-widgets.slint";
+import { AppState, AppLogic, SurfaceView, SurfaceControlView } from "globals.slint";
+import { Theme, Icons, KButton, DropdownButton } from "widgets.slint";
+import { PopupFrame } from "slot_panel.slint";
+
+export global SurfaceSizes {
+    // The panel expanded, and collapsed to one row.
+    out property <length> expanded: 140px;
+    out property <length> collapsed: 44px;
+    // The left column, as wide as the scenes pane above it.
+    out property <length> column: 300px;
+
+    // A value's colour: the primary colour once it drives something.
+    public pure function value-colour(mapped: bool) -> brush {
+        return mapped ? Theme.accent : Theme.text-faint;
+    }
+}
+
+component ControlLabel inherits Text {
+    font-size: Theme.tiny-font-size;
+    color: Theme.text-faint;
+    horizontal-alignment: center;
+}
+
+// The fader's cell is 28×100.
+component SurfaceFader inherits Rectangle {
+    in property <SurfaceControlView> control;
+    property <length> track: 70px;
+
+    Rectangle {
+        x: 12px;
+        y: 6px;
+        width: 4px;
+        height: root.track;
+        border-radius: 2px;
+        background: Theme.control-border;
+    }
+    Rectangle {
+        x: 12px;
+        y: 6px + root.track * (1 - root.control.value);
+        width: 4px;
+        height: root.track * root.control.value;
+        border-radius: 2px;
+        background: SurfaceSizes.value-colour(root.control.mapped);
+    }
+    Rectangle {
+        x: 5px;
+        y: 2px + root.track * (1 - root.control.value);
+        width: 18px;
+        height: 8px;
+        border-radius: 2px;
+        background: root.control.moving ? Theme.text : Theme.text-muted;
+    }
+    ControlLabel {
+        y: root.height - self.height - 2px;
+        width: root.width;
+        text: root.control.label;
+    }
+}
+
+// The knob's cell is 44×54.
+component SurfaceKnob inherits Rectangle {
+    in property <SurfaceControlView> control;
+    property <angle> start: -135deg;
+    property <angle> end: self.start + 270deg * root.control.value;
+
+    // An SVG arc on a circle of radius 40 around (50, 50), clockwise.
+    function arc(from: angle, to: angle) -> string {
+        let large = to - from > 180deg ? 1 : 0;
+        return "M \{50 + 40 * Math.sin(from)} \{50 - 40 * Math.cos(from)} A 40 40 0 \{large} 1 \{50 + 40 * Math.sin(to)} \{50 - 40 * Math.cos(to)}";
+    }
+
+    dial := Rectangle {
+        x: 6px;
+        y: 3px;
+        width: 32px;
+        height: 32px;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: arc(-135deg, 135deg);
+            stroke: Theme.control-border;
+            stroke-width: 3px;
+            stroke-line-cap: round;
+        }
+        if root.control.value > 0.004 : Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: arc(root.start, root.end);
+            stroke: SurfaceSizes.value-colour(root.control.mapped);
+            stroke-width: 3px;
+            stroke-line-cap: round;
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.control-border;
+            background: root.control.moving ? Theme.control-hover : Theme.control;
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: "M \{50 + 8 * Math.sin(root.end)} \{50 - 8 * Math.cos(root.end)} L \{50 + 28 * Math.sin(root.end)} \{50 - 28 * Math.cos(root.end)}";
+            stroke: Theme.text;
+            stroke-width: 2px;
+            stroke-line-cap: round;
+        }
+    }
+    ControlLabel {
+        y: root.height - self.height - 2px;
+        width: root.width;
+        text: root.control.label;
+    }
+}
+
+// The pad's cell is 44×44; lit while held, brighter the harder.
+component SurfacePad inherits Rectangle {
+    in property <SurfaceControlView> control;
+
+    Rectangle {
+        x: 3px;
+        y: 3px;
+        width: root.width - 6px;
+        height: root.height - 6px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: root.control.mapped ? Theme.accent : Theme.control-border;
+        background: root.control.pressed ? Theme.accent.with-alpha(0.35 + 0.65 * root.control.value) : Theme.control;
+        Text {
+            x: 4px;
+            y: parent.height - self.height - 2px;
+            text: root.control.label;
+            font-size: Theme.tiny-font-size;
+            color: root.control.pressed ? Theme.on-accent : Theme.text-faint;
+        }
+    }
+}
+
+// The button's cell is 36×38.
+component SurfaceButton inherits Rectangle {
+    in property <SurfaceControlView> control;
+
+    Rectangle {
+        x: 5px;
+        y: 4px;
+        width: root.width - 10px;
+        height: 14px;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: root.control.mapped ? Theme.accent : Theme.control-border;
+        background: root.control.pressed ? Theme.accent : Theme.control;
+    }
+    ControlLabel {
+        y: root.height - self.height - 2px;
+        width: root.width;
+        text: root.control.label;
+    }
+}
+
+// One device: its name over its surface, or a note that there's none.
+component SurfaceDrawing inherits Rectangle {
+    in property <SurfaceView> surface;
+    property <length> name-height: 18px;
+
+    width: root.surface.known ? max(root.surface.width * 1px, name.preferred-width) : 300px;
+
+    name := Text {
+        x: 0;
+        y: 0;
+        height: root.name-height;
+        text: root.surface.connected ? root.surface.name : root.surface.name + " (not connected)";
+        font-size: Theme.tiny-font-size;
+        font-weight: 600;
+        color: Theme.text-faint;
+        vertical-alignment: center;
+    }
+    if root.surface.known : Rectangle {
+        y: root.name-height;
+        width: root.surface.width * 1px;
+        height: root.surface.height * 1px;
+        opacity: root.surface.connected ? 1 : 0.4;
+        for control in root.surface.controls : Rectangle {
+            x: control.x * 1px;
+            y: control.y * 1px;
+            width: control.width * 1px;
+            height: control.height * 1px;
+            if control.kind == 0 : SurfaceFader { control: control; }
+            if control.kind == 1 : SurfaceKnob { control: control; }
+            if control.kind == 2 : SurfacePad { control: control; }
+            if control.kind == 3 : SurfaceButton { control: control; }
+        }
+    }
+    if !root.surface.known : Rectangle {
+        y: root.name-height + 4px;
+        height: 72px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        background: Theme.control;
+        HorizontalLayout {
+            padding: 10px;
+            spacing: 10px;
+            Text {
+                horizontal-stretch: 1;
+                text: "No control surface is known for this device yet.";
+                color: Theme.text-muted;
+                font-size: Theme.small-font-size;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                KButton {
+                    text: "Hide";
+                    clicked => { AppLogic.toggle-surface-device(root.surface.device); }
+                }
+            }
+        }
+    }
+}
+
+// The devices shown: a button summarising them that opens a checklist of every
+// device (as a MIDI input's).
+component SurfaceDevices inherits Rectangle {
+    height: Theme.control-height;
+
+    devices := DropdownButton {
+        width: 100%;
+        text: AppState.surface-summary;
+        placeholder: "Choose devices…";
+        open: popup.is-open;
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        // Opens upwards: the panel is at the bottom of the window.
+        y: -self.height - 2px;
+        width: root.width;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        PopupFrame {
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                for device in AppState.surface-devices : CheckBox {
+                    text: device.available ? device.name : device.name + " (not connected)";
+                    checked: device.checked;
+                    // Clicking sets `checked` itself, replacing the binding above.
+                    property <bool> source: device.checked;
+                    changed source => { self.checked = self.source; }
+                    toggled => { AppLogic.toggle-surface-device(device.name); }
+                }
+                if AppState.surface-devices.length == 0 : Text {
+                    text: "No MIDI devices found";
+                    color: Theme.text-faint;
+                }
+            }
+        }
+    }
+}
+
+// The panel. `expanded`: the full panel, else one row. `overlay`: it's shown
+// over the slots (the window is too short to make room), so its button closes
+// it rather than collapsing it.
+export component SurfacesPanel inherits Rectangle {
+    in property <bool> expanded;
+    in property <bool> overlay;
+    // The button at the top right of the left column (or the row's end).
+    callback toggle();
+
+    background: Theme.background;
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.divider;
+    }
+
+    if !root.expanded : HorizontalLayout {
+        padding: 6px;
+        padding-left: 10px;
+        spacing: 10px;
+        Text {
+            text: "Control surfaces";
+            color: Theme.text-muted;
+            font-size: Theme.font-size;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            // Lit while a shown device sends something.
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppState.surface-activity ? Theme.accent : Theme.control-border;
+            }
+        }
+        SurfaceDevices {
+            width: 280px;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        KButton {
+            icon: Icons.chevron-up;
+            clicked => { root.toggle(); }
+        }
+    }
+
+    if root.expanded : HorizontalLayout {
+        // The left column.
+        Rectangle {
+            width: SurfaceSizes.column;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.divider;
+            }
+            VerticalLayout {
+                padding: 10px;
+                padding-top: 6px;
+                spacing: 8px;
+                HorizontalLayout {
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Control surfaces";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-size;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    KButton {
+                        icon: root.overlay ? Icons.close : Icons.chevron-down;
+                        clicked => { root.toggle(); }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+                SurfaceDevices { }
+            }
+        }
+        // The surfaces, side by side, scrolling sideways when they don't fit.
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            flick := Flickable {
+                content-width: row.preferred-width;
+                row := HorizontalLayout {
+                    padding: 12px;
+                    padding-top: 6px;
+                    spacing: 16px;
+                    alignment: start;
+                    for surface[index] in AppState.surfaces : HorizontalLayout {
+                        spacing: 16px;
+                        if index > 0 : Rectangle {
+                            width: 1px;
+                            background: Theme.divider;
+                        }
+                        SurfaceDrawing { surface: surface; }
+                    }
+                    if AppState.surfaces.length == 0 : Text {
+                        text: "Choose the MIDI devices to show here: their knobs, faders and pads, as you move them.";
+                        color: Theme.text-faint;
+                        font-size: Theme.small-font-size;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            // Mouse wheels scroll sideways.
+            TouchArea {
+                scroll-event(event) => {
+                    if (flick.content-width <= flick.width) {
+                        return reject;
+                    }
+                    let delta = event.delta-x != 0 ? event.delta-x : event.delta-y;
+                    flick.content-x = Math.clamp(flick.content-x + delta, flick.width - flick.content-width, 0);
+                    accept
+                }
+            }
+        }
+    }
+}

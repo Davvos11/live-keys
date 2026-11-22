@@ -34,6 +34,19 @@ pub struct AppConfig {
     pub master_transpose: i8,
     #[serde(default)]
     pub metronome: crate::metronome::MetronomeConfig,
+    #[serde(default)]
+    pub surfaces: SurfacesConfig,
+}
+
+/// The control surfaces panel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurfacesConfig {
+    /// The MIDI devices shown, by `midi_device_name`, in order; `None` until the
+    /// user picks: then every device plugged in that has a known surface.
+    pub devices: Option<Vec<String>>,
+    /// Collapsed to one row by the user.
+    pub collapsed: bool,
 }
 
 impl AppConfig {

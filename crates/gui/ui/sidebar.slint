@@ -65,8 +65,12 @@ component BeatDots inherits Rectangle {
     }
 }
 
-// Semitones added to every slot's notes, on top of each slot's own.
+// Semitones added to every slot's notes, on top of each slot's own; and, at
+// the window's top-right corner, the fullscreen button.
 component TransposeSection inherits HorizontalLayout {
+    in property <bool> fullscreen;
+    callback toggle-fullscreen();
+
     vertical-stretch: 0;
     padding: 5px;
     padding-top: 10px;
@@ -85,6 +89,11 @@ component TransposeSection inherits HorizontalLayout {
         property <int> source: AppState.master-transpose;
         changed source => { self.value = self.source; }
         changed(value) => { AppLogic.set-master-transpose(value); }
+    }
+    Rectangle { width: 6px; }
+    KButton {
+        icon: root.fullscreen ? Icons.minimize : Icons.maximize;
+        clicked => { root.toggle-fullscreen(); }
     }
 }
 
@@ -348,6 +357,8 @@ component MidiSection inherits VerticalLayout {
 export component Sidebar inherits Rectangle {
     // Asks for the plugin picker, for an audio effect on the master chain.
     callback choose-effect();
+    in property <bool> fullscreen;
+    callback toggle-fullscreen();
 
     property <int> fx-index: -1;
     property <EffectRow> fx-plugin: AppState.master-effects[root.fx-index];
@@ -363,7 +374,10 @@ export component Sidebar inherits Rectangle {
     }
 
     VerticalLayout {
-        TransposeSection { }
+        TransposeSection {
+            fullscreen: root.fullscreen;
+            toggle-fullscreen => { root.toggle-fullscreen(); }
+        }
         Divider { }
         MetronomeSection { }
         Divider { }

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use live_keys_core::{MidiEvent, Producer};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 /// Most MIDI inputs the engine routes (bits of [`MidiFilter::inputs`](live_keys_core::MidiFilter)).
 pub const MAX_MIDI_INPUTS: usize = 8;
@@ -20,6 +20,19 @@ pub(crate) struct RoutedMidi {
 /// connection's callback and [`Engine::send_midi`](crate::Engine::send_midi)
 /// (none of them the audio thread, so a lock is fine).
 pub(crate) type SharedMidiTx = Arc<Mutex<Option<Producer<RoutedMidi>>>>;
+
+/// A MIDI event from a device shown as a control surface, for the panel that
+/// draws it (see [`Engine::set_surface_devices`](crate::Engine::set_surface_devices)).
+#[derive(Debug, Clone)]
+pub struct SurfaceEvent {
+    /// The device's [`midi_device_name`].
+    pub device: Arc<str>,
+    pub event: MidiEvent,
+}
+
+/// How many surface events may wait for the control thread; more are dropped
+/// (they only move the panel's drawing).
+const SURFACE_QUEUE: usize = 1024;
 
 /// Lists MIDI input port names.
 pub fn list_midi_ports() -> Result<Vec<String>> {
@@ -71,6 +84,8 @@ pub fn find_midi_port(name_filter: Option<&str>) -> Result<String> {
 struct Connection {
     /// The inputs its events go to; changed in place when assignments change.
     inputs: Arc<AtomicU32>,
+    /// Whether its events also go to the surface queue.
+    surface: Arc<AtomicBool>,
     _connection: midir::MidiInputConnection<()>,
 }
 
@@ -79,22 +94,38 @@ struct Connection {
 /// are connected, and [`MidiInputs::sync`] connects ones that turn up later and
 /// lets go of ones that disappeared. A device on several inputs is connected
 /// once, its events tagged with all of them. Independent of the audio stream:
-/// without one, events are dropped.
+/// without one, events are dropped. Devices shown as control surfaces are
+/// connected too (on an input or not), and their events also go to the surface
+/// queue.
 pub(crate) struct MidiInputs {
     pub tx: SharedMidiTx,
     /// Per input, its devices.
     devices: Vec<Vec<String>>,
+    /// Devices shown as control surfaces.
+    surfaces: Vec<String>,
+    surface_tx: mpsc::SyncSender<SurfaceEvent>,
     /// By full port name.
     connections: HashMap<String, Connection>,
 }
 
 impl MidiInputs {
-    pub fn new() -> Self {
-        Self {
+    /// Also returns the surface queue's receiving end.
+    pub fn new() -> (Self, mpsc::Receiver<SurfaceEvent>) {
+        let (surface_tx, surface_rx) = mpsc::sync_channel(SURFACE_QUEUE);
+        let inputs = Self {
             tx: Arc::new(Mutex::new(None)),
             devices: Vec::new(),
+            surfaces: Vec::new(),
+            surface_tx,
             connections: HashMap::new(),
-        }
+        };
+        (inputs, surface_rx)
+    }
+
+    /// Sets the devices shown as control surfaces and connects accordingly.
+    pub fn set_surfaces(&mut self, devices: Vec<String>) -> Vec<String> {
+        self.surfaces = devices;
+        self.sync()
     }
 
     /// Sets each input's devices (at most [`MAX_MIDI_INPUTS`] inputs; more are
@@ -114,14 +145,18 @@ impl MidiInputs {
                 return Vec::new();
             }
         };
-        let wanted: HashMap<&str, u32> = ports
+        let wanted: HashMap<&str, (u32, bool)> = ports
             .iter()
-            .map(|port| (port.as_str(), self.inputs_of(midi_device_name(port))))
-            .filter(|&(_, inputs)| inputs != 0)
+            .map(|port| {
+                let device = midi_device_name(port);
+                (port.as_str(), (self.inputs_of(device), self.surfaces.iter().any(|name| name == device)))
+            })
+            .filter(|&(_, (inputs, surface))| inputs != 0 || surface)
             .collect();
         self.connections.retain(|port, connection| match wanted.get(port.as_str()) {
-            Some(&inputs) => {
+            Some(&(inputs, surface)) => {
                 connection.inputs.store(inputs, Ordering::Relaxed);
+                connection.surface.store(surface, Ordering::Relaxed);
                 true
             }
             None => {
@@ -129,11 +164,11 @@ impl MidiInputs {
                 false
             }
         });
-        for (&port, &inputs) in &wanted {
+        for (&port, &(inputs, surface)) in &wanted {
             if self.connections.contains_key(port) {
                 continue;
             }
-            match connect(port, inputs, self.tx.clone()) {
+            match connect(port, inputs, surface, self.tx.clone(), self.surface_tx.clone()) {
                 Ok(connection) => {
                     log::info!("MIDI input connected: {port}");
                     self.connections.insert(port.to_string(), connection);
@@ -155,7 +190,13 @@ impl MidiInputs {
     }
 }
 
-fn connect(port_name: &str, inputs: u32, tx: SharedMidiTx) -> Result<Connection> {
+fn connect(
+    port_name: &str,
+    inputs: u32,
+    surface: bool,
+    tx: SharedMidiTx,
+    surface_tx: mpsc::SyncSender<SurfaceEvent>,
+) -> Result<Connection> {
     let midi_input = midir::MidiInput::new("live-keys")?;
     let port = midi_input
         .ports()
@@ -164,6 +205,9 @@ fn connect(port_name: &str, inputs: u32, tx: SharedMidiTx) -> Result<Connection>
         .context("port went away")?;
     let inputs = Arc::new(AtomicU32::new(inputs));
     let callback_inputs = inputs.clone();
+    let surface = Arc::new(AtomicBool::new(surface));
+    let callback_surface = surface.clone();
+    let device: Arc<str> = midi_device_name(port_name).into();
     let connection = midi_input
         .connect(
             &port,
@@ -174,8 +218,13 @@ fn connect(port_name: &str, inputs: u32, tx: SharedMidiTx) -> Result<Connection>
                 let Some(event) = MidiEvent::from_raw(0, bytes) else {
                     return;
                 };
+                if callback_surface.load(Ordering::Relaxed) {
+                    // Full: the panel misses a move, nothing else.
+                    let _ = surface_tx.try_send(SurfaceEvent { device: device.clone(), event });
+                }
                 let inputs = callback_inputs.load(Ordering::Relaxed);
-                if let Ok(mut tx) = tx.lock()
+                if inputs != 0
+                    && let Ok(mut tx) = tx.lock()
                     && let Some(tx) = tx.as_mut()
                     && let Err(err) = tx.push(RoutedMidi { inputs, event })
                 {
@@ -191,6 +240,7 @@ fn connect(port_name: &str, inputs: u32, tx: SharedMidiTx) -> Result<Connection>
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     Ok(Connection {
         inputs,
+        surface,
         _connection: connection,
     })
 }

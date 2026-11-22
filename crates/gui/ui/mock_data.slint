@@ -2,7 +2,7 @@
 // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall
 // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.
 
-import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView } from "types.slint";
 
 export global MockData {
     out property <[string]> audio-devices: [
@@ -70,6 +70,9 @@ export global MockData {
         "USB Audio, USB Audio",
     ];
     out property <int> selected-audio-index: 0;
+    out property <[SurfaceView]> surfaces: [];
+    out property <[MidiDeviceRow]> surface-devices: [];
+    out property <string> surface-summary: "";
     out property <[MidiInputRow]> midi-inputs: [
         {
             summary: "LPD8:LPD8 MIDI 1",

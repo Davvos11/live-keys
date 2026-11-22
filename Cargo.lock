@@ -3016,6 +3016,7 @@ dependencies = [
  "live-keys-clap-ui",
  "live-keys-engine",
  "live-keys-lv2-ui",
+ "live-keys-surfaces",
  "live-keys-vst3-ui",
  "log",
  "rfd",
@@ -3091,6 +3092,17 @@ dependencies = [
  "log",
  "midir",
  "rtrb",
+]
+
+[[package]]
+name = "live-keys-surfaces"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "live-keys-core",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -6,11 +6,18 @@ import { AppState, AppLogic, Category } from "globals.slint";
 import { ParamsWindow } from "params_window.slint";
 import { SettingsWindow } from "settings_window.slint";
 import { Theme } from "theme.slint";
+import { SurfacesPanel, SurfaceSizes } from "surfaces.slint";
 
 export { AppState, AppLogic, ParamsWindow, SettingsWindow }
 
 // The Live view (scenes and slots, 1200×995 in the Penpot design's "Live
-// (window minimum)") and the right sidebar (300 wide) beside it.
+// (window minimum)") with the control surfaces panel under it, and the right
+// sidebar (300 wide) beside them.
+//
+// The panel's room comes from the window's height: tall enough, it's docked and
+// expanded (unless the user collapsed it); a little short, the slots give up
+// padding first (`squeeze`); shorter still, it's one row whose button shows it
+// expanded over the slots.
 export component AppWindow inherits Window {
     title: "Live Keys";
     min-width: 1500px;
@@ -19,6 +26,18 @@ export component AppWindow inherits Window {
     preferred-height: 995px;
     default-font-family: Theme.font-family;
     default-font-size: 16px;
+    forward-focus: keys;
+
+    // Two rows of slots at their natural padding, and how much padding they can
+    // give up.
+    property <length> natural-slots: 995px;
+    property <length> squeezable: 116px;
+    property <bool> fits-expanded: root.height >= root.natural-slots - root.squeezable + SurfaceSizes.expanded;
+    property <bool> docked-expanded: !AppState.surfaces-collapsed && root.fits-expanded;
+    property <length> panel-height: root.docked-expanded ? SurfaceSizes.expanded : SurfaceSizes.collapsed;
+    property <float> squeeze: Math.clamp((root.natural-slots + root.panel-height - root.height) / root.squeezable, 0, 1);
+    // The panel shown over the slots, when it doesn't fit under them.
+    property <bool> overlay-open;
 
     function choose-plugin(slot: int, category: int) {
         AppLogic.filter-picker(category, "");
@@ -27,10 +46,26 @@ export component AppWindow inherits Window {
         picker.show();
     }
 
+    keys := FocusScope {
+        KeyBinding {
+            keys: @keys(F11);
+            activated => { root.full-screen = !root.full-screen; }
+        }
+    }
+
+    // Pinned to the window, so the window's height (which the panel's room is
+    // computed from) doesn't come from this layout.
     HorizontalLayout {
+      x: 0;
+      y: 0;
+      width: root.width;
+      height: root.height;
+      VerticalLayout {
+        horizontal-stretch: 1;
         Rectangle {
-            horizontal-stretch: 1;
+            vertical-stretch: 1;
             LiveTab {
+                squeeze: root.squeeze;
                 choose-plugin(slot, category) => { root.choose-plugin(slot, category); }
             }
             // Over the slots, rather than instead of them, so the window still
@@ -60,8 +95,39 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        SurfacesPanel {
+            height: root.panel-height;
+            expanded: root.docked-expanded;
+            toggle => {
+                if (root.fits-expanded) {
+                    AppLogic.set-surfaces-collapsed(!AppState.surfaces-collapsed);
+                } else {
+                    root.overlay-open = !root.overlay-open;
+                }
+            }
+        }
+      }
         Sidebar {
+            fullscreen: root.full-screen;
+            toggle-fullscreen => { root.full-screen = !root.full-screen; }
             choose-effect => { root.choose-plugin(AppState.master-slot, Category.audio-effect); }
+        }
+    }
+
+    // Over the bottom of the slots, above the panel's row.
+    if root.overlay-open && !root.docked-expanded : Rectangle {
+        x: 0;
+        y: root.height - root.panel-height - self.height;
+        width: root.width - 300px;
+        height: SurfaceSizes.expanded;
+        drop-shadow-blur: 24px;
+        drop-shadow-offset-y: -6px;
+        drop-shadow-color: #00000099;
+        background: Theme.background;
+        SurfacesPanel {
+            expanded: true;
+            overlay: true;
+            toggle => { root.overlay-open = false; }
         }
     }
 

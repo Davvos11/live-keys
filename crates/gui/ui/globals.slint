@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -14,6 +14,15 @@ export global AppState {
     in property <int> selected-audio-index: Platform.uses-mock-data ? MockData.selected-audio-index : -1;
     in property <[MidiInputRow]> midi-inputs: Platform.uses-mock-data ? MockData.midi-inputs : [];
     in property <int> max-midi-inputs: 8;
+    // The control surfaces panel: the devices shown, every device that can be
+    // (plugged in, or shown and not), a summary of the shown ones, whether the
+    // panel is collapsed (the user's choice), and whether any shown device
+    // sent something a moment ago.
+    in property <[SurfaceView]> surfaces: Platform.uses-mock-data ? MockData.surfaces : [];
+    in property <[MidiDeviceRow]> surface-devices: Platform.uses-mock-data ? MockData.surface-devices : [];
+    in property <string> surface-summary: Platform.uses-mock-data ? MockData.surface-summary : "";
+    in property <bool> surfaces-collapsed: false;
+    in property <bool> surface-activity: false;
     // The scene list, filtered by `AppLogic.filter-scenes`; `scene-count` is
     // every scene, matching or not.
     in property <[SceneRow]> scene-rows: Platform.uses-mock-data ? MockData.scene-rows : [];
@@ -100,6 +109,10 @@ export global Category {
 // 1 for its audio effects.
 export global AppLogic {
     callback select-audio-device(string);
+    // Shows or hides MIDI device `name` in the control surfaces panel.
+    callback toggle-surface-device(/* name */ string);
+    // Collapses the control surfaces panel to one row, or expands it.
+    callback set-surfaces-collapsed(/* collapsed */ bool);
     callback add-midi-input();
     // Input 0 can't be removed.
     callback remove-midi-input(/* input */ int);

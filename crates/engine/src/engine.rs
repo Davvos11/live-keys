@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::find_output_device;
-use crate::midi::{MidiInputs, RoutedMidi};
+use crate::midi::{MidiInputs, RoutedMidi, SurfaceEvent};
 use crate::paths::build_lv2_path;
 use crate::metronome::{Click, MetronomeSettings};
 use crate::setbfree::Setbfree;
@@ -307,6 +307,7 @@ pub struct Engine {
     /// with the next stream teardown (never on the audio thread).
     orphaned: Option<Box<AudioState>>,
     midi_inputs: MidiInputs,
+    surface_events: std::sync::mpsc::Receiver<SurfaceEvent>,
     audio_host: cpal::Host,
     /// `None` until the first [`PluginScan`] is installed.
     hosts: Option<Hosts>,
@@ -337,13 +338,15 @@ impl Engine {
     /// An engine that knows no plugins until a [`PluginScan`] is installed
     /// ([`Engine::install_plugins`]).
     pub fn unscanned(max_block_size: usize) -> Self {
+        let (midi_inputs, surface_events) = MidiInputs::new();
         Self {
             audio_host: cpal::default_host(),
             hosts: None,
             max_block_size,
             running: None,
             orphaned: None,
-            midi_inputs: MidiInputs::new(),
+            midi_inputs,
+            surface_events,
             slots: Default::default(),
             settings: Default::default(),
             master_gain: 1.0,
@@ -513,6 +516,20 @@ impl Engine {
     /// MIDI input port present. Kept across stream restarts.
     pub fn set_midi_inputs(&mut self, devices: Vec<Vec<String>>) -> Vec<String> {
         self.midi_inputs.set_devices(devices)
+    }
+
+    /// Sets which MIDI devices (by [`midi_device_name`](crate::midi_device_name))
+    /// are shown as control surfaces: they're connected whether they feed a MIDI
+    /// input or not, and their events are also handed to
+    /// [`Engine::take_surface_events`]. Returns every MIDI input port present.
+    pub fn set_surface_devices(&mut self, devices: Vec<String>) -> Vec<String> {
+        self.midi_inputs.set_surfaces(devices)
+    }
+
+    /// The events from control-surface devices since the last call, oldest
+    /// first (at most a thousand or so are kept; more are dropped).
+    pub fn take_surface_events(&self) -> Vec<SurfaceEvent> {
+        self.surface_events.try_iter().collect()
     }
 
     /// Connects assigned MIDI devices that were plugged in since the last call

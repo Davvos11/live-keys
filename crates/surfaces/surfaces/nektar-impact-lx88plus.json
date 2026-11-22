@@ -1,0 +1,39 @@
+{
+  "id": "nektar-impact-lx88plus",
+  "name": "Nektar Impact LX88+",
+  "devices": ["Impact LX88+"],
+  "banks": [
+    {
+      "name": "Faders", "kind": "fader", "x": 0, "y": 0, "rows": 1, "columns": 9,
+      "prefix": "F", "channel": 1,
+      "controls": [
+        { "cc": 80 }, { "cc": 81 }, { "cc": 82 }, { "cc": 83 }, { "cc": 85 },
+        { "cc": 86 }, { "cc": 87 }, { "cc": 88 }, { "cc": 3 }
+      ]
+    },
+    {
+      "name": "Knobs", "kind": "knob", "x": 264, "y": 0, "rows": 1, "columns": 8,
+      "prefix": "K", "channel": 1,
+      "controls": [
+        { "cc": 89 }, { "cc": 90 }, { "cc": 96 }, { "cc": 97 },
+        { "cc": 116 }, { "cc": 117 }, { "cc": 118 }, { "cc": 119 }
+      ]
+    },
+    {
+      "name": "Pads", "kind": "pad", "x": 264, "y": 56, "rows": 1, "columns": 8,
+      "prefix": "P", "channel": 10, "pressure": "channel",
+      "controls": [
+        { "note": 36 }, { "note": 37 }, { "note": 38 }, { "note": 39 },
+        { "note": 40 }, { "note": 41 }, { "note": 42 }, { "note": 43 }
+      ]
+    },
+    {
+      "name": "Wheels", "kind": "fader", "x": 628, "y": 0, "rows": 1, "columns": 2,
+      "channel": 1,
+      "controls": [
+        { "pitch-bend": true, "label": "Pitch" },
+        { "cc": 1, "label": "Mod" }
+      ]
+    }
+  ]
+}

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
-    AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, ParamRow, PickerRow, PresetRow,
+    AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
     SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow,
 };
 
@@ -119,6 +119,8 @@ slint_struct!(EffectRow {
 slint_struct!(SlotPresetRow { name, folder, count, current });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
+slint_struct!(SurfaceControlView { kind, label, x, y, width, height, value, pressed, moving, mapped });
+slint_struct!(SurfaceView { name, device, known, connected, width, height, controls });
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
 slint_struct!(PanelCell {
@@ -148,12 +150,15 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
          import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SceneSlotChoice, SlotState } from \"types.slint\";\n\n\
+         SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView } from \"types.slint\";\n\n\
          export global MockData {\n",
     );
     property(&mut out, "[string]", "audio-devices", &state.get_audio_devices());
     property(&mut out, "int", "selected-audio-index", &state.get_selected_audio_index());
     property(&mut out, "[MidiInputRow]", "midi-inputs", &state.get_midi_inputs());
+    property(&mut out, "[SurfaceView]", "surfaces", &state.get_surfaces());
+    property(&mut out, "[MidiDeviceRow]", "surface-devices", &state.get_surface_devices());
+    property(&mut out, "string", "surface-summary", &state.get_surface_summary());
     property(&mut out, "[SceneRow]", "scene-rows", &state.get_scene_rows());
     property(&mut out, "int", "scene-count", &state.get_scene_count());
     property(&mut out, "string", "current-scene", &state.get_current_scene());

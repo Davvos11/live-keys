@@ -10,6 +10,7 @@ mod scenes;
 mod session;
 mod slot_presets;
 mod slot_view;
+mod surfaces;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 use live_keys_engine::{
     Engine, LoadedPluginMeta, MAX_EFFECTS, MAX_MIDI_EFFECTS, ParamInfo, ParamKind, PluginEditor,
     MASTER_SLOT, PluginInfo, PluginKey, PluginKind, PluginScan, PresetInfo, SLOT_COUNT, Section, SlotChain,
-    MAX_MIDI_INPUTS, default_plugin_search_paths, list_logical_output_devices,
+    MAX_MIDI_INPUTS, default_plugin_search_paths, list_logical_output_devices, list_midi_ports,
 };
 use live_keys_lv2_ui::{
     LaunchUiRequest, PluginUiHandle, PortMessage, UiKind, best_supported_ui, launch_ui,
@@ -1252,6 +1253,14 @@ fn main() -> anyhow::Result<()> {
         let ports = engine.borrow_mut().set_midi_inputs(midi_input_devices(&config.borrow()));
         midi_inputs.set_ports(&ports, &config.borrow());
     }
+    let surfaces = Rc::new(surfaces::SurfacesUi::new(live_keys_surfaces::Library::load()));
+    {
+        let ports = list_midi_ports().unwrap_or_default();
+        let config = config.borrow();
+        surfaces.set_ports(&ports, &config);
+        surfaces.refresh(&config);
+        sync_surfaces(&mut engine.borrow_mut(), &config, &surfaces, None);
+    }
     // Param changes from a plugin's own open GUI arrive as `(key, param_id, value)`
     // — on its hosting thread for LV2, on this thread for VST3; they're forwarded
     // here and applied to the engine from this (the control) thread by the poll
@@ -1276,6 +1285,10 @@ fn main() -> anyhow::Result<()> {
     state.set_audio_devices(string_model(audio_devices));
 
     state.set_midi_inputs(ModelRc::from(midi_inputs.rows.clone()));
+    state.set_surfaces(ModelRc::from(surfaces.views.clone()));
+    state.set_surface_devices(ModelRc::from(surfaces.devices.clone()));
+    state.set_surface_summary(surfaces.summary(&config.borrow()).into());
+    state.set_surfaces_collapsed(config.borrow().surfaces.collapsed);
     state.set_scene_rows(ModelRc::from(rack.scene_rows.clone()));
     state.set_scene_form_slots(ModelRc::from(rack.scene_form_slots.clone()));
     state.set_max_midi_inputs(MAX_MIDI_INPUTS as i32);
@@ -1465,6 +1478,40 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         logic.on_midi_panic(move || engine.borrow_mut().panic());
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let surfaces = surfaces.clone();
+        let app_weak = app.as_weak();
+        logic.on_toggle_surface_device(move |device| {
+            let mut config = config.borrow_mut();
+            let mut devices = surfaces.shown_devices(&config);
+            match devices.iter().position(|name| *name == device.as_str()) {
+                Some(index) => {
+                    devices.remove(index);
+                }
+                None => devices.push(device.to_string()),
+            }
+            config.surfaces.devices = Some(devices);
+            surfaces.refresh(&config);
+            sync_surfaces(&mut engine.borrow_mut(), &config, &surfaces, app_weak.upgrade().as_ref());
+            log_on_err(config::save(&config));
+        });
+    }
+
+    {
+        let config = config.clone();
+        let app_weak = app.as_weak();
+        logic.on_set_surfaces_collapsed(move |collapsed| {
+            let mut config = config.borrow_mut();
+            config.surfaces.collapsed = collapsed;
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_surfaces_collapsed(collapsed);
+            }
+            log_on_err(config::save(&config));
+        });
     }
 
     {
@@ -2713,7 +2760,16 @@ fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         let rack = rack.clone();
         let app_weak = app.as_weak();
+        let surfaces = surfaces.clone();
         poll_timer.start(slint::TimerMode::Repeated, UI_POLL_INTERVAL, move || {
+            surfaces.apply(&engine.borrow().take_surface_events());
+            let activity = surfaces.tick();
+            if let Some(app) = app_weak.upgrade() {
+                let state = app.global::<AppState>();
+                if state.get_surface_activity() != activity {
+                    state.set_surface_activity(activity);
+                }
+            }
             rack.poll_uis(&engine.borrow());
             if let Some(app) = app_weak.upgrade() {
                 rack.render_inline_displays(&engine.borrow(), app.window().scale_factor());
@@ -2781,9 +2837,14 @@ fn main() -> anyhow::Result<()> {
     {
         let config = config.clone();
         let engine = engine.clone();
+        let surfaces = surfaces.clone();
+        let app_weak = app.as_weak();
         midi_port_timer.start(slint::TimerMode::Repeated, MIDI_PORT_POLL_INTERVAL, move || {
             let ports = engine.borrow_mut().sync_midi_inputs();
-            midi_inputs.set_ports(&ports, &config.borrow());
+            let config = config.borrow();
+            midi_inputs.set_ports(&ports, &config);
+            surfaces.set_ports(&ports, &config);
+            sync_surfaces(&mut engine.borrow_mut(), &config, &surfaces, app_weak.upgrade().as_ref());
         });
     }
 
@@ -3259,6 +3320,18 @@ fn index_of(items: &[String], value: Option<&str>) -> i32 {
     value
         .and_then(|value| items.iter().position(|item| item == value))
         .map_or(-1, |index| index as i32)
+}
+
+/// Hands the engine the devices the control surfaces panel shows, if that
+/// changed, and shows them in the panel's summary.
+fn sync_surfaces(engine: &mut Engine, config: &config::AppConfig, surfaces: &surfaces::SurfacesUi, app: Option<&AppWindow>) {
+    if let Some(devices) = surfaces.take_devices_to_apply(config) {
+        let ports = engine.set_surface_devices(devices);
+        surfaces.set_ports(&ports, config);
+    }
+    if let Some(app) = app {
+        app.global::<AppState>().set_surface_summary(surfaces.summary(config).into());
+    }
 }
 
 /// Each MIDI input's devices, as the engine takes them.

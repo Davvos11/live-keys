@@ -69,7 +69,9 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # its GUI (or parameter window), a right-click its menu, dragging it reorders), then the right
 # sidebar: a master transpose, a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
 # signature, subdivision, Tap), the master output (volume slider, master audio effects, mute, output device), the MIDI
-# inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic
+# inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic;
+# a fullscreen button (and F11) top right; under the scenes and slots, the control surfaces panel
+# (the MIDI controllers chosen, drawn as their faders/knobs/pads/buttons, moving as the hardware does)
 cargo run -p live-keys-gui --release
 SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
   # the app with live reload: saving a .slint file swaps the UI in place, state kept (development
@@ -80,7 +82,9 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
   # the preview needs a slint-lsp at least as new as our Slint (README: "Previewing the UI")
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, master volume + mute + transpose, the metronome's tempo, time
-# signature, subdivision and volume, and per slot: MIDI inputs + filter, volume), saved as they change.
+# signature, subdivision and volume, the control surfaces panel's devices and whether it's collapsed,
+# and per slot: MIDI inputs + filter, volume), saved as they change. User control surfaces are
+# ~/.local/share/live-keys/surfaces/*.json.
 # The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
 # scene, open plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
 # once the rack is quiet, and restored on startup. Slot presets live in
@@ -129,8 +133,8 @@ cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # lis
 cargo run -p live-keys-engine --example presets --release -- [plugin id]...
   # the same through a live engine (needs an audio device), LV2 lending included
 
-cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz -p live-keys-dsp -p live-keys-piano -p live-keys-builtin
-  # the crates with unit tests (MIDI routing, MIDI/audio effect-chain routing, .vstpreset and
+cargo test -p live-keys-core -p live-keys-lv2-host -p live-keys-engine -p live-keys-vst3-host -p live-keys-clap-host -p live-keys-gui -p live-keys-sfz -p live-keys-dsp -p live-keys-piano -p live-keys-builtin -p live-keys-surfaces
+  # the crates with unit tests (MIDI routing, control surface files and MIDI reading, MIDI/audio effect-chain routing, .vstpreset and
   # CLAP state file round trips, MIDI device names, input-mask shifting, inline-display pixels,
   # SFZ parsing, curves, voice logic and streaming; filter responses, LFOs, envelopes;
   # instrument state files and presets)
@@ -249,7 +253,7 @@ regression) aren't worth keeping.
 
 ## Architecture
 
-Cargo workspace with fourteen crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
+Cargo workspace with fifteen crates (plus the vendored `livi`, see Licensing), isolating format-specific and UI-specific unsafe/FFI code
 behind format-agnostic cores:
 
 - **`crates/core`** (`live-keys-core`) — no system dependencies, compiles standalone. Defines:
@@ -605,6 +609,11 @@ behind format-agnostic cores:
     `Engine::set_midi_inputs(devices per input)` sets the assignments; `Engine::sync_midi_inputs`
     (the GUI calls it every second) connects devices that appeared and drops ones that went
     away; both return the ports present. So a missing device never fails a plugin load.
+    **Control surfaces**: `Engine::set_surface_devices(devices)` names the devices the GUI's
+    surfaces panel shows; they're connected too (on an input or not), and the callback also
+    sends their events (`SurfaceEvent`: device name + `MidiEvent`) down a bounded `mpsc`
+    channel (full = dropped), which `Engine::take_surface_events` drains. Not the audio path:
+    MIDI learn's mapping thread will take this channel over (`docs/design/midi-learn.md`).
   - `engine.rs` — the control side. `Engine::start` builds the MIDI/command/retired ring
     buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream
     (`build_stream`) whose callback is just "apply pending commands, then `rack.render`"
@@ -793,9 +802,27 @@ behind format-agnostic cores:
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`: one window, no tabs — `live_tab.slint` (the scenes
-  and slots) with the **right sidebar** (`sidebar.slint`, 300 wide) beside it. The window
-  opens at, and can't shrink below, 1500×995 (the design's "Live (window minimum)" board is
-  1200×995, its "Right sidebar" 300×995). **Look:** the Live view and sidebar follow the Penpot
+  and slots) over the **control surfaces panel** (`surfaces.slint`), with the **right
+  sidebar** (`sidebar.slint`, 300 wide) beside them. The window opens at, and can't shrink
+  below, 1500×995 (the design's "Live (window minimum)" board is 1200×995, its "Right sidebar"
+  300×995). Its layout is pinned to the window (`x`/`y`/`width`/`height`) because the panel's
+  room is computed from the window's height (`AppWindow`'s `fits-expanded`/`squeeze`): tall
+  enough (≥ 1019 px), the panel is docked and expanded (140 px, `SurfaceSizes`) unless the user
+  collapsed it (`AppConfig.surfaces.collapsed`, `set-surfaces-collapsed`); otherwise it's one
+  44 px row whose button shows it expanded over the bottom of the slots. Whatever the panel
+  takes beyond the 995 px the slots need, the slots give up as padding: `SlotPanel.squeeze`
+  (0..1, through `LiveTab`) shrinks the header by up to 30 px and the first tab's padding and
+  spacing. F11 (a `KeyBinding` in a `FocusScope` the window forwards focus to) and the button
+  at the end of the sidebar's transpose row toggle `full-screen`. **The surfaces panel**
+  (`src/surfaces.rs`: `SurfacesUi`): the devices shown are `AppConfig.surfaces.devices`, or,
+  until the user picks (`None`), every device plugged in that has a known surface; a
+  checklist like a MIDI input's (`AppState.surface-devices`, `toggle-surface-device`) picks
+  them, and `sync_surfaces` hands the list to `Engine::set_surface_devices`. Each shown device
+  is a `SurfaceView` of `SurfaceControlView`s (kind, label, cell, last value, pressed/moving),
+  drawn by `SurfaceDrawing` (`SurfaceFader`/`Knob`/`Pad`/`Button`), or a note that no surface
+  is known for it; the poll timer feeds `Engine::take_surface_events` to `SurfacesUi::apply`
+  (`Surface::read`; a pad's channel pressure goes to the held pads) and `tick` (faders/knobs
+  stop showing as moving after 250 ms; `AppState.surface-activity` lights the row's dot). **Look:** the Live view and sidebar follow the Penpot
   design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
   greys in dark mode, a derived light variant otherwise — following `Palette.color-scheme` —
   with `Palette.accent-background`/`-foreground` as the primary colour, so the style's accent
@@ -1112,6 +1139,18 @@ behind format-agnostic cores:
   panel's `Toggle`, `Lever` and `Drawbar` never set their own value, only report the new one. Edits that fire continuously (knob drags)
   mark the config dirty and the poll timer saves it, rather than writing the file per step.
 
+- **`crates/surfaces`** (`live-keys-surfaces`) — control surfaces: MIDI controllers as banks
+  of faders, knobs, pads and buttons, each control knowing its message (CC, note, pitch bend,
+  channel pressure) and channel; see `docs/design/midi-learn.md`. JSON (format in the crate's
+  doc comment), shipped ones compiled in (`SHIPPED`: Nektar Impact LX88+ and Akai LPD8 — the
+  LX88+'s faders/pots from Nektar's guide, its pads and the LPD8 still guesses to check on the
+  hardware) and the user's in `<data dir>/live-keys/surfaces/` replacing a shipped one by `id`
+  (`Library::load`). `Surface::from_json` places every control (`ControlKind::cell_size`,
+  `Numbering` top/bottom-first) and indexes them by `(channel, message)`; `Surface::matches`
+  picks a surface for a device name (case-insensitive substrings), `Surface::read` turns a
+  `MidiEvent` into `(control, Reading)` (a position, a press with velocity, a release), and
+  `pad_pressure` finds the pads a channel-pressure message may belong to. Unit-tested.
+
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
   check against real installed plugins, not part of the app (see Common commands). `cases.rs`
   is the table of plugin classes and their quirks (`Case`: plugin id, role — instrument, or an
@@ -1392,7 +1431,8 @@ mapping of third-party plugins, and inline effect views (Ardour's LV2 inline-dis
 extension), recommended third-party plugins and their install window — are in
 `docs/design/plugins.md` (a draft; check it before working on any of these, and keep it in step
 with what's decided). Ideas for our own instruments (the Salamander piano first) are in
-`docs/design/own-plugins.md`.
+`docs/design/own-plugins.md`. MIDI learn — control surfaces in a bottom panel, hardware controls mapped to
+on-screen targets — is designed in `docs/design/midi-learn.md` (a draft, not built yet).
 
 ## GUI
 
