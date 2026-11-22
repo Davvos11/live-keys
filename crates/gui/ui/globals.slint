@@ -114,6 +114,8 @@ export global AppState {
     // The master chain's index wherever a slot index goes (`pick-plugin`,
     // `remove-effect`, `move-effect`): audio effects only.
     in property <int> master-slot: 6;
+    // The selected slot (what "the selected slot" mappings drive).
+    in property <int> selected-slot: Platform.uses-mock-data ? MockData.selected-slot : 0;
     in property <[EffectRow]> master-effects: Platform.uses-mock-data ? MockData.master-effects : [];
     in property <float> master-volume-db: Platform.uses-mock-data ? MockData.master-volume-db : 0;
     in property <bool> master-muted: false;
@@ -162,6 +164,16 @@ export global AppLogic {
     // rows, -1 the popup's target.
     callback set-learning(/* on */ bool);
     callback learn-select(/* device */ string, /* control */ int);
+    // Shows a page of a surface (for learning; the hardware switches pages itself).
+    callback surface-page(/* device */ string, /* page */ int);
+    // The next (step 1) or previous (-1) variant of the shown page.
+    callback surface-variant(/* device */ string, /* step */ int);
+    // Selects a slot (what "the selected slot" mappings drive).
+    callback select-slot(/* slot */ int);
+    // Loads the preset `step` presets on from the current one of a slot's instrument.
+    callback step-instrument-preset(/* slot */ int, /* step */ int);
+    // Switches a surface's driver (e.g. a keyboard's DAW mode) on or off.
+    callback toggle-surface-driver(/* device */ string);
     callback learn-click(/* kind */ int, /* slot */ int, /* index */ int);
     callback learn-menu(/* kind */ int, /* slot */ int, /* index */ int);
     callback learn-assign-popup();

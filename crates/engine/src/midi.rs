@@ -44,6 +44,8 @@ pub(crate) struct Claims {
     notes: [[AtomicU64; 2]; 16],
     /// Per channel: bit 0 pitch bend, bit 1 channel pressure.
     other: [AtomicU8; 16],
+    /// Every event (a port that only carries a surface's controls).
+    all: AtomicBool,
 }
 
 impl Claims {
@@ -55,6 +57,7 @@ impl Claims {
             }
             self.other[channel].store(0, Ordering::Relaxed);
         }
+        self.all.store(false, Ordering::Relaxed);
     }
 
     fn claim(&self, channel: u8, message: Message) {
@@ -71,6 +74,9 @@ impl Claims {
     }
 
     fn claimed(&self, event: &MidiEvent) -> bool {
+        if self.all.load(Ordering::Relaxed) {
+            return true;
+        }
         let bytes = event.as_slice();
         let (Some(&status), number) = (bytes.first(), bytes.get(1).copied().unwrap_or(0)) else { return false };
         let channel = usize::from(status & 0x0F);
@@ -176,13 +182,17 @@ impl MidiInputs {
         }
     }
 
-    /// Sets the messages each device's mapped controls claim (by device name).
-    pub fn set_claims(&mut self, claims: &[(String, u8, Message)]) {
+    /// Sets the messages each device's mapped controls claim (by device
+    /// name), and the devices whose every event is claimed.
+    pub fn set_claims(&mut self, claims: &[(String, u8, Message)], whole: &[String]) {
         for table in self.claims.values() {
             table.clear();
         }
         for (device, channel, message) in claims {
             self.claims_of(device).claim(*channel, *message);
+        }
+        for device in whole {
+            self.claims_of(device).all.store(true, Ordering::Relaxed);
         }
     }
 

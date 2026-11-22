@@ -517,6 +517,8 @@ export component PanelControls inherits Rectangle {
     // MIDI learn: each cell's state, and the slot's index.
     in property <[int]> learn;
     in property <int> slot-index;
+    // As `SlotPanel.squeeze`: the rows close up (0..1).
+    in property <float> squeeze;
     callback set-position(/* cell */ int, /* 0..1 */ float);
     callback set-on(/* cell */ int, bool);
     callback set-index(/* cell */ int, int);
@@ -526,8 +528,9 @@ export component PanelControls inherits Rectangle {
 
     property <length> cell-width: 56px;
     property <length> cell-height: 67px;
-    // How far the lower row sits below the upper one.
-    property <length> row-step: 75px;
+    // How far the lower row sits below the upper one: no gap at all when
+    // squeezed.
+    property <length> row-step: 75px - 8px * root.squeeze;
     property <int> count: root.cells.length;
     property <bool> zigzag: !root.single-row && root.count > 3;
     // Single row: the same gap between the cells and at either end.

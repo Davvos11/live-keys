@@ -444,6 +444,12 @@ export component SlotPanel inherits Rectangle {
     background: Theme.background;
     clip: true;
 
+    // A click on the slot (where nothing else takes it) selects it: what
+    // "the selected slot" mappings drive.
+    TouchArea {
+        clicked => { AppLogic.select-slot(root.slot-index); }
+    }
+
     // Just cleared: what it was, and a way back.
     if root.slot.closed-name != "" : VerticalLayout {
         alignment: center;
@@ -496,7 +502,7 @@ export component SlotPanel inherits Rectangle {
     if root.slot.closed-name == "" && !root.is-empty : VerticalLayout {
         // The header: photo, name, buttons, volume and presets.
         Rectangle {
-            height: 154px - 30px * root.squeeze;
+            height: 154px - 40px * root.squeeze;
             clip: true;
             Image {
                 width: 100%;
@@ -667,6 +673,7 @@ export component SlotPanel inherits Rectangle {
                         cells: root.slot.cells;
                         pool: root.slot.pool;
                         single-row: root.slot.drawbars.length > 0;
+                        squeeze: root.squeeze;
                         learn: root.slot.cell-learn;
                         slot-index: root.slot-index;
                         set-position(cell, position) => { AppLogic.set-cell-position(root.slot-index, cell, position); }
@@ -867,5 +874,11 @@ export component SlotPanel inherits Rectangle {
         height: min(380px, max(200px, root.height - 204px));
         filter(query) => { AppLogic.filter-param-search(query); }
         pick(index) => { AppLogic.pick-param-search(index); }
+    }
+
+    // The selected slot is outlined (over everything, taking no input).
+    if AppState.selected-slot == root.slot-index : Rectangle {
+        border-width: 2px;
+        border-color: Theme.accent;
     }
 }

@@ -253,6 +253,9 @@ export struct SurfaceControlView {
     // control is drawn there, the hardware's `value` as a ghost.
     waiting: bool,
     target: float,
+    // Not drawn: on another page than the one shown, or a shifted twin while
+    // shift isn't held (or the other way round).
+    hidden: bool,
 }
 
 // A bank of the surface being edited: its frame, in surface pixels.
@@ -263,6 +266,8 @@ export struct EditBank {
     height: float,
     name: string,
     selected: bool,
+    // On another page than the one drawn.
+    hidden: bool,
 }
 
 // The selected bank's settings in the surface editor. `kind`: 0 fader, 1
@@ -341,4 +346,14 @@ export struct SurfaceView {
     width: float,
     height: float,
     controls: [SurfaceControlView],
+    // Its pages' names, and the one shown (-1: it has none).
+    pages: [string],
+    page: int,
+    // The shown page's variant (a keyboard's preset the user picked), if it
+    // has variants.
+    variant: string,
+    // What its driver's switch says ("DAW mode"), if it has one, and whether
+    // it's on.
+    driver: string,
+    driver-on: bool,
 }

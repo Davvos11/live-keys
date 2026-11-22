@@ -32,7 +32,7 @@ export component AppWindow inherits Window {
     // Two rows of slots at their natural padding, and how much padding they can
     // give up.
     property <length> natural-slots: 995px;
-    property <length> squeezable: 116px;
+    property <length> squeezable: 152px;
     property <bool> fits-expanded: root.height >= root.natural-slots - root.squeezable + SurfaceSizes.expanded;
     property <bool> docked-expanded: !AppState.surfaces-collapsed && root.fits-expanded;
     property <length> panel-height: root.docked-expanded ? SurfaceSizes.expanded : SurfaceSizes.collapsed;

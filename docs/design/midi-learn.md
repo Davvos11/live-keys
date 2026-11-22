@@ -151,8 +151,9 @@ Under the scenes pane and the slots (the sidebar keeps the full height), 140 px:
      while a shown device sends something. Entering learn mode from a slot control's menu or
      by moving hardware won't open the overlay (targets under it would be hidden); the button
      does, and closing it again keeps learn mode going.
-  As built (phase 1): docked and expanded from 1019 px; the slots squeeze over the 116 px
-  between 1135 and 1019 (header up to 30 px shorter, the first tab's padding and spacing).
+  As built: docked and expanded from 983 px; the slots squeeze over the 152 px
+  between 1135 and 983 (header up to 40 px shorter, the first tab's padding and spacing,
+  the zigzag knob rows closing their gap) — so a ~1000 px window keeps it docked.
 - **Fullscreen**: an icon button (Lucide `maximize`/`minimize`) at the right end of the
   sidebar's transpose row, and F11, toggle the window's fullscreen (`Window::set_fullscreen`).
   A fullscreen 1080p screen has room for the docked panel.
@@ -227,6 +228,10 @@ on (default on for pads — a pad isn't a fader you can leave somewhere).
 
 What happens when the hardware's position and a target's value disagree is under "Takeover
 and feedback".
+
+A fader or knob assigned to a **drawbar** starts mirrored (decided 2026-11-22): a drawbar is
+pulled down to sound louder, a fader pushed up, so mirrored makes the fader move like the
+drawbar it drives.
 
 ## Values: base, modulation, effective
 
@@ -565,14 +570,18 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
 6. Smoothing (decided 2026-11-22, a later phase): where a target is continuous, the audio
    thread interpolates between a control's successive values (per block, like the gain
    ramps), so 7-bit steps don't zipper. Not for stepped, choice or toggle targets.
-7. Later: relative/14-bit encoders, scene targets, shift layers.
+7. **Done (2026-11-22)**, for the Nektar Impact LX88+ (see §10 of `nektar-impact.md`):
+   pages with variants, several ports per device, shift twins, whole-port claims, per-bank
+   cell sizes, drivers, default mappings, and the selected slot with its targets.
+8. Later: relative/14-bit encoders, scene targets.
 
 ## Open questions
 
 1. **Selecting by moving** can pick the wrong control when the user nudges something while
    assigning. A lock (pin icon in the targets pane) that keeps the selection?
-2. **Pages/shift layers**: many controllers have a shift button that changes what the knobs
-   send, or banks switched on the device. As separate banks, with the same labels? Later.
+2. **Pages/shift layers**: decided for the Nektar Impact LX88+ (2026-11-22), generic: pages
+   (each with its own controls and mappings), preset variants, several ports per device, a
+   shift button with shifted twins, and per-surface drivers — see §10 of `nektar-impact.md`.
 3. **Value scaling** (Ableton's third mode) wasn't asked for; glide covers the same need (no
    jump, no dead zone). Add it only if someone misses it.
 4. **Glide time**: per control or per target? Per control is simpler to show; start there.

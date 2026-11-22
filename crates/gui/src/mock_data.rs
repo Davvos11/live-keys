@@ -121,7 +121,7 @@ slint_struct!(SlotPresetRow { name, folder, count, current });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
-    kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target,
+    kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target, hidden,
 });
 slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback });
 slint_struct!(LearnLevel { position, text });
@@ -129,7 +129,7 @@ slint_struct!(LearnTargetRow {
     name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, kept,
     can_keep_with_scene, panel,
 });
-slint_struct!(SurfaceView { name, device, known, connected, width, height, controls });
+slint_struct!(SurfaceView { name, device, known, connected, width, height, controls, pages, page, variant, driver, driver_on });
 slint_struct!(SceneRow { name, current, modes });
 slint_struct!(SceneSlotChoice { mode, can_restore });
 slint_struct!(PanelCell {
@@ -168,6 +168,7 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "int", "selected-audio-index", &state.get_selected_audio_index());
     property(&mut out, "[MidiInputRow]", "midi-inputs", &state.get_midi_inputs());
     property(&mut out, "[SurfaceView]", "surfaces", &state.get_surfaces());
+    property(&mut out, "int", "selected-slot", &state.get_selected_slot());
     property(&mut out, "[MidiDeviceRow]", "surface-devices", &state.get_surface_devices());
     property(&mut out, "string", "surface-summary", &state.get_surface_summary());
     property(&mut out, "bool", "learning", &state.get_learning());

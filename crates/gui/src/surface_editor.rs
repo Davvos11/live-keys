@@ -78,7 +78,7 @@ pub struct Editor {
     pub listening: Listening,
     /// The last message learned, so a control sending a stream (a knob
     /// turned) counts once.
-    last: Option<(u8, Message)>,
+    last: Option<(u8, u8, Message)>,
     /// The bank learning a device added to last.
     growing: Option<usize>,
 }
@@ -90,7 +90,13 @@ impl Editor {
             id: id_for(device),
             name: device.split(':').next().unwrap_or(device).trim().to_string(),
             devices: vec![device.to_string()],
+            ports: Vec::new(),
+            claim_ports: Vec::new(),
+            output_port: 1,
+            driver: None,
+            pages: Vec::new(),
             banks: Vec::new(),
+            defaults: Vec::new(),
         });
         Self { device: device.to_string(), spec, selected: None, listening: Listening::None, last: None, growing: None }
     }
@@ -105,10 +111,17 @@ impl Editor {
         self.surface().map_or(0, |surface| surface.width + if surface.banks.is_empty() { 0 } else { GAP })
     }
 
-    /// Every message the surface's controls send, as (channel 0..15, message).
-    fn messages(&self) -> Vec<(u8, Message)> {
+    /// Every message the surface's controls send, as (port, channel 0..15, message).
+    fn messages(&self) -> Vec<(u8, u8, Message)> {
         self.surface()
-            .map(|surface| surface.controls.iter().map(|control| (control.channel, control.message)).collect())
+            .map(|surface| {
+                surface
+                    .controls
+                    .iter()
+                    .filter(|control| control.twin_of.is_none())
+                    .map(|control| (control.port, control.channel, control.message))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -116,7 +129,7 @@ impl Editor {
     /// free on channel 1.
     fn free_numbers(&self, kind: MessageType, from: u8) -> u8 {
         let used = self.messages();
-        let free = |first: u8| (0..8u8).all(|offset| !used.contains(&(0, kind.message(first.saturating_add(offset)))));
+        let free = |first: u8| (0..8u8).all(|offset| !used.contains(&(1, 0, kind.message(first.saturating_add(offset)))));
         (from..120).find(|&first| free(first)).unwrap_or(from)
     }
 
@@ -155,7 +168,13 @@ impl Editor {
             pressure: None,
             feedback: false,
             lit: None,
+            port: 1,
+            page: None,
+            toggle: false,
+            cell_width: None,
+            cell_height: None,
             controls: Vec::new(),
+            variants: Vec::new(),
         };
         fill(&mut bank, BankMessages { kind: message, first, step: 1 });
         self.spec.banks.push(bank);
@@ -243,28 +262,28 @@ impl Editor {
         self.listening = if next + 1 < count { Listening::Bank { bank, next: next + 1 } } else { Listening::None };
     }
 
-    /// A MIDI event from the device: learned if the editor is listening.
-    /// Returns whether it changed the surface.
-    pub fn event(&mut self, event: &MidiEvent) -> bool {
+    /// A MIDI event from the device's port `port`: learned if the editor is
+    /// listening. Returns whether it changed the surface.
+    pub fn event(&mut self, port: u8, event: &MidiEvent) -> bool {
         let Some((channel, message)) = learnable(event) else { return false };
-        if self.listening == Listening::None || self.last == Some((channel, message)) {
+        if self.listening == Listening::None || self.last == Some((port, channel, message)) {
             return false;
         }
-        self.last = Some((channel, message));
+        self.last = Some((port, channel, message));
         match self.listening {
             Listening::None => false,
             Listening::Bank { bank, next } => {
-                self.set_control(bank, next, channel, message);
+                self.set_control(bank, next, port, channel, message);
                 self.advance(bank, next);
                 true
             }
             Listening::Control { control } => {
                 let Some((bank, index)) = self.control_place(control) else { return false };
-                self.set_control(bank, index, channel, message);
+                self.set_control(bank, index, port, channel, message);
                 self.listening = Listening::None;
                 true
             }
-            Listening::Device => self.learn_into_device(channel, message),
+            Listening::Device => self.learn_into_device(port, channel, message),
         }
     }
 
@@ -280,9 +299,10 @@ impl Editor {
         None
     }
 
-    /// Control `index` of bank `bank` sends `message` on `channel` (0..15).
-    /// A control of the bank that sent it already gets this one's old message.
-    fn set_control(&mut self, bank: usize, index: usize, channel: u8, message: Message) {
+    /// Control `index` of bank `bank` sends `message` on `channel` (0..15)
+    /// of port `port`. A control of the bank that sent it already gets this
+    /// one's old message. (A bank has one port: the first control's.)
+    fn set_control(&mut self, bank: usize, index: usize, port: u8, channel: u8, message: Message) {
         let Some(spec) = self.spec.banks.get_mut(bank) else { return };
         let bank_channel = spec.channel;
         let Some(old) = spec.controls.get(index).cloned() else { return };
@@ -295,9 +315,10 @@ impl Editor {
         }
         let control = &mut spec.controls[index];
         *control = ControlSpec { label: old.label, ..ControlSpec::of(message) };
-        // The first learned sets the bank's channel; others keep their own.
+        // The first learned sets the bank's port and channel; others keep their own channel.
         if index == 0 {
             spec.channel = channel + 1;
+            spec.port = port;
         } else if channel + 1 != spec.channel {
             control.channel = Some(channel + 1);
         }
@@ -306,14 +327,15 @@ impl Editor {
     /// Learning a device: `message` joins the bank the last one went into if
     /// it's the next number of the same type and channel, else starts a
     /// bank. Controls the surface has already are ignored.
-    fn learn_into_device(&mut self, channel: u8, message: Message) -> bool {
-        if self.messages().contains(&(channel, message)) {
+    fn learn_into_device(&mut self, port: u8, channel: u8, message: Message) -> bool {
+        if self.messages().contains(&(port, channel, message)) {
             return false;
         }
         if let Some(bank) = self.growing
             && let Some(spec) = self.spec.banks.get_mut(bank)
             && let Some(last) = spec.controls.last().and_then(|control| control.message().ok())
             && spec.channel == channel + 1
+            && spec.port == port
             && MessageType::of(last) == MessageType::of(message)
             && number_of(last).zip(number_of(message)).is_some_and(|(a, b)| b == a.wrapping_add(1))
         {
@@ -336,6 +358,7 @@ impl Editor {
         }
         .to_string();
         spec.channel = channel + 1;
+        spec.port = port;
         spec.controls = vec![ControlSpec::of(message)];
         self.growing = Some(bank);
         self.selected = Some(bank);
@@ -455,18 +478,18 @@ mod tests {
         editor.listen(Listening::Device);
         // A knob turned sends a stream: counted once.
         for value in [1, 2, 3] {
-            editor.event(&event(&[0xB0, 70, value]));
+            editor.event(1, &event(&[0xB0, 70, value]));
         }
-        editor.event(&event(&[0xB0, 71, 5]));
-        editor.event(&event(&[0xB0, 72, 5]));
+        editor.event(1, &event(&[0xB0, 71, 5]));
+        editor.event(1, &event(&[0xB0, 72, 5]));
         // Pads on another channel start a bank of their own.
-        editor.event(&event(&[0x99, 36, 100]));
-        editor.event(&event(&[0x89, 36, 0]));
-        editor.event(&event(&[0x99, 37, 100]));
+        editor.event(1, &event(&[0x99, 36, 100]));
+        editor.event(1, &event(&[0x89, 36, 0]));
+        editor.event(1, &event(&[0x99, 37, 100]));
         // Not consecutive: a new bank.
-        editor.event(&event(&[0xB0, 10, 5]));
+        editor.event(1, &event(&[0xB0, 10, 5]));
         // Already there: ignored.
-        editor.event(&event(&[0xB0, 71, 9]));
+        editor.event(1, &event(&[0xB0, 71, 9]));
         let banks: Vec<(ControlKind, u32, u8)> =
             editor.spec.banks.iter().map(|bank| (bank.kind, bank.columns, bank.channel)).collect();
         assert_eq!(banks, [(ControlKind::Knob, 3, 1), (ControlKind::Pad, 2, 10), (ControlKind::Knob, 1, 1)]);
@@ -479,9 +502,9 @@ mod tests {
         let mut editor = Editor::new("Pads", None);
         editor.add_bank(ControlKind::Pad, false);
         editor.listen(Listening::Bank { bank: 0, next: 0 });
-        editor.event(&event(&[0x99, 50, 1]));
+        editor.event(1, &event(&[0x99, 50, 1]));
         editor.skip();
-        editor.event(&event(&[0x99, 52, 1]));
+        editor.event(1, &event(&[0x99, 52, 1]));
         let bank = &editor.spec.banks[0];
         assert_eq!(bank.channel, 10);
         assert_eq!(bank.controls[0].note, Some(50));

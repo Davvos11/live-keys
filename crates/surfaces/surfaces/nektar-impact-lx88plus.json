@@ -1,38 +1,1401 @@
 {
   "id": "nektar-impact-lx88plus",
   "name": "Nektar Impact LX88+",
-  "devices": ["Impact LX88+"],
+  "devices": [
+    "Impact LX88+"
+  ],
+  "ports": [
+    "MIDI1",
+    "MIDI2|MIDIIN2"
+  ],
+  "claim-ports": [
+    2
+  ],
+  "driver": "nektar-impact-lx-plus",
+  "pages": [
+    {
+      "id": "mixer",
+      "name": "Mixer",
+      "button": "Mixer"
+    },
+    {
+      "id": "inst",
+      "name": "Inst",
+      "button": "Inst"
+    },
+    {
+      "id": "preset",
+      "name": "Preset",
+      "button": "Preset",
+      "variants": [
+        "1 GM Instrument",
+        "2 GM Mixer 1-8",
+        "3 GM Mixer 9-16",
+        "4 Learn friendly 1",
+        "5 Learn friendly 2"
+      ]
+    }
+  ],
   "banks": [
     {
-      "name": "Faders", "kind": "fader", "x": 0, "y": 0, "rows": 1, "columns": 9,
-      "prefix": "F", "channel": 1,
+      "name": "Wheels",
+      "kind": "fader",
+      "x": 0,
+      "y": 0,
+      "columns": 2,
       "controls": [
-        { "cc": 80 }, { "cc": 81 }, { "cc": 82 }, { "cc": 83 }, { "cc": 85 },
-        { "cc": 86 }, { "cc": 87 }, { "cc": 88 }, { "cc": 3 }
+        {
+          "pitch-bend": true,
+          "label": "Pitch"
+        },
+        {
+          "cc": 1,
+          "label": "Mod"
+        }
+      ],
+      "cell-height": 114
+    },
+    {
+      "name": "Transport",
+      "kind": "button",
+      "x": 624,
+      "y": 80,
+      "rows": 1,
+      "columns": 6,
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 102,
+          "label": "Loop",
+          "shifted": "Back"
+        },
+        {
+          "cc": 103,
+          "label": "Rewind",
+          "shifted": "Set L"
+        },
+        {
+          "cc": 104,
+          "label": "Forward",
+          "shifted": "Set R"
+        },
+        {
+          "cc": 105,
+          "label": "Stop",
+          "shifted": "Undo"
+        },
+        {
+          "cc": 106,
+          "label": "Play",
+          "shifted": "Click"
+        },
+        {
+          "cc": 107,
+          "label": "Record",
+          "shifted": "Mode"
+        }
       ]
     },
     {
-      "name": "Knobs", "kind": "knob", "x": 264, "y": 0, "rows": 1, "columns": 8,
-      "prefix": "K", "channel": 1,
+      "name": "Modes",
+      "kind": "button",
+      "x": 396,
+      "y": 0,
+      "rows": 1,
+      "columns": 3,
+      "port": 2,
+      "channel": 16,
       "controls": [
-        { "cc": 89 }, { "cc": 90 }, { "cc": 96 }, { "cc": 97 },
-        { "cc": 116 }, { "cc": 117 }, { "cc": 118 }, { "cc": 119 }
+        {
+          "cc": 113,
+          "label": "Mixer"
+        },
+        {
+          "cc": 114,
+          "label": "Inst"
+        },
+        {
+          "cc": 115,
+          "label": "Preset"
+        }
       ]
     },
     {
-      "name": "Pads", "kind": "pad", "x": 264, "y": 56, "rows": 1, "columns": 8,
-      "prefix": "P", "channel": 10, "pressure": "channel",
+      "name": "Navigation",
+      "kind": "button",
+      "x": 396,
+      "y": 42,
+      "rows": 1,
+      "columns": 5,
+      "port": 2,
+      "channel": 16,
       "controls": [
-        { "note": 36 }, { "note": 37 }, { "note": 38 }, { "note": 39 },
-        { "note": 40 }, { "note": 41 }, { "note": 42 }, { "note": 43 }
+        {
+          "cc": 108,
+          "label": "Shift",
+          "shift": true
+        },
+        {
+          "cc": 109,
+          "label": "Track-"
+        },
+        {
+          "cc": 110,
+          "label": "Track+"
+        },
+        {
+          "cc": 111,
+          "label": "Patch-"
+        },
+        {
+          "cc": 112,
+          "label": "Patch+"
+        }
       ]
     },
     {
-      "name": "Wheels", "kind": "fader", "x": 628, "y": 0, "rows": 1, "columns": 2,
-      "channel": 1,
+      "name": "Page",
+      "kind": "button",
+      "x": 584,
+      "y": 0,
+      "rows": 1,
+      "columns": 1,
+      "port": 2,
+      "channel": 16,
       "controls": [
-        { "pitch-bend": true, "label": "Pitch" },
-        { "cc": 1, "label": "Mod" }
+        {
+          "cc": 119,
+          "label": "Page",
+          "feedback": true
+        }
+      ]
+    },
+    {
+      "name": "Clips and scenes",
+      "kind": "button",
+      "x": 1032,
+      "y": 0,
+      "rows": 2,
+      "columns": 1,
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 117,
+          "label": "Clips",
+          "feedback": true
+        },
+        {
+          "cc": 118,
+          "label": "Scenes",
+          "feedback": true
+        }
+      ]
+    },
+    {
+      "name": "Faders",
+      "kind": "fader",
+      "x": 64,
+      "y": 0,
+      "columns": 9,
+      "prefix": "F",
+      "page": "mixer",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 12
+        },
+        {
+          "cc": 13
+        },
+        {
+          "cc": 14
+        },
+        {
+          "cc": 15
+        },
+        {
+          "cc": 16
+        },
+        {
+          "cc": 17
+        },
+        {
+          "cc": 18
+        },
+        {
+          "cc": 19
+        },
+        {
+          "cc": 20
+        }
+      ],
+      "cell-width": 36,
+      "cell-height": 76
+    },
+    {
+      "name": "Fader buttons",
+      "kind": "button",
+      "x": 64,
+      "y": 76,
+      "columns": 9,
+      "prefix": "B",
+      "page": "mixer",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 21
+        },
+        {
+          "cc": 22
+        },
+        {
+          "cc": 23
+        },
+        {
+          "cc": 24
+        },
+        {
+          "cc": 25
+        },
+        {
+          "cc": 26
+        },
+        {
+          "cc": 27
+        },
+        {
+          "cc": 28
+        },
+        {
+          "cc": 29
+        }
+      ],
+      "feedback": true
+    },
+    {
+      "name": "Knobs",
+      "kind": "knob",
+      "x": 624,
+      "y": 0,
+      "rows": 2,
+      "columns": 4,
+      "prefix": "K",
+      "page": "mixer",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 30
+        },
+        {
+          "cc": 31
+        },
+        {
+          "cc": 32
+        },
+        {
+          "cc": 33
+        },
+        {
+          "cc": 34
+        },
+        {
+          "cc": 35
+        },
+        {
+          "cc": 36
+        },
+        {
+          "cc": 37
+        }
+      ],
+      "cell-width": 54,
+      "cell-height": 40
+    },
+    {
+      "name": "Faders",
+      "kind": "fader",
+      "x": 64,
+      "y": 0,
+      "columns": 9,
+      "prefix": "F",
+      "page": "inst",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 38
+        },
+        {
+          "cc": 39
+        },
+        {
+          "cc": 40
+        },
+        {
+          "cc": 41
+        },
+        {
+          "cc": 42
+        },
+        {
+          "cc": 43
+        },
+        {
+          "cc": 44
+        },
+        {
+          "cc": 45
+        },
+        {
+          "cc": 46
+        }
+      ],
+      "cell-width": 36,
+      "cell-height": 76
+    },
+    {
+      "name": "Fader buttons",
+      "kind": "button",
+      "x": 64,
+      "y": 76,
+      "columns": 9,
+      "prefix": "B",
+      "page": "inst",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 47
+        },
+        {
+          "cc": 48
+        },
+        {
+          "cc": 49
+        },
+        {
+          "cc": 50
+        },
+        {
+          "cc": 51
+        },
+        {
+          "cc": 52
+        },
+        {
+          "cc": 53
+        },
+        {
+          "cc": 54
+        },
+        {
+          "cc": 55
+        }
+      ],
+      "feedback": true
+    },
+    {
+      "name": "Knobs",
+      "kind": "knob",
+      "x": 624,
+      "y": 0,
+      "rows": 2,
+      "columns": 4,
+      "prefix": "K",
+      "page": "inst",
+      "port": 2,
+      "channel": 16,
+      "controls": [
+        {
+          "cc": 56
+        },
+        {
+          "cc": 57
+        },
+        {
+          "cc": 58
+        },
+        {
+          "cc": 59
+        },
+        {
+          "cc": 60
+        },
+        {
+          "cc": 61
+        },
+        {
+          "cc": 62
+        },
+        {
+          "cc": 63
+        }
+      ],
+      "cell-width": 54,
+      "cell-height": 40
+    },
+    {
+      "name": "Faders",
+      "kind": "fader",
+      "x": 64,
+      "y": 0,
+      "columns": 9,
+      "prefix": "F",
+      "page": "preset",
+      "controls": [
+        {
+          "cc": 73
+        },
+        {
+          "cc": 75
+        },
+        {
+          "cc": 72
+        },
+        {
+          "cc": 91
+        },
+        {
+          "cc": 92
+        },
+        {
+          "cc": 93
+        },
+        {
+          "cc": 94
+        },
+        {
+          "cc": 95
+        },
+        {
+          "cc": 7
+        }
+      ],
+      "variants": [
+        {
+          "controls": [
+            {
+              "cc": 7,
+              "channel": 1
+            },
+            {
+              "cc": 7,
+              "channel": 2
+            },
+            {
+              "cc": 7,
+              "channel": 3
+            },
+            {
+              "cc": 7,
+              "channel": 4
+            },
+            {
+              "cc": 7,
+              "channel": 5
+            },
+            {
+              "cc": 7,
+              "channel": 6
+            },
+            {
+              "cc": 7,
+              "channel": 7
+            },
+            {
+              "cc": 7,
+              "channel": 8
+            },
+            {
+              "cc": 7,
+              "channel": 1
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 7,
+              "channel": 9
+            },
+            {
+              "cc": 7,
+              "channel": 10
+            },
+            {
+              "cc": 7,
+              "channel": 11
+            },
+            {
+              "cc": 7,
+              "channel": 12
+            },
+            {
+              "cc": 7,
+              "channel": 13
+            },
+            {
+              "cc": 7,
+              "channel": 14
+            },
+            {
+              "cc": 7,
+              "channel": 15
+            },
+            {
+              "cc": 7,
+              "channel": 16
+            },
+            {
+              "cc": 7,
+              "channel": 1
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 80
+            },
+            {
+              "cc": 81
+            },
+            {
+              "cc": 82
+            },
+            {
+              "cc": 83
+            },
+            {
+              "cc": 85
+            },
+            {
+              "cc": 86
+            },
+            {
+              "cc": 87
+            },
+            {
+              "cc": 88
+            },
+            {
+              "cc": 3
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 80
+            },
+            {
+              "cc": 81
+            },
+            {
+              "cc": 82
+            },
+            {
+              "cc": 83
+            },
+            {
+              "cc": 85
+            },
+            {
+              "cc": 86
+            },
+            {
+              "cc": 87
+            },
+            {
+              "cc": 88
+            },
+            {
+              "cc": 3
+            }
+          ]
+        }
+      ],
+      "cell-width": 36,
+      "cell-height": 76
+    },
+    {
+      "name": "Fader buttons",
+      "kind": "button",
+      "x": 64,
+      "y": 76,
+      "columns": 9,
+      "prefix": "B",
+      "page": "preset",
+      "toggle": true,
+      "controls": [
+        {
+          "cc": 0
+        },
+        {
+          "cc": 2
+        },
+        {
+          "cc": 3
+        },
+        {
+          "cc": 4
+        },
+        {
+          "cc": 6
+        },
+        {
+          "cc": 8
+        },
+        {
+          "cc": 9
+        },
+        {
+          "cc": 11
+        },
+        {
+          "cc": 65
+        }
+      ],
+      "variants": [
+        {
+          "controls": [
+            {
+              "cc": 12,
+              "channel": 1
+            },
+            {
+              "cc": 12,
+              "channel": 2
+            },
+            {
+              "cc": 12,
+              "channel": 3
+            },
+            {
+              "cc": 12,
+              "channel": 4
+            },
+            {
+              "cc": 12,
+              "channel": 5
+            },
+            {
+              "cc": 12,
+              "channel": 6
+            },
+            {
+              "cc": 12,
+              "channel": 7
+            },
+            {
+              "cc": 12,
+              "channel": 8
+            },
+            {
+              "cc": 65,
+              "channel": 1
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 12,
+              "channel": 9
+            },
+            {
+              "cc": 12,
+              "channel": 10
+            },
+            {
+              "cc": 12,
+              "channel": 11
+            },
+            {
+              "cc": 12,
+              "channel": 12
+            },
+            {
+              "cc": 12,
+              "channel": 13
+            },
+            {
+              "cc": 12,
+              "channel": 14
+            },
+            {
+              "cc": 12,
+              "channel": 15
+            },
+            {
+              "cc": 12,
+              "channel": 16
+            },
+            {
+              "cc": 65,
+              "channel": 1
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 66
+            },
+            {
+              "cc": 67
+            },
+            {
+              "cc": 68
+            },
+            {
+              "cc": 69
+            },
+            {
+              "cc": 98
+            },
+            {
+              "cc": 99
+            },
+            {
+              "cc": 100
+            },
+            {
+              "cc": 101
+            },
+            {
+              "cc": 65
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 66
+            },
+            {
+              "cc": 67
+            },
+            {
+              "cc": 68
+            },
+            {
+              "cc": 69
+            },
+            {
+              "cc": 98
+            },
+            {
+              "cc": 99
+            },
+            {
+              "cc": 100
+            },
+            {
+              "cc": 101
+            },
+            {
+              "cc": 65
+            }
+          ],
+          "toggle": false
+        }
+      ]
+    },
+    {
+      "name": "Knobs",
+      "kind": "knob",
+      "x": 624,
+      "y": 0,
+      "rows": 2,
+      "columns": 4,
+      "prefix": "K",
+      "page": "preset",
+      "controls": [
+        {
+          "cc": 74
+        },
+        {
+          "cc": 71
+        },
+        {
+          "cc": 5
+        },
+        {
+          "cc": 84
+        },
+        {
+          "cc": 78
+        },
+        {
+          "cc": 76
+        },
+        {
+          "cc": 77
+        },
+        {
+          "cc": 10
+        }
+      ],
+      "variants": [
+        {
+          "controls": [
+            {
+              "cc": 10,
+              "channel": 1
+            },
+            {
+              "cc": 10,
+              "channel": 2
+            },
+            {
+              "cc": 10,
+              "channel": 3
+            },
+            {
+              "cc": 10,
+              "channel": 4
+            },
+            {
+              "cc": 10,
+              "channel": 5
+            },
+            {
+              "cc": 10,
+              "channel": 6
+            },
+            {
+              "cc": 10,
+              "channel": 7
+            },
+            {
+              "cc": 10,
+              "channel": 8
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 10,
+              "channel": 9
+            },
+            {
+              "cc": 10,
+              "channel": 10
+            },
+            {
+              "cc": 10,
+              "channel": 11
+            },
+            {
+              "cc": 10,
+              "channel": 12
+            },
+            {
+              "cc": 10,
+              "channel": 13
+            },
+            {
+              "cc": 10,
+              "channel": 14
+            },
+            {
+              "cc": 10,
+              "channel": 15
+            },
+            {
+              "cc": 10,
+              "channel": 16
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 89
+            },
+            {
+              "cc": 90
+            },
+            {
+              "cc": 96
+            },
+            {
+              "cc": 97
+            },
+            {
+              "cc": 116
+            },
+            {
+              "cc": 117
+            },
+            {
+              "cc": 118
+            },
+            {
+              "cc": 119
+            }
+          ]
+        },
+        {
+          "controls": [
+            {
+              "cc": 89
+            },
+            {
+              "cc": 90
+            },
+            {
+              "cc": 96
+            },
+            {
+              "cc": 97
+            },
+            {
+              "cc": 116
+            },
+            {
+              "cc": 117
+            },
+            {
+              "cc": 118
+            },
+            {
+              "cc": 119
+            }
+          ]
+        }
+      ],
+      "cell-width": 54,
+      "cell-height": 40
+    },
+    {
+      "name": "Pads",
+      "kind": "pad",
+      "x": 848,
+      "y": 0,
+      "rows": 2,
+      "columns": 4,
+      "numbering": "bottom-first",
+      "prefix": "P",
+      "port": 2,
+      "channel": 16,
+      "feedback": true,
+      "controls": [
+        {
+          "note": 60
+        },
+        {
+          "note": 62
+        },
+        {
+          "note": 64
+        },
+        {
+          "note": 65
+        },
+        {
+          "note": 67
+        },
+        {
+          "note": 69
+        },
+        {
+          "note": 71
+        },
+        {
+          "note": 72
+        }
+      ]
+    }
+  ],
+  "defaults": [
+    {
+      "control": "Mixer F1",
+      "target": {
+        "kind": "volume",
+        "slot": 0
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B1",
+      "target": {
+        "kind": "mute",
+        "slot": 0
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F2",
+      "target": {
+        "kind": "volume",
+        "slot": 1
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B2",
+      "target": {
+        "kind": "mute",
+        "slot": 1
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F3",
+      "target": {
+        "kind": "volume",
+        "slot": 2
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B3",
+      "target": {
+        "kind": "mute",
+        "slot": 2
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F4",
+      "target": {
+        "kind": "volume",
+        "slot": 3
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B4",
+      "target": {
+        "kind": "mute",
+        "slot": 3
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F5",
+      "target": {
+        "kind": "volume",
+        "slot": 4
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B5",
+      "target": {
+        "kind": "mute",
+        "slot": 4
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F6",
+      "target": {
+        "kind": "volume",
+        "slot": 5
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B6",
+      "target": {
+        "kind": "mute",
+        "slot": 5
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Mixer F9",
+      "target": {
+        "kind": "volume",
+        "slot": 6
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Mixer B9",
+      "target": {
+        "kind": "mute",
+        "slot": 6
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Inst K1",
+      "target": {
+        "kind": "selected-panel",
+        "index": 0
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K2",
+      "target": {
+        "kind": "selected-panel",
+        "index": 1
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K3",
+      "target": {
+        "kind": "selected-panel",
+        "index": 2
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K4",
+      "target": {
+        "kind": "selected-panel",
+        "index": 3
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K5",
+      "target": {
+        "kind": "selected-panel",
+        "index": 4
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K6",
+      "target": {
+        "kind": "selected-panel",
+        "index": 5
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K7",
+      "target": {
+        "kind": "selected-panel",
+        "index": 6
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst K8",
+      "target": {
+        "kind": "selected-panel",
+        "index": 7
+      },
+      "mode": "direct",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F1",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 0
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F2",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 1
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F3",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 2
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F4",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 3
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F5",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 4
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F6",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 5
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F7",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 6
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F8",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 7
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Inst F9",
+      "target": {
+        "kind": "selected-drawbar",
+        "index": 8
+      },
+      "mode": "mirrored",
+      "from": 0.0,
+      "to": 1.0
+    },
+    {
+      "control": "Track-",
+      "target": {
+        "kind": "select-slot",
+        "step": -1
+      },
+      "mode": "momentary",
+      "value": 1.0
+    },
+    {
+      "control": "Track+",
+      "target": {
+        "kind": "select-slot",
+        "step": 1
+      },
+      "mode": "momentary",
+      "value": 1.0
+    },
+    {
+      "control": "Patch-",
+      "target": {
+        "kind": "instrument-preset",
+        "step": -1
+      },
+      "mode": "momentary",
+      "value": 1.0
+    },
+    {
+      "control": "Patch+",
+      "target": {
+        "kind": "instrument-preset",
+        "step": 1
+      },
+      "mode": "momentary",
+      "value": 1.0
+    },
+    {
+      "control": "Play",
+      "target": {
+        "kind": "metronome-play"
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "control": "Click",
+      "target": {
+        "kind": "metronome-play"
+      },
+      "mode": "toggle",
+      "levels": [
+        0.0,
+        1.0
       ]
     }
   ]

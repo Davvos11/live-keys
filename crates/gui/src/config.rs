@@ -36,14 +36,19 @@ pub struct AppConfig {
     pub metronome: crate::metronome::MetronomeConfig,
     #[serde(default)]
     pub surfaces: SurfacesConfig,
+    /// The selected slot (what "the selected slot" mappings drive).
+    #[serde(default)]
+    pub selected_slot: usize,
 }
 
 /// The control surfaces panel.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SurfacesConfig {
-    /// The MIDI devices shown, by `midi_device_name`, in order; `None` until the
-    /// user picks: then every device plugged in that has a known surface.
+    /// The MIDI devices shown, in order — by `midi_device_name`, or for a
+    /// surface spanning several ports, the device they make
+    /// (`Library::device_of`); `None` until the user picks: then every device
+    /// plugged in that has a known surface.
     pub devices: Option<Vec<String>>,
     /// Collapsed to one row by the user.
     pub collapsed: bool,
@@ -52,6 +57,15 @@ pub struct SurfacesConfig {
     /// Settings of surface controls that have any, by `surface/label`
     /// (`ControlRef::key`).
     pub controls: std::collections::BTreeMap<String, crate::mappings::ControlSettings>,
+    /// Per device, the variant of each page with variants that isn't on its
+    /// first (a keyboard's preset), by page id.
+    pub variants: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
+    /// Surfaces (by id) whose default mappings were installed once: they're
+    /// the user's from then on.
+    pub defaults_installed: Vec<String>,
+    /// Devices whose surface's driver the user switched off (a keyboard left
+    /// in its own mode rather than DAW mode).
+    pub without_driver: Vec<String>,
 }
 
 impl AppConfig {

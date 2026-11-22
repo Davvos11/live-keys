@@ -1,8 +1,9 @@
 # Nektar Impact LX+ (LX88+) DAW protocol — as implemented by Nektar's scripts
 
-Status (2026-11-22): **worked out from Nektar's own DAW scripts, not yet confirmed on the
-hardware** (see §9 and the hardware checklist in `nektar-impact-prompt.md`). Only protocol
-facts are recorded here; none of Nektar's code is copied into this repository.
+Status (2026-11-22): worked out from Nektar's own DAW scripts, then **tested on the
+developer's LX88+ (firmware "0220")** — §9 has what the hardware does; where it contradicts
+§1–§8, §9 wins. Only protocol facts are recorded here; none of Nektar's code is copied into
+this repository.
 
 **Where the sources come from** (Nektar's downloads for registered owners, in
 `~/Downloads/`; read as text only, never run):
@@ -340,12 +341,226 @@ from the code; the keyboard presumably shows values itself.
    LEDs as Logic does.
 7. On exit send `F0 00 01 77 7F 01 05 00 01 0F 01 00 69 F7`.
 
-## 9. Open questions (to test on the hardware)
+## 9. On the hardware (LX88+, firmware "0220", 2026-11-22)
 
-- Meaning of USB port modes 1 and 3; whether mode 2 is right on Linux (which ALSA port gets what).
-- Whether the firmware checks the SysEx checksum (§3.2).
-- Channel for the Clips/Scenes LEDs and the Shift "consumed" message (FL ch1 vs Logic ch16).
-- What the keyboard does with CC values echoed for faders/knobs; what `BF 71/72 01` does.
-- On-values for transport and fader-button LEDs (1 vs 127).
-- Whether pads send/light on ch16 only after a SAL message; pad colours on the LX+.
-- What soft-takeover value `04` shows; any way to write the display beyond UP/dn.
+Tested by sending with `amidi -p hw:X,0,0 -S '…'`, recording both inputs with `aseqdump`, and
+watching the keyboard (the developer, and a webcam). The developer's Setup A2 was **0**.
+
+**Ports.** ALSA shows `Impact LX88+ MIDI1` (in + out) and `Impact LX88+ MIDI2` (in only); in
+live-keys (`midi_device_name`) they're the devices `Impact LX88+:Impact LX88+ MIDI1` and
+`Impact LX88+:Impact LX88+ MIDI2` — the surface's substring "Impact LX88+" matches both.
+
+**Identity.** `F0 7E 7F 06 01 F7` → `F0 7E 7F 06 02 00 01 77 67 48 18 40 30 32 32 30 F7`,
+answered on **both** inputs; the version bytes are ASCII ("0220").
+
+**Port mode 0** (A2 = 0, before any handshake): everything arrives on **port 1**. Mixer and
+Inst modes still send their ch16 CCs (§4.1: fader 1 = 12/38, knob 1 = 30/56, fader button
+1 = 21/47, 127 press / 0 release), transport 102–107 and Track/Patch 109–112 on ch16. The
+Mixer/Inst/Preset buttons, Shift and Page send **nothing** — the keyboard switches mode by
+itself. Preset mode sends the user preset's own messages. (So without a handshake the keyboard
+is usable, but the host can't tell the mode or see Shift/Page.)
+
+**Port mode 2** (`… 01 05 00 01 0F 01 02 67 F7`, no reply): the DAW controls move to **port
+2**, ch16: Mixer/Inst controls as §4.1, Mixer/Inst/Preset = CC 113/114/115, Shift = 108,
+Page = 119, transport 102–107, Track −/+ 109/110, Patch −/+ 111/112 — every button 127 on
+press, 0 on release. Keys, wheels, **Preset-mode controls and the pads** (in their own
+configured mode) stay on **port 1**. Nothing visible changes on the keyboard. Port mode 0
+switches it back.
+
+- **There's no Click button (CC 101 never comes).** Click is Shift's function on Play; the
+  Shift layer is printed on the panel but is the **host's** to implement: Shift sends 108 =
+  127, then the button its plain CC. The printed Shift functions: Loop → Back (to start),
+  Rewind → Set L, Forward → Set R, Stop → Undo, Play → Click, Record → Mode.
+- Moving a fader/knob shows its value on the display; pressing a fader button in Inst mode
+  shows a square.
+
+**Display.** `… 01 06 00 01 01 01 vv cs F7`: `02` shows "UP", `03` "dn". `01` doesn't blank
+the display — the indicator stays until a control's value replaces it. `04` shows nothing.
+**The checksum isn't checked** (an "UP" with checksum 00 shows "UP"); we send the right one
+anyway.
+
+**LEDs** (all to port 1, ch16):
+- Fader buttons: `BF cc v`, the button's own CC **in the current mode** (21–29 in Mixer,
+  47–55 in Inst); any v > 0 lights it (yellow; 1 and 127 look alike), 0 turns it off. A CC of
+  the other mode is ignored, and **switching mode turns them all off** — the host must send
+  the new mode's LEDs after CC 113/114. The keyboard never lights them itself.
+- Page: `BF 77 (0|1)` + `BF 77 (16|17)` lights the Page button blue (A, default page) or white
+  (B, user page), or off.
+- Clips / Scenes: `BF 75 v` / `BF 76 v` light them green — **ch16** (Logic was right; FL's ch1
+  does nothing).
+- Clips / Scenes as buttons: CC 117 / 118 on port 2, ch16, 127/0 (DAW mode); they don't
+  light themselves.
+- Transport and Mixer/Inst/Preset buttons: no LED responded to any CC sent (101–108,
+  113–115). `BF 71 01` does nothing visible.
+
+**Pads (SAL).** In DAW mode the pads keep their own (user) setup and port 1 until the host
+sends Logic's **SAL "pads active"** `F0 00 01 77 7F 01 09 04 01 00 01 03 6D F7`. Then they
+send **notes 60, 62, 64, 65 (bottom row, left → right), 67, 69, 71, 72 (top row) on ch16, port
+2**, with velocity, and are lit by note-ons on ch16 (velocity irrelevant). Each pad's colours
+are set by `… 01 06 00 00 pp 01 cc cs F7` (pp = pad 1–8 in the note order above; cc = an
+unlit/lit colour pair, Logic's `PAD_COLOR`: 0 off/yellow (the default), 1 red/yellow,
+2 green/yellow, 3 off/green, 4 red/green, 5 yellow/green, 6 off/red, 7 green/red, 8 yellow/red,
+9 orange/yellow, 10 orange/green, 11 orange/red, 12 off/orange, 13 red/orange, 14 green/orange,
+15 yellow/orange) — confirmed for codes 1, 3, 4, 6, 7, 9, 12, 15. Once active, the pads stay
+DAW pads (notes on port 2) in every mode, Preset included, and never light themselves when
+hit (no channel pressure either). SAL `… 01 09 04 01 00 01 02
+6E F7` (inactive) and SAL close `… 01 09 00 00 00 01 00 75 F7` give the pads back.
+
+Still open: what port modes 1 and 3 do; the SAL `dawID` byte (Logic's 4 was used — whether
+others behave differently); what the Inst square means; pad CC feedback per the guide (pads
+in CC mode with Data 1 = Data 2) — not tested; the "Shift consumed" message (§5.2).
+
+## 10. Design for live-keys (agreed and built 2026-11-22)
+
+Developer's decisions: **mappings per page** (Mixer, Inst, Preset each their own; the five
+presets share the Preset page's); **default mappings** for Mixer and Inst; **DAW mode
+automatically** when the surface is shown, with a per-surface switch to turn it off;
+**glide** stays the default takeover (UP/dn is shown for controls set to pick up).
+
+What §9 means for us: in DAW mode the keyboard does the work of telling modes apart. Mixer and
+Inst controls arrive on their own port with their own CC numbers, the mode buttons say which
+mode is active, and the pads (after SAL) send notes of their own on that port. So most of
+this is **generic surface features** (pages, several ports, a shift button, claiming a whole
+port). The Nektar-specific part, the **driver**, is small: handshake, goodbye, the UP/dn
+display, the pad colours and the Page LED.
+
+### 10.1 Pages
+
+A **page** is a set of banks drawn in the same place, one page at a time: the LX88+'s
+**Mixer**, **Inst** and **Preset**. Banks without a page are always there (wheels, transport,
+Track/Patch). Each page's controls are **controls of their own** (own labels, e.g. `F1`
+on every page, made unique by the page: `Mixer/F1`), so **each page has its own mappings**:
+Mixer's F1 can be slot 1's volume while Inst's F1 is a synth's cutoff. The page shown
+follows the keyboard:
+
+- a page's `select` message (CC 113/114/115 on port 2) switches to it;
+- failing that, a message that only one page's controls send switches to that page (so even
+  without the driver, moving a Mixer fader shows the Mixer page);
+- the panel has the page names as tabs; clicking one shows that page (for learning) without
+  changing the keyboard.
+
+The **Preset page** has **variants**: the five user presets send different messages for the
+same physical controls, and the keyboard never says which preset is active. So the variant
+is chosen in the panel (a dropdown on the surface, saved in the config, default 1). Mappings
+belong to the Preset page's controls, whatever the variant. Only the chosen variant's
+messages are recognised, because the presets overlap: preset 1's F9 and preset 2's F1 are
+both CC 7 on channel 1.
+
+Feedback is per page: after a page change, the new page's controls are sent their state
+again (the keyboard clears the fader-button LEDs on a mode change and ignores the other
+mode's).
+
+### 10.2 Ports
+
+A surface can span **several ports of one device**: `"ports": ["MIDI1", "MIDI2"]` (substrings
+that tell apart the ports its `devices` patterns match), and a bank or page names its port
+(default 1). The panel's device checklist shows the device once ("Impact LX88+"), not one
+entry per port. Messages are identified by `(port, channel, message)`.
+
+A port can be marked **claimed whole** (`"claim": true`): its events never reach the slots,
+mapped or not. The LX88+'s port 2 carries only DAW controls in DAW mode, so it's claimed.
+Port 1 (keys, wheels, the Preset page) works as today.
+
+### 10.3 Shift
+
+A button can be the surface's **shift** (`"shift": true`), and other buttons can have a
+**shifted twin**: a control of its own with the label printed on the panel (Shift + Play =
+`Click`, + Stop = `Undo`, + Loop = `Back`, + Rewind = `Set L`, + Forward = `Set R`, + Record =
+`Mode`). While shift is held, a twinned button's messages count as its twin. Generic: the
+same works for any controller with a shift layer (open question 2 of `midi-learn.md`).
+
+### 10.4 Drivers
+
+A surface can name a **driver** (`"driver": "nektar-impact-lx-plus"`), Rust code in
+`crates/surfaces` (pure: it turns events and states into messages, so it's unit-testable),
+run by the mapping thread, which owns the output connections:
+
+- **connect** (the device appears or is shown): port mode 2, SAL pads active, each pad's
+  colours, every LED off, then the usual feedback resync. No identity check: the device name
+  is enough (FL does the same on macOS), and midir drops incoming SysEx today.
+- **disconnect** (hidden, or the app exits, including `Engine` drop): SAL close, port mode 0,
+  so the keyboard works standalone again.
+- **takeover display**: when a control set to pick up is moved while waiting, "UP" or "dn"
+  depending on which side of its target it is; nothing when it catches up (its value
+  replaces it). Glide, the default, needs none.
+- **pads**: lit by note-on (feedback as today); colours per pad from the mapping (mapped:
+  orange unlit / green lit; unmapped: off / yellow), sent when the setup changes.
+- **Page LED** (blue/white) and **Clips/Scenes** (green), as feedback of those buttons.
+- SysEx encoding and checksum as §3, unit-tested.
+
+Everything sent goes through the mapping thread's output to port 1 (the keyboard's only
+input); a SysEx is a byte string there, not a `MidiEvent`.
+
+### 10.5 The shipped LX88+ surface
+
+- No page: wheels (pitch bend, CC 1 on port 1), transport (102–107 on port 2, with shifted
+  twins), Track −/+, Patch −/+, Page, Clips, Scenes, Shift.
+- **Mixer**: F1–F9 CC 12–20, B1–B9 CC 21–29 (lit, feedback), K1–K8 CC 30–37; pads notes 60–72
+  (lit) — port 2, ch16.
+- **Inst**: the same with CC 38–46, 47–55, 56–63.
+- **Preset**: F1–F9, B1–B9, K1–K8 on port 1 with the guide's five presets as variants (global
+  channel 1).
+- The pads: with the driver, SAL makes them DAW pads in every mode (port 2, notes 60–72), so
+  they're one bank without a page, apart from the keys. Without the driver (DAW mode
+  switched off) they send their own configured messages on port 1, by default notes 36–43,
+  which are also keys C1–G1, so the surface doesn't draw them then.
+- Default takeover: glide, like every surface; pick up shows UP/dn.
+
+### 10.6 Default mappings and the selected slot
+
+A surface can ship **default mappings** (in its JSON, per page), installed as the user's
+"in every scene" mappings the first time the surface is shown (from then on they're the
+user's to edit or delete; nothing re-adds them). For the LX88+:
+
+- **Mixer**: F1–F6 the slots' volumes, F9 the master's; B1–B6 the slots' mutes, B9 the
+  master's mute; K1–K6 unmapped (there's no pan) — open for the user.
+- **Inst** (as built): K1–K8 the **selected slot's panel positions** 1–8, F1–F9 its
+  **drawbars**, mirrored (new targets that follow the selection); Patch −/+ the selected
+  slot's instrument preset previous/next.
+- **Track −/+** move the **selected slot** — a new rack concept: one slot is selected
+  (outlined in the GUI, clicked to select, kept in the config), the target of everything
+  "selected slot".
+- Transport: Play = metronome play/stop, Shift + Play (Click) = the same; the rest unmapped
+  until there are targets for them (scene previous/next on Rewind/Forward is a candidate).
+
+### 10.7 Phases
+
+1. **Format**: pages (with `select`, variants, per-page feedback resync), ports, claimed ports,
+   shift twins; the surfaces panel's page tabs and preset variant dropdown; the shipped LX88+
+   surface (all controls, presets from the guide). Unit tests: reading by page/port, variant
+   selection, shift twins.
+2. **Driver**: the `Driver` trait and the Nektar driver (connect/disconnect, SysEx + checksum,
+   UP/dn, pad colours, Page LED); SysEx output from the mapping thread; the per-surface DAW
+   mode switch. Tested on the developer's keyboard.
+3. **Selected slot and defaults**: the selected slot, its targets (panel position n,
+   instrument preset prev/next, select next/previous), default mappings in the surface file.
+4. Docs, `CLAUDE.md`, clippy.
+
+### 10.8 As built (2026-11-22), tested on the developer's LX88+
+
+- All four phases are built. The format is in `crates/surfaces/src/lib.rs`'s doc comment, the
+  driver in `crates/surfaces/src/driver.rs`, and what runs where in `CLAUDE.md`.
+- The panel draws the keyboard in its own order: wheels, faders with their buttons under
+  them (banks can set their cell size: `cell-width`/`cell-height`), Mixer/Inst/Preset over
+  Shift/Track/Patch, Page, the knobs 4×2 over the transport, the pads, Clips/Scenes. It's
+  ~1070 px wide, so it fits without scrolling in a window about 1670 px wide or more.
+- The driver switches DAW mode on when the surface is shown with its "DAW mode" switch on
+  (the default), and off when it's hidden, switched off, or the app exits
+  (`Engine::close_surfaces`). Each new setup sends only the pad colours that changed.
+  Switched off, the surface is read as one port (`Options::one_port`): the keyboard's own
+  mode-0 behaviour, where Mixer/Inst still send their ch16 CCs on port 1.
+- Confirmed on the keyboard: pages following the mode buttons; Shift + Play read as Click;
+  UP/dn for a fader set to pick up; fader-button LEDs showing a slot's mute; Track −/+
+  moving the selected slot; Inst knobs and faders on the selected slot's panel and
+  drawbars; Patch + loading the next preset; Play starting the metronome.
+- The defaults ship in the surface file's `defaults`, installed once
+  (`AppConfig.surfaces.defaults_installed`). Rewind/Forward, Loop, Stop, Record and their
+  Shift functions (Back, Set L/R, Undo, Mode) are left unmapped; scene targets would suit
+  them.
+- The Preset page's variants are the guide's factory presets. A keyboard whose presets were
+  edited (the developer's preset 1, set up for Ardour) sends other messages there, which
+  the page doesn't recognise. Factory-reset the presets, or edit the surface.
+- Not done: the Page button has no default mapping (its LEDs work as feedback when one is
+  added); "the selected slot" targets can't be picked in learn mode yet, only by defaults
+  or by editing the config.
+

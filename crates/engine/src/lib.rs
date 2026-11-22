@@ -12,7 +12,7 @@ pub use audio::{find_output_device, is_logical_output_device, list_logical_outpu
 pub use engine::{
     Engine, LoadedPluginMeta, MASTER_SLOT, PluginEditor, PluginKey, PluginScan, SLOT_COUNT, SlotChain, SlotSettings,
 };
-pub use mapper::{MapperReport, MapperSetup, Output, TargetSpec, ToValue};
+pub use mapper::{MapperReport, MapperSetup, Output, SurfaceSetup, TargetSpec, ToValue};
 pub use mapping::{ControlSetup, Link, Mode, Takeover, TargetId};
 pub use live_keys_surfaces::Shown;
 pub use metronome::{MAX_BPM, MIN_BPM, MetronomeSettings, Subdivision};

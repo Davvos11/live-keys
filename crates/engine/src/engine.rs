@@ -570,12 +570,35 @@ impl Engine {
             .iter()
             .filter(|control| !control.pass_through && !control.links.is_empty())
             .filter_map(|control| {
-                let (device, surface) = setup.surfaces.get(control.surface)?;
-                let control = surface.controls.get(control.control)?;
-                Some((device.to_string(), control.channel, control.message))
+                let shown = setup.surfaces.get(control.surface)?;
+                let found = shown.surface.controls.get(control.control)?;
+                // A shifted twin claims its original's message.
+                let found = found.twin_of.and_then(|of| shown.surface.controls.get(of)).unwrap_or(found);
+                Some(
+                    shown
+                        .ports
+                        .iter()
+                        .filter(|(_, port)| *port == found.port)
+                        .map(|(name, _)| (name.to_string(), found.channel, found.message))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect();
+        // Ports a surface claims whole (if it's read port by port at all).
+        let whole: Vec<String> = setup
+            .surfaces
+            .iter()
+            .filter(|shown| !shown.surface.options.one_port)
+            .flat_map(|shown| {
+                shown
+                    .ports
+                    .iter()
+                    .filter(|(_, port)| shown.surface.claim_ports.contains(port))
+                    .map(|(name, _)| name.to_string())
             })
             .collect();
-        self.midi_inputs.set_claims(&claims);
+        self.midi_inputs.set_claims(&claims, &whole);
         self.mapper_generation += 1;
         let targets = setup
             .targets
@@ -605,6 +628,17 @@ impl Engine {
     /// been plugged in again.
     pub fn resync_feedback(&self) {
         let _ = self.mapper_tx.try_send(MapperInput::Resync);
+    }
+
+    /// Gives back every control surface a driver set up (a keyboard in DAW
+    /// mode, its pads lit): call before exiting. Waits for it, briefly.
+    pub fn close_surfaces(&self) {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        if self.mapper_tx.send(MapperInput::Close(done_tx)).is_ok()
+            && done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_err()
+        {
+            log::warn!("control surfaces weren't given back in time");
+        }
     }
 
     /// Tells the mapping thread that target `target` of setup `generation` was

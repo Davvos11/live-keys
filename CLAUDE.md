@@ -83,7 +83,8 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
 # Settings persist to ~/.config/live-keys/config.json (audio device, MIDI inputs' devices, extra plugin
 # folders, pinned plugin ids, favourite preset ids, master volume + mute + transpose, the metronome's tempo, time
 # signature, subdivision and volume, the control surfaces panel's devices and whether it's collapsed,
-# MIDI learn's mappings kept in every scene and its surface controls' settings,
+# MIDI learn's mappings kept in every scene and its surface controls' settings, the surfaces'
+# preset variants, drivers switched off and defaults installed, the selected slot,
 # and per slot: MIDI inputs + filter, volume), saved as they change. User control surfaces are
 # ~/.local/share/live-keys/surfaces/*.json.
 # The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
@@ -617,12 +618,13 @@ behind format-agnostic cores:
     `Engine::set_midi_inputs(devices per input)` sets the assignments; `Engine::sync_midi_inputs`
     (the GUI calls it every second) connects devices that appeared and drops ones that went
     away; both return the ports present. So a missing device never fails a plugin load.
-    **Control surfaces**: `Engine::set_surface_devices(devices)` names the devices the GUI's
-    surfaces panel shows; they're connected too (on an input or not), and the callback also
-    sends their events (`SurfaceEvent`: device name + `MidiEvent`) to the mapping thread
-    (below; a bounded `mpsc` channel, full = dropped). Events of mapped controls are
-    **claimed** (`Claims`: per device, atomic bits per channel for CCs, notes, pitch bend and
-    channel pressure) and don't reach the slots, unless their control passes through.
+    **Control surfaces**: `Engine::set_surface_devices(ports)` names the ports (by
+    `midi_device_name`) of the devices the GUI's surfaces panel shows; they're connected too
+    (on an input or not), and the callback also sends their events (`SurfaceEvent`: port
+    name + `MidiEvent`) to the mapping thread (below; a bounded `mpsc` channel, full =
+    dropped). Events of mapped controls are **claimed** (`Claims`: per port, atomic bits per
+    channel for CCs, notes, pitch bend and channel pressure, plus `all` for a port a surface
+    claims whole) and don't reach the slots, unless their control passes through.
   - **MIDI learn** (`docs/design/midi-learn.md`): `mapping.rs` is the logic alone, unit-tested
     — `Mappings` from surfaces and `ControlSetup`s (a control, its `Takeover` — jump, glide,
     pick up —, glide time, pass-through, and `Link`s to targets with a `Mode`: a range —
@@ -633,7 +635,10 @@ behind format-agnostic cores:
     effective values (`take_writes`, each with its base), `set_position` is a target set
     elsewhere — its new base — (links whose control is elsewhere lose it: pick up waits for
     a crossing, glide slides over the glide time, `tick` moving it on), and `take_waiting`
-    reports faders and knobs whose target's base is elsewhere, for the GUI's ghost.
+    reports faders and knobs whose target's base is elsewhere, for the GUI's ghost, and
+    `take_pick_ups` a pick-up control moved while waiting (which way to move it, for a
+    driver's display). `Mappings` keeps a `Reader` per surface (`event(surface, port,
+    event)`); a page change shows that page's (and page-less) controls' feedback again.
     Controls with feedback (`ControlSetup::feedback`) always jump and are sent their first
     target's state when it changes from elsewhere (`take_feedback`; `resync_feedback` sends
     all), their own echo ignored. The thread sends those through `midir` output
@@ -642,7 +647,8 @@ behind format-agnostic cores:
     devices shown or present change, reopens them and sends everything) and reports them
     (`MapperReport::Feedback`, drawn by `SurfacesUi::show_sent`). `mapper.rs` runs it on the
     `midi-mapping` thread, which blocks on its input channel (2 ms ticks while gliding):
-    `Engine::set_mappings(MapperSetup)` (surfaces, controls, `TargetSpec`s: an `Output` —
+    `Engine::set_mappings(MapperSetup)` (`SurfaceSetup`s — device, surface as read, ports
+    present with their numbers —, controls, `TargetSpec`s: an `Output` —
     `Param { key, param }`, `Setbfree { key, function }`, `Volume { slot }`, or `Gui` — a
     `ToValue` closure from position to value, and the position now) sets the claims and
     hands the setup over, returning its generation; a target's values go out at once —
@@ -653,7 +659,12 @@ behind format-agnostic cores:
     surface event, `Applied` with the base, `Waiting`) to `Engine::take_mapper_reports`, which records
     applied values (`param_value`, setBfree's record, the slots' gains; a VST3 controller is
     told) before handing them on. `Engine::set_mapped_position` tells the thread of a target
-    moved elsewhere.
+    moved elsewhere. The thread also runs the surfaces' **drivers** (`State::sync_drivers`
+    on each setup and resync: a shown device whose surface has a driver and isn't read as
+    one port gets one, connected; one no longer shown is disconnected), sending their SysEx
+    and messages through the same output connections (`FeedbackOut::raw`), their feedback
+    in place of a control's own, and the pick-up hints. `Engine::close_surfaces` (the GUI
+    calls it on exit) disconnects every driver and waits for it (500 ms at most).
   - `engine.rs` — the control side. `Engine::start` builds the MIDI/command/retired ring
     buffers, hands the MIDI producer to `MidiInputs`, and starts the `cpal` output stream
     (`build_stream`) whose callback is just "apply pending commands, then `rack.render`"
@@ -848,24 +859,31 @@ behind format-agnostic cores:
   below, 1500×995 (the design's "Live (window minimum)" board is 1200×995, its "Right sidebar"
   300×995). Its layout is pinned to the window (`x`/`y`/`width`/`height`) because the panel's
   room is computed from the window's height (`AppWindow`'s `fits-expanded`/`squeeze`): tall
-  enough (≥ 1019 px), the panel is docked and expanded (140 px, `SurfaceSizes`) unless the user
+  enough (≥ 983 px), the panel is docked and expanded (140 px, `SurfaceSizes`) unless the user
   collapsed it (`AppConfig.surfaces.collapsed`, `set-surfaces-collapsed`); otherwise it's one
   44 px row whose button shows it expanded over the bottom of the slots. Whatever the panel
   takes beyond the 995 px the slots need, the slots give up as padding: `SlotPanel.squeeze`
-  (0..1, through `LiveTab`) shrinks the header by up to 30 px and the first tab's padding and
+  (0..1, through `LiveTab`) shrinks the header by up to 40 px, closes the gap between the zigzag knob rows, and the first tab's padding and
   spacing. F11 and the button at the end of the sidebar's transpose row toggle `full-screen`;
   Escape leaves MIDI learn — both in the `key-pressed` of a `FocusScope` around the whole
   window (key events go up from the focused element through its parents; `KeyBinding`s in it
   didn't fire), which gets the focus back when learn mode starts or stops. **The surfaces panel**
-  (`src/surfaces.rs`: `SurfacesUi`): the devices shown are `AppConfig.surfaces.devices`, or,
+  (`src/surfaces.rs`: `SurfacesUi`): a device is a port, or the ports one surface spans
+  (`Library::device_of`, so the LX88+'s MIDI1 and MIDI2 are one "Nektar Impact LX88+");
+  the devices shown are `AppConfig.surfaces.devices`, or,
   until the user picks (`None`), every device plugged in that has a known surface; a
   checklist like a MIDI input's (`AppState.surface-devices`, `toggle-surface-device`) picks
-  them, and `sync_surfaces` hands the list to `Engine::set_surface_devices`. Each shown device
-  is a `SurfaceView` of `SurfaceControlView`s (kind, label, cell, last value, pressed/moving),
-  drawn by `SurfaceDrawing` (`SurfaceFader`/`Knob`/`Pad`/`Button`), or a note that no surface
+  them, and `sync_surfaces` hands their ports to `Engine::set_surface_devices`. Each shown device
+  is a `SurfaceView` of `SurfaceControlView`s (kind, label, cell, last value, pressed/moving,
+  hidden — another page's, or a shift twin), with its pages (clickable: `surface-page`), the
+  shown page's variant (click/right-click steps it: `surface-variant`, kept in
+  `AppConfig.surfaces.variants`) and its driver's switch ("DAW mode on/off":
+  `toggle-surface-driver`, off = in `AppConfig.surfaces.without_driver`, read as one port),
+  drawn by `SurfaceDrawing` (`SurfaceFader`/`Knob`/`Pad`/`Button`, which follow their
+  cell's size), or a note that no surface
   is known for it; the poll timer's `learn::Learn::poll` feeds the surface events of
-  `Engine::take_mapper_reports` to `SurfacesUi::apply` (`Surface::read`; a pad's channel
-  pressure goes to the held pads) and `tick` (faders/knobs stop showing as moving after
+  `Engine::take_mapper_reports` to `SurfacesUi::apply` (a `Reader` per device; a pad's
+  channel pressure goes to the held pads) and `tick` (faders/knobs stop showing as moving after
   250 ms; `AppState.surface-activity` lights the row's dot). **MIDI learn** (see
   `docs/design/midi-learn.md`): `src/mappings.rs` (`MappingsUi`, in `Rack::mappings`) keeps
   the mappings — with the scene: `SceneMapping`s per plugin key, saved in each plugin's
@@ -875,9 +893,13 @@ behind format-agnostic cores:
   state file by `restore_values`; setBfree's through `Engine::restore_setbfree`, which sends
   them again once the plugin reports its loaded state); in every scene:
   `GlobalMapping`s (`RackTarget`: a plugin by slot and id, a panel position, a slot's or the
-  master's volume, mute or transposition, the metronome's volume, play or tempo) and
+  master's volume, mute or transposition, the metronome's volume, play or tempo, the
+  **selected slot**'s panel position or drawbar, and two actions on a press — select the
+  slot `step` on, load the selected slot's instrument's preset `step` on
+  (`step_instrument_preset` in `main`)) and
   `ControlSettings` per `surface/label`, in `AppConfig.surfaces` (`MappingsUi::store`
-  writes them back) — resolves them against what's loaded (`Concrete`; a plugin target's
+  writes them back; a surface's `defaults` are added once, `MappingsUi::install_defaults`,
+  remembered in `AppConfig.surfaces.defaults_installed`) — resolves them against what's loaded (`Concrete`; a plugin target's
   conversions go through its panel control, `profiles::Control::to_value`/`position`/
   `steps`/`text_at`, or a plain one) into the engine's setup (`build_setup`; not handed over
   if it does what the last did, so takeover state survives; rebuilt when `setup_dirty`, set
@@ -1026,7 +1048,10 @@ behind format-agnostic cores:
   loaded until the first scan is installed and the session restored, so until then
   `AppState.starting` lays a spinner over the Live tab (over it, not instead of it, so the
   window still sizes itself to the tab), and the session is neither autosaved nor saved on
-  exit (`started` in `main`) — that would overwrite the last session with an empty rack. The Live tab (`live_tab.slint`) is the scenes pane, then
+  exit (`started` in `main`) — that would overwrite the last session with an empty rack. One slot is **selected** (`AppConfig.selected_slot`, `AppState.selected-slot`: outlined in
+  the primary colour; a click on the slot where nothing else takes it, or a mapped Track −/+,
+  selects one — `select-slot`, which rebuilds the mapping setup), what "the selected slot"
+  mapping targets drive. The Live tab (`live_tab.slint`) is the scenes pane, then
   one `SlotPanel` (`ui/slot_panel.slint`) per `AppState.slots` entry in a grid of
   `SlotGrid.columns` (3) equal cells (`SlotState`: `instrument: EffectRow` — key -1 when empty —
   `midi-effects`/`audio-effects: [EffectRow]`, the panel's `drawbars`/`cells`/`pool`, `artwork`, `muted`,
@@ -1234,22 +1259,58 @@ behind format-agnostic cores:
 
 - **`crates/surfaces`** (`live-keys-surfaces`) — control surfaces: MIDI controllers as banks
   of faders, knobs, pads and buttons, each control knowing its message (CC, note, pitch bend,
-  channel pressure) and channel; see `docs/design/midi-learn.md`. JSON (format in the crate's
-  doc comment), shipped ones compiled in (`SHIPPED`: Nektar Impact LX88+ and Akai LPD8 — the
-  LX88+'s faders/pots from Nektar's guide, its pads still a guess; the original LPD8 checked
-  on the hardware, pad lights included: it lights pad n on note n, channel 1, and turns a pad
-  off itself when let go) and the user's in `<data dir>/live-keys/surfaces/` replacing a shipped one by `id`
-  (`Library::load`). `Surface::from_json` places every control (`ControlKind::cell_size`,
-  `Numbering` top/bottom-first) and indexes them by `(channel, message)`; `Surface::matches`
-  picks a surface for a device name (case-insensitive substrings), `Surface::read` turns a
-  `MidiEvent` into `(control, Reading)` (a position, a press with velocity, a release), and
-  `pad_pressure` finds the pads a channel-pressure message may belong to. Controls with
-  `"feedback": true` (bank or control; `lit` for pads/buttons) have a `Feedback`, and
-  `Surface::feedback(control, Shown)` is the message showing a position or lit state on
-  one. The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`, serde both
-  ways; `Surface::from_spec`, and each `Surface` keeps its `spec` and whether it's the
-  user's); `Library::save` writes a spec as the user's `<id>.json` (replacing any file with
-  that id), `Library::delete` removes it. Labels must be unique within a surface. Unit-tested.
+  channel pressure), channel and port; see `docs/design/midi-learn.md`. JSON (format in the
+  crate's doc comment), shipped ones compiled in (`SHIPPED`: Nektar Impact LX88+ and Akai
+  LPD8, both checked on the developer's hardware — the LX88+'s whole DAW protocol is in
+  `docs/design/nektar-impact.md`; the original LPD8 lights pad n on note n, channel 1, and
+  turns a pad off itself when let go) and the user's in `<data dir>/live-keys/surfaces/`
+  replacing a shipped one by `id` (`Library::load`). `Surface::from_spec` places every
+  control (`ControlKind::cell_size`, or a bank's `cell-width`/`cell-height`; `Numbering`
+  top/bottom-first) and indexes them by `(port, channel, message)`. Beyond plain banks
+  (generic, so other controllers can use them):
+  - **Ports**: `ports` patterns tell a device's MIDI ports apart; `Surface::port_of(port
+    name)` is the device they make together (the name minus the pattern) and the port's
+    number, `Library::device_of` the same for any port (a port alone is port 1 of itself).
+    `claim-ports`: ports whose every event is the surface's; `output-port`: where feedback
+    goes.
+  - **Pages** (`PageSpec`: id, name, `button`, `variants`): banks with a `page` are drawn one
+    page at a time and are controls of their own, labelled "<page> <label>" (so each page has
+    its own mappings). The page follows the hardware (its button pressed, or a message only
+    its controls send). **Variants** are a page's alternative messages (a keyboard's presets,
+    which it doesn't announce): a bank's `variants` give the other variants' controls (and
+    channel, `toggle`); which one is read is the user's `Options::variants`.
+    `Surface::with_options(Options)` re-reads the spec with the variants chosen, or with
+    `one_port` (everything as port 1: a device whose driver is off doesn't spread its
+    messages). Duplicate messages are allowed across pages and within a variant (the
+    hardware does that); `read` prefers the page shown.
+  - **Shift**: one control with `"shift": true`; a control with `"shifted": "<label>"` gets a
+    twin (`Control::twin`/`twin_of`, appended after every other control, no message of its
+    own) that its messages are while shift is held. `Surface::visible(control, page, shift)`
+    says what the panel draws.
+  - Button banks with `"toggle": true` send a CC the hardware latches: every message is a
+    press.
+  - **`Reader`**: the state a surface's events need beyond themselves (the page shown,
+    shift held, controls pressed while shifted — their release is the twin's); `read(surface,
+    port, event)` gives a `Read` (the control and `Reading` — a position, a press with
+    velocity, a release —, a pad's channel pressure, whether the page changed). The mapping
+    thread and the panel each keep one per device.
+  - **Drivers** (`driver.rs`): a surface's `driver` names code for what plain messages
+    can't do; `driver::Driver` (pure, unit-tested) turns connect/disconnect, which controls
+    are mapped, pick-up hints ("move it up/down") and a control's feedback into messages for
+    the output port; `driver::open(id)`, `DRIVERS` (id and what the panel's switch says).
+    `NektarLxPlus`: DAW mode (USB port mode 2) and the pads as the host's (SAL) on connect,
+    everything back on disconnect, pad colours (mapped: orange, green when lit), the
+    display's UP/dn, the Page button's two LEDs; Nektar's SysEx checksum (`checksum`).
+  - `defaults`: mappings to install the first time a surface is shown (the GUI's
+    `GlobalMapping` JSON with `control` a label; the LX88+ ships Mixer → slot volumes and
+    mutes, Inst → the selected slot's panel and drawbars, Track/Patch, Play).
+  Controls with `"feedback": true` (bank or control; `lit` for pads/buttons) have a
+  `Feedback`, and `Surface::feedback(control, Shown)` is the message showing a position or
+  lit state on one. The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`/
+  `PageSpec`/`VariantSpec`, serde both ways; each `Surface` keeps its `spec`, its `options`
+  and whether it's the user's); `Library::save` writes a spec as the user's `<id>.json`
+  (replacing any file with that id), `Library::delete` removes it. Labels must be unique
+  within a surface. Unit-tested.
 
 - **`crates/plugin-check`** (`live-keys-plugin-check`, binary `plugin-check`) — an end-to-end
   check against real installed plugins, not part of the app (see Common commands). `cases.rs`
@@ -1546,8 +1607,10 @@ extension), recommended third-party plugins and their install window — are in
 `docs/design/plugins.md` (a draft; check it before working on any of these, and keep it in step
 with what's decided). Ideas for our own instruments (the Salamander piano first) are in
 `docs/design/own-plugins.md`. MIDI learn — control surfaces in a bottom panel, hardware controls mapped to
-on-screen targets — is designed in `docs/design/midi-learn.md` (phases 1 and 2 built: the
-panel, mappings and learn mode; the rest still a draft).
+on-screen targets — is designed in `docs/design/midi-learn.md` (phases 1–5 built: the
+panel, mappings, learn mode, value layers, feedback, the surface editor); pages, ports,
+shift twins, drivers and default mappings, for the Nektar Impact LX88+'s DAW mode first,
+in §10 of `docs/design/nektar-impact.md` (built), with the keyboard's protocol as tested.
 
 ## GUI
 

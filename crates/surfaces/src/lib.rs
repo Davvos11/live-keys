@@ -21,8 +21,41 @@
 //! motor faders, LED rings, lit pads and buttons —, pads and buttons lit by
 //! `lit` (a note's velocity or a CC's value, default 127; some pads pick a
 //! colour by it).
+//!
+//! **Several ports, pages, shift** (a controller like the Nektar Impact LX88+):
+//! - `ports`: one pattern per MIDI port of the device, in port order (a
+//!   substring of the port's device name; `a|b` for alternatives). A port's
+//!   device name without its pattern is the device the ports make together
+//!   ("Impact LX88+:Impact LX88+ MIDI2" → port 2 of "Impact LX88+:Impact
+//!   LX88+"). A bank's `port` (default 1) is the one its messages come on.
+//!   `claim-ports`: ports whose every event belongs to the surface, mapped or
+//!   not (never reaching the slots). `output-port` (default 1): the port
+//!   feedback is sent to.
+//! - `pages`: `{ "id", "name", "button", "variants" }` — sets of banks drawn in
+//!   the same place, one at a time; a bank's `page` is a page's `id` (none:
+//!   always there). A page's controls are controls of their own, labelled
+//!   "<page name> <label>". The page shown follows the hardware: its `button`
+//!   (a control's label) pressed, or a message only that page's controls
+//!   send. `variants` names the page's alternative messages (a keyboard's
+//!   presets): a bank's `controls` are the first variant's, its `variants`
+//!   (`[{ "channel", "controls" }]`) the others', in order; which one is read
+//!   is chosen by the user ([`Options`]); a variant can also have its own
+//!   `toggle`.
+//! - A control with `"shift": true` is the surface's shift button; one with
+//!   `"shifted": "<label>"` has a twin of that label: its messages while shift
+//!   is held are the twin's ([`Reader`]).
+//! - A button bank with `"toggle": true` sends a CC that the hardware latches
+//!   (127, then 0 on the next press): every message is a press.
+//! - A bank's `cell-width`/`cell-height` size its controls' cells, if not
+//!   as their kind's ([`ControlKind::cell_size`]).
+//! - `defaults`: mappings the app installs the first time the surface is
+//!   shown (the GUI's mapping format; `control` is a control's label).
+//! - `driver`: the name of code that talks to the device beyond plain
+//!   messages (a handshake, a display): see the `driver` module.
 
-use std::collections::HashMap;
+pub mod driver;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use live_keys_core::MidiEvent;
@@ -100,18 +133,56 @@ pub enum Reading {
 
 /// A surface file as written (see the format above): what the editor edits.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct SurfaceSpec {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub devices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_ports: Vec<u8>,
+    #[serde(default = "one_u8", skip_serializing_if = "is_one")]
+    pub output_port: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<PageSpec>,
     pub banks: Vec<BankSpec>,
+    /// Mappings to start with: the GUI's mapping format, with `control` a
+    /// control's label (see the GUI's `MappingsUi::install_defaults`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub defaults: Vec<serde_json::Value>,
+}
+
+/// A page as written.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageSpec {
+    pub id: String,
+    pub name: String,
+    /// The label of the control that switches to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<String>,
+}
+
+/// One of a page's other variants of a bank's messages.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VariantSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle: Option<bool>,
+    pub controls: Vec<ControlSpec>,
 }
 
 /// A bank as written.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BankSpec {
     pub name: String,
     pub kind: ControlKind,
@@ -134,7 +205,20 @@ pub struct BankSpec {
     pub feedback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lit: Option<u8>,
+    #[serde(default = "one_u8", skip_serializing_if = "is_one")]
+    pub port: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub toggle: bool,
+    /// Its controls' cell size, if not their kind's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_height: Option<u32>,
     pub controls: Vec<ControlSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantSpec>,
 }
 
 /// A control as written: one message, and what it does differently from its
@@ -158,6 +242,14 @@ pub struct ControlSpec {
     pub feedback: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lit: Option<u8>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub shift: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shifted: Option<String>,
+}
+
+fn is_one(value: &u8) -> bool {
+    *value == 1
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -209,19 +301,36 @@ impl ControlSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Control {
     pub kind: ControlKind,
+    /// Unique in its surface (mappings name controls by it): a page's
+    /// controls have the page's name in front.
     pub label: String,
+    /// What the panel writes on it.
+    pub short: String,
     pub message: Message,
     /// 0..=15.
     pub channel: u8,
+    /// The device's port it's on, 1-based.
+    pub port: u8,
     /// A pad's pressure messages.
     pub pressure: Option<Pressure>,
-    /// Its cell's top-left corner in the surface, in pixels.
+    /// Its cell in the surface, in pixels.
     pub x: u32,
     pub y: u32,
+    pub width: u32,
+    pub height: u32,
     /// Its bank, as an index into [`Surface::banks`].
     pub bank: usize,
+    /// Its page, as an index into [`Surface::pages`].
+    pub page: Option<usize>,
     /// It shows a value sent back to it, as its own message.
     pub feedback: Option<Feedback>,
+    /// A button whose CC the hardware latches: every message is a press.
+    pub toggle: bool,
+    /// Its twin while shift is held.
+    pub twin: Option<usize>,
+    /// It's the shifted twin of that control (it has no message of its own,
+    /// and is drawn in its place while shift is held).
+    pub twin_of: Option<usize>,
 }
 
 /// How a control shows a value sent back to it.
@@ -249,6 +358,28 @@ pub struct Bank {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    pub page: Option<usize>,
+}
+
+/// A page: banks drawn in the same place as other pages', one at a time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page {
+    pub id: String,
+    pub name: String,
+    /// The control that switches to it.
+    pub button: Option<usize>,
+    /// Its variants' names (none: it has one).
+    pub variants: Vec<String>,
+}
+
+/// How a surface is read, beyond its file: chosen by the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Per page id, the variant read (default the first).
+    pub variants: BTreeMap<String, usize>,
+    /// Every message arrives on port 1: the device isn't in the mode where it
+    /// spreads them over its ports (its driver is off).
+    pub one_port: bool,
 }
 
 /// A surface, its controls placed and indexed by message.
@@ -257,16 +388,27 @@ pub struct Surface {
     pub id: String,
     pub name: String,
     pub devices: Vec<String>,
+    /// Port patterns, see the format.
+    pub ports: Vec<String>,
+    pub claim_ports: Vec<u8>,
+    pub output_port: u8,
+    pub driver: Option<String>,
+    pub pages: Vec<Page>,
     pub banks: Vec<Bank>,
     pub controls: Vec<Control>,
+    /// The shift button.
+    pub shift: Option<usize>,
     /// Size of the whole drawing, in pixels.
     pub width: u32,
     pub height: u32,
-    /// `(channel, message) → control index`; a pad's pressure is found
+    /// `(port, channel, message) → control indices` (more than one only on
+    /// different pages, or within a variant); a pad's pressure is found
     /// through its note.
-    index: HashMap<(u8, Message), usize>,
+    index: HashMap<(u8, u8, Message), Vec<usize>>,
     /// What it was made from.
     pub spec: SurfaceSpec,
+    /// How it was read from it.
+    pub options: Options,
     /// It's the user's (a file in [`user_dir`]), not a shipped one.
     pub user: bool,
 }
@@ -280,45 +422,98 @@ impl Surface {
 
     /// Lays out `file`'s controls; an error says what's wrong with it.
     pub fn from_spec(file: SurfaceSpec) -> Result<Self, String> {
+        Self::resolve(file, Options::default())
+    }
+
+    /// The same surface read with other options.
+    pub fn with_options(&self, options: Options) -> Self {
+        let mut surface = Self::resolve(self.spec.clone(), options).unwrap_or_else(|_| self.clone());
+        surface.user = self.user;
+        surface
+    }
+
+    fn resolve(file: SurfaceSpec, options: Options) -> Result<Self, String> {
+        let mut pages: Vec<Page> = Vec::new();
+        for page in &file.pages {
+            if pages.iter().any(|known| known.id == page.id) {
+                return Err(format!("two pages are called {}", page.id));
+            }
+            pages.push(Page { id: page.id.clone(), name: page.name.clone(), button: None, variants: page.variants.clone() });
+        }
         let mut banks = Vec::new();
         let mut controls = Vec::new();
+        let mut twins: Vec<(usize, String)> = Vec::new();
+        let mut shifts: Vec<usize> = Vec::new();
         for (bank_index, bank) in file.banks.iter().enumerate() {
             if bank.columns == 0 || bank.rows == 0 {
                 return Err(format!("bank {}: no rows or columns", bank.name));
             }
+            let page = match &bank.page {
+                Some(id) => Some(
+                    pages
+                        .iter()
+                        .position(|page| page.id == *id)
+                        .ok_or_else(|| format!("bank {}: no page {id}", bank.name))?,
+                ),
+                None => None,
+            };
+            let variant = page.and_then(|page| options.variants.get(&pages[page].id).copied()).unwrap_or(0);
+            let (bank_channel, toggle, specs) = match variant.checked_sub(1).and_then(|other| bank.variants.get(other)) {
+                Some(other) => (other.channel.unwrap_or(bank.channel), other.toggle.unwrap_or(bank.toggle), &other.controls),
+                None => (bank.channel, bank.toggle, &bank.controls),
+            };
             let capacity = (bank.rows * bank.columns) as usize;
-            if bank.controls.len() > capacity {
-                return Err(format!(
-                    "bank {}: {} controls in {}×{}",
-                    bank.name,
-                    bank.controls.len(),
-                    bank.rows,
-                    bank.columns
-                ));
+            if bank.controls.len() > capacity || bank.variants.iter().any(|other| other.controls.len() > capacity) {
+                return Err(format!("bank {}: more controls than {}×{}", bank.name, bank.rows, bank.columns));
             }
-            let (cell_width, cell_height) = bank.kind.cell_size();
-            for (number, control) in bank.controls.iter().enumerate() {
+            if !(1..=16).contains(&bank.port) {
+                return Err(format!("bank {}: port {} isn't 1–16", bank.name, bank.port));
+            }
+            let (kind_width, kind_height) = bank.kind.cell_size();
+            let (cell_width, cell_height) = (bank.cell_width.unwrap_or(kind_width), bank.cell_height.unwrap_or(kind_height));
+            if cell_width < 16 || cell_height < 16 {
+                return Err(format!("bank {}: cells under 16 px", bank.name));
+            }
+            for (number, control) in specs.iter().enumerate() {
                 let message = control.message().map_err(|err| format!("bank {}: {err}", bank.name))?;
-                let channel = control.channel.unwrap_or(bank.channel);
+                let channel = control.channel.unwrap_or(bank_channel);
                 if !(1..=16).contains(&channel) {
                     return Err(format!("bank {}: channel {channel} isn't 1–16", bank.name));
                 }
+                // Labels and feedback are the first variant's.
+                let first = bank.controls.get(number).unwrap_or(control);
                 let (row, column) = cell(number as u32, bank.rows, bank.columns, bank.numbering);
+                let short = first.label.clone().unwrap_or_else(|| format!("{}{}", bank.prefix, number + 1));
+                let label = match page {
+                    Some(page) => format!("{} {short}", pages[page].name),
+                    None => short.clone(),
+                };
+                if first.shift {
+                    shifts.push(controls.len());
+                }
+                if let Some(twin) = &first.shifted {
+                    twins.push((controls.len(), twin.clone()));
+                }
                 controls.push(Control {
                     kind: bank.kind,
-                    label: control
-                        .label
-                        .clone()
-                        .unwrap_or_else(|| format!("{}{}", bank.prefix, number + 1)),
+                    label,
+                    short,
                     message,
                     channel: channel - 1,
+                    port: if options.one_port { 1 } else { bank.port },
                     pressure: bank.pressure.filter(|_| bank.kind == ControlKind::Pad),
                     x: bank.x + column * cell_width,
                     y: bank.y + row * cell_height,
+                    width: cell_width,
+                    height: cell_height,
                     bank: bank_index,
-                    feedback: control.feedback.unwrap_or(bank.feedback).then(|| Feedback {
-                        lit: control.lit.or(bank.lit).unwrap_or(127).min(127),
+                    page,
+                    feedback: first.feedback.unwrap_or(bank.feedback).then(|| Feedback {
+                        lit: first.lit.or(bank.lit).unwrap_or(127).min(127),
                     }),
+                    toggle: toggle && bank.kind == ControlKind::Button,
+                    twin: None,
+                    twin_of: None,
                 });
             }
             banks.push(Bank {
@@ -328,54 +523,143 @@ impl Surface {
                 y: bank.y,
                 width: bank.columns * cell_width,
                 height: bank.rows * cell_height,
+                page,
             });
+        }
+        // Shifted twins come after every other control, so indices of the
+        // others don't depend on them.
+        for (of, label) in twins {
+            let original = &controls[of];
+            let twin = Control {
+                label: label.clone(),
+                short: label,
+                twin: None,
+                twin_of: Some(of),
+                feedback: None,
+                ..original.clone()
+            };
+            let index = controls.len();
+            controls[of].twin = Some(index);
+            controls.push(twin);
+        }
+        if shifts.len() > 1 {
+            return Err("more than one shift button".into());
+        }
+        let shift = shifts.first().copied();
+        for (spec, page) in file.pages.iter().zip(pages.iter_mut()) {
+            if let Some(button) = &spec.button {
+                page.button = Some(
+                    controls
+                        .iter()
+                        .position(|control| control.label == *button)
+                        .ok_or_else(|| format!("page {}: no control {button}", spec.id))?,
+                );
+            }
+        }
+        for port in file.claim_ports.iter().chain([&file.output_port]) {
+            if !(1..=16).contains(port) {
+                return Err(format!("port {port} isn't 1–16"));
+            }
         }
         let width = banks.iter().map(|bank| bank.x + bank.width).max().unwrap_or(0);
         let height = banks.iter().map(|bank| bank.y + bank.height).max().unwrap_or(0);
         // Mappings name controls by label.
-        let mut labels = std::collections::HashSet::new();
+        let mut labels = HashSet::new();
         if let Some(control) = controls.iter().find(|control| !labels.insert(control.label.as_str())) {
             return Err(format!("two controls are called {}", control.label));
         }
-        let mut index = HashMap::new();
+        let mut index: HashMap<(u8, u8, Message), Vec<usize>> = HashMap::new();
         for (control_index, control) in controls.iter().enumerate() {
-            if index.insert((control.channel, control.message), control_index).is_some() {
+            if control.twin_of.is_some() {
+                continue;
+            }
+            let entry = index.entry((control.port, control.channel, control.message)).or_default();
+            // Two controls of one page (or both of none) may only share a
+            // message in another variant than the first, where the hardware
+            // does that (the LX88+'s preset 2 has its F1 and F9 on CC 7).
+            let clash = entry.iter().any(|&other| controls[other].page == control.page);
+            let variant = control.page.is_some_and(|page| options.variants.get(&pages[page].id).is_some_and(|&v| v > 0));
+            if clash && !variant && !options.one_port {
                 return Err(format!(
                     "two controls send {:?} on channel {}",
                     control.message,
                     control.channel + 1
                 ));
             }
+            entry.push(control_index);
         }
         Ok(Self {
             id: file.id.clone(),
             name: file.name.clone(),
             devices: file.devices.clone(),
+            ports: file.ports.clone(),
+            claim_ports: file.claim_ports.clone(),
+            output_port: file.output_port,
+            driver: file.driver.clone(),
+            pages,
             banks,
             controls,
+            shift,
             width,
             height,
             index,
             spec: file,
+            options,
             user: false,
         })
     }
 
     /// Whether this is the surface for MIDI device `device` (a
-    /// `midi_device_name`).
+    /// `midi_device_name`, or a device its ports make, see [`Surface::port_of`]).
     pub fn matches(&self, device: &str) -> bool {
         let device = device.to_lowercase();
         self.devices.iter().any(|pattern| device.contains(&pattern.to_lowercase()))
     }
 
-    /// The control `event` comes from, and what it did; `None` for anything
-    /// else (keys, other channels…).
-    pub fn read(&self, event: &MidiEvent) -> Option<(usize, Reading)> {
+    /// For the MIDI port named `port` (a `midi_device_name`), if it's one of
+    /// this surface's: the device its ports make together, and its number
+    /// (1-based). A surface without `ports` has one, named as the device.
+    pub fn port_of(&self, port: &str) -> Option<(String, u8)> {
+        if !self.matches(port) {
+            return None;
+        }
+        let lower = port.to_lowercase();
+        for (number, pattern) in self.ports.iter().enumerate() {
+            for alternative in pattern.split('|').filter(|alternative| !alternative.is_empty()) {
+                if let Some(at) = lower.find(&alternative.to_lowercase()) {
+                    // Lowercasing can change lengths outside ASCII: then keep
+                    // the name whole.
+                    let device = if lower.len() == port.len() {
+                        format!("{}{}", &port[..at], &port[at + alternative.len()..])
+                    } else {
+                        port.to_string()
+                    };
+                    let device = device.trim_matches(|c: char| c.is_whitespace() || "()-_".contains(c));
+                    return Some((device.to_string(), number as u8 + 1));
+                }
+            }
+        }
+        Some((port.to_string(), 1))
+    }
+
+    /// The control `event` (arriving on port `port`) comes from, preferring
+    /// one on page `page`, and what it did; `None` for anything else (keys,
+    /// other channels…). Shift is up to the caller: see [`Reader`].
+    pub fn read(&self, port: u8, page: Option<usize>, event: &MidiEvent) -> Option<(usize, Reading)> {
+        let port = if self.options.one_port { 1 } else { port };
         let bytes = event.as_slice();
         let status = *bytes.first()?;
         let channel = status & 0x0F;
         let data = |index: usize| bytes.get(index).copied().unwrap_or(0);
-        let find = |message| self.index.get(&(channel, message)).copied();
+        let find = |message| {
+            let found = self.index.get(&(port, channel, message))?;
+            found
+                .iter()
+                .copied()
+                .find(|&control| self.controls[control].page == page)
+                .or_else(|| found.iter().copied().find(|&control| self.controls[control].page.is_none()))
+                .or_else(|| found.first().copied())
+        };
         match status & 0xF0 {
             0x90 if data(2) > 0 => {
                 let control = find(Message::Note(data(1)))?;
@@ -385,8 +669,10 @@ impl Surface {
             0xB0 => {
                 let control = find(Message::Cc(data(1)))?;
                 let value = f32::from(data(2)) / 127.0;
-                Some((control, match self.controls[control].kind {
+                let found = &self.controls[control];
+                Some((control, match found.kind {
                     ControlKind::Fader | ControlKind::Knob => Reading::Value(value),
+                    ControlKind::Button if found.toggle => Reading::Press(1.0),
                     ControlKind::Pad | ControlKind::Button if data(2) > 63 => Reading::Press(1.0),
                     ControlKind::Pad | ControlKind::Button => Reading::Release,
                 }))
@@ -437,23 +723,128 @@ impl Surface {
     }
 
     /// For a channel-pressure message that isn't a control of its own: the
-    /// pads it may belong to (those sending channel pressure on its channel —
-    /// it's the held one's) and the pressure, 0..=1.
-    pub fn pad_pressure(&self, event: &MidiEvent) -> Option<(Vec<usize>, f32)> {
+    /// pads it may belong to (those sending channel pressure on its port and
+    /// channel — it's the held one's) and the pressure, 0..=1.
+    pub fn pad_pressure(&self, port: u8, event: &MidiEvent) -> Option<(Vec<usize>, f32)> {
+        let port = if self.options.one_port { 1 } else { port };
         let bytes = event.as_slice();
         let (&status, &value) = (bytes.first()?, bytes.get(1)?);
         let channel = status & 0x0F;
-        if status & 0xF0 != 0xD0 || self.index.contains_key(&(channel, Message::ChannelPressure)) {
+        if status & 0xF0 != 0xD0 || self.index.contains_key(&(port, channel, Message::ChannelPressure)) {
             return None;
         }
         let pads: Vec<usize> = self
             .controls
             .iter()
             .enumerate()
-            .filter(|(_, control)| control.channel == channel && control.pressure == Some(Pressure::Channel))
+            .filter(|(_, control)| {
+                control.port == port
+                    && control.channel == channel
+                    && control.pressure == Some(Pressure::Channel)
+                    && control.twin_of.is_none()
+            })
             .map(|(index, _)| index)
             .collect();
         (!pads.is_empty()).then_some((pads, f32::from(value) / 127.0))
+    }
+
+    /// Whether control `control` is drawn on page `page` with shift `shift`:
+    /// a page's controls on their page only, a shifted twin in its
+    /// original's place while shift is held.
+    pub fn visible(&self, control: usize, page: Option<usize>, shift: bool) -> bool {
+        let Some(found) = self.controls.get(control) else { return false };
+        let on_page = found.page.is_none() || found.page == page;
+        let shifted = match (found.twin, found.twin_of) {
+            (_, Some(_)) => shift,
+            (Some(_), None) => !shift,
+            (None, None) => true,
+        };
+        on_page && shifted
+    }
+
+    /// The page shown before anything was read: the first, if there are any.
+    pub fn first_page(&self) -> Option<usize> {
+        (!self.pages.is_empty()).then_some(0)
+    }
+}
+
+/// What a surface's hardware is doing beyond single messages — the page it's
+/// on, shift held —, kept per device by whoever reads its events (the mapping
+/// thread, the panel), with the [`Surface`] they read it with.
+#[derive(Debug, Clone, Default)]
+pub struct Reader {
+    page: Option<usize>,
+    shift: bool,
+    /// Controls pressed while shift was held: their release is their twin's.
+    shifted: HashSet<usize>,
+}
+
+/// What one event did, as [`Reader::read`] says.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Read {
+    /// The control it came from (a shifted twin while shift is held), and
+    /// what it did.
+    pub control: Option<(usize, Reading)>,
+    /// Channel pressure that belongs to a held pad: the pads it may be, and
+    /// the pressure.
+    pub pressure: Option<(Vec<usize>, f32)>,
+    /// The page shown changed (to [`Reader::page`]).
+    pub page_changed: bool,
+}
+
+impl Reader {
+    /// For `surface`, on its first page.
+    pub fn new(surface: &Surface) -> Self {
+        Self { page: surface.first_page(), ..Self::default() }
+    }
+
+    pub fn page(&self) -> Option<usize> {
+        self.page
+    }
+
+    /// Shows page `page` (the user picked it), whatever the hardware is on.
+    pub fn set_page(&mut self, page: Option<usize>) {
+        self.page = page;
+    }
+
+    pub fn shift(&self) -> bool {
+        self.shift
+    }
+
+    /// Reads `event`, from `surface`'s port `port`.
+    pub fn read(&mut self, surface: &Surface, port: u8, event: &MidiEvent) -> Read {
+        let mut read = Read::default();
+        let Some((control, reading)) = surface.read(port, self.page, event) else {
+            read.pressure = surface.pad_pressure(port, event);
+            return read;
+        };
+        let found = &surface.controls[control];
+        let pressed = matches!(reading, Reading::Press(_));
+        if surface.shift == Some(control) {
+            self.shift = pressed;
+        }
+        let page = match found.page {
+            Some(page) => Some(page),
+            None if pressed => surface.pages.iter().position(|page| page.button == Some(control)),
+            None => None,
+        };
+        if let Some(page) = page
+            && self.page != Some(page)
+        {
+            self.page = Some(page);
+            read.page_changed = true;
+        }
+        let control = match (found.twin, reading) {
+            (Some(twin), Reading::Release) if self.shifted.remove(&control) => twin,
+            (Some(twin), Reading::Press(_)) if self.shift => {
+                self.shifted.insert(control);
+                twin
+            }
+            (Some(twin), Reading::Value(_)) if self.shift => twin,
+            _ => control,
+        };
+        read.control = Some((control, reading));
+        read
     }
 }
 
@@ -519,9 +910,20 @@ impl Library {
         Ok(())
     }
 
-    /// The surface for MIDI device `device` (a `midi_device_name`), if any.
+    /// The surface for MIDI device `device` (a `midi_device_name`, or a
+    /// device several ports make), if any.
     pub fn for_device(&self, device: &str) -> Option<&Surface> {
         self.surfaces.iter().find(|surface| surface.matches(device))
+    }
+
+    /// The device MIDI port `port` (a `midi_device_name`) belongs to, and its
+    /// number there: its surface's say (see [`Surface::port_of`]), or the port
+    /// alone, as port 1.
+    pub fn device_of(&self, port: &str) -> (String, u8) {
+        self.surfaces
+            .iter()
+            .find_map(|surface| surface.port_of(port))
+            .unwrap_or_else(|| (port.to_string(), 1))
     }
 }
 
@@ -574,6 +976,7 @@ mod tests {
     #[test]
     fn bottom_first_numbering_starts_on_the_last_row() {
         let lpd8 = Surface::from_json(SHIPPED[1].1).unwrap();
+        assert_eq!(lpd8.id, "akai-lpd8");
         let pad = |label: &str| lpd8.controls.iter().find(|control| control.label == label).unwrap();
         let (_, pad_height) = ControlKind::Pad.cell_size();
         assert_eq!((pad("P1").x, pad("P1").y), (0, pad_height));
@@ -581,25 +984,111 @@ mod tests {
         assert_eq!(pad("P8").x, 3 * ControlKind::Pad.cell_size().0);
     }
 
+    fn lx() -> Surface {
+        Surface::from_json(SHIPPED[0].1).unwrap()
+    }
+
+    fn label(surface: &Surface, read: Option<(usize, Reading)>) -> (&str, Reading) {
+        let (control, reading) = read.unwrap();
+        (surface.controls[control].label.as_str(), reading)
+    }
+
     #[test]
-    fn events_are_read_per_control_kind() {
-        let lx = Surface::from_json(SHIPPED[0].1).unwrap();
-        let label = |index: usize| lx.controls[index].label.as_str();
-        // F1 (CC 80, channel 1), halfway.
-        let (control, reading) = lx.read(&event(&[0xB0, 80, 127])).unwrap();
-        assert_eq!((label(control), reading), ("F1", Reading::Value(1.0)));
-        // P1 (note 36, channel 10) pressed and let go, as note-on with velocity 0.
-        let (control, reading) = lx.read(&event(&[0x99, 36, 127])).unwrap();
-        assert_eq!((label(control), reading), ("P1", Reading::Press(1.0)));
-        assert_eq!(lx.read(&event(&[0x99, 36, 0])).unwrap().1, Reading::Release);
+    fn events_are_read_per_control_kind_and_port() {
+        let lx = lx();
+        // Preset 1's F1 (CC 73, channel 1, port 1), at the top.
+        assert_eq!(label(&lx, lx.read(1, None, &event(&[0xB0, 73, 127]))), ("Preset F1", Reading::Value(1.0)));
+        // P1 (note 60, channel 16, port 2) pressed and let go, as note-on with velocity 0.
+        assert_eq!(label(&lx, lx.read(2, None, &event(&[0x9F, 60, 127]))), ("P1", Reading::Press(1.0)));
+        assert_eq!(lx.read(2, None, &event(&[0x9F, 60, 0])).unwrap().1, Reading::Release);
         // Pitch bend at rest is the middle.
-        let (control, reading) = lx.read(&event(&[0xE0, 0, 64])).unwrap();
+        let (name, reading) = label(&lx, lx.read(1, None, &event(&[0xE0, 0, 64])));
         let Reading::Value(value) = reading else { panic!() };
-        assert_eq!(label(control), "Pitch");
+        assert_eq!(name, "Pitch");
         assert!((value - 0.5).abs() < 0.001);
-        // Keys and other channels aren't controls.
-        assert!(lx.read(&event(&[0x90, 60, 100])).is_none());
-        assert!(lx.read(&event(&[0xB1, 80, 1])).is_none());
+        // Keys, other channels and other ports aren't controls.
+        assert!(lx.read(1, None, &event(&[0x90, 60, 100])).is_none());
+        assert!(lx.read(1, None, &event(&[0xB1, 73, 1])).is_none());
+        assert!(lx.read(1, None, &event(&[0x9F, 60, 100])).is_none());
+        // A latching button: its "off" is a press too.
+        assert_eq!(label(&lx, lx.read(1, None, &event(&[0xB0, 0, 0]))), ("Preset B1", Reading::Press(1.0)));
+    }
+
+    #[test]
+    fn ports_make_one_device() {
+        let lx = lx();
+        let device = "Impact LX88+:Impact LX88+".to_string();
+        assert_eq!(lx.port_of("Impact LX88+:Impact LX88+ MIDI1"), Some((device.clone(), 1)));
+        assert_eq!(lx.port_of("Impact LX88+:Impact LX88+ MIDI2"), Some((device, 2)));
+        assert_eq!(lx.port_of("LPD8:LPD8 MIDI 1"), None);
+        let library = Library { surfaces: vec![lx] };
+        assert_eq!(library.device_of("LPD8:LPD8 MIDI 1"), ("LPD8:LPD8 MIDI 1".to_string(), 1));
+    }
+
+    #[test]
+    fn the_page_follows_the_hardware() {
+        let lx = lx();
+        let mut reader = Reader::new(&lx);
+        let page = |reader: &Reader| reader.page().map(|page| lx.pages[page].id.as_str());
+        assert_eq!(page(&reader), Some("mixer"));
+        // An Inst fader moves: the Inst page shows.
+        let read = reader.read(&lx, 2, &event(&[0xBF, 38, 10]));
+        assert!(read.page_changed);
+        assert_eq!(label(&lx, read.control).0, "Inst F1");
+        assert_eq!(page(&reader), Some("inst"));
+        // The Preset button.
+        let read = reader.read(&lx, 2, &event(&[0xBF, 115, 127]));
+        assert!(read.page_changed);
+        assert_eq!(label(&lx, read.control).0, "Preset");
+        assert_eq!(page(&reader), Some("preset"));
+        assert!(!reader.read(&lx, 2, &event(&[0xBF, 115, 0])).page_changed);
+    }
+
+    #[test]
+    fn variants_change_what_a_page_reads() {
+        let lx = lx();
+        // Preset 1: CC 7 on channel 1 is F9.
+        assert_eq!(label(&lx, lx.read(1, None, &event(&[0xB0, 7, 5]))).0, "Preset F9");
+        // Preset 2: it's F1 (and F9's too: the first wins), channel 2 is F2.
+        let options = Options { variants: BTreeMap::from([("preset".to_string(), 1)]), one_port: false };
+        let mixer = lx.with_options(options);
+        assert_eq!(label(&mixer, mixer.read(1, None, &event(&[0xB0, 7, 5]))).0, "Preset F1");
+        assert_eq!(label(&mixer, mixer.read(1, None, &event(&[0xB1, 7, 5]))).0, "Preset F2");
+        assert!(mixer.read(1, None, &event(&[0xB0, 73, 5])).is_none());
+        // Preset 5's buttons don't latch.
+        let five = lx.with_options(Options { variants: BTreeMap::from([("preset".to_string(), 4)]), one_port: false });
+        assert_eq!(five.read(1, None, &event(&[0xB0, 66, 0])).unwrap().1, Reading::Release);
+    }
+
+    #[test]
+    fn one_port_reads_everything_on_port_1_preferring_the_page() {
+        let lx = lx().with_options(Options { one_port: true, ..Options::default() });
+        // Mixer F1 is CC 12 on channel 16; so is preset 3's B8, on another page.
+        let mixer = lx.pages.iter().position(|page| page.id == "mixer");
+        assert_eq!(label(&lx, lx.read(1, mixer, &event(&[0xBF, 12, 5]))).0, "Mixer F1");
+        assert_eq!(label(&lx, lx.read(2, mixer, &event(&[0x9F, 60, 5]))).0, "P1");
+    }
+
+    #[test]
+    fn shift_makes_a_button_its_twin() {
+        let lx = lx();
+        let mut reader = Reader::new(&lx);
+        let mut read = |bytes: &[u8]| {
+            let read = reader.read(&lx, 2, &event(bytes));
+            label(&lx, read.control).0.to_string()
+        };
+        assert_eq!(read(&[0xBF, 106, 127]), "Play");
+        assert_eq!(read(&[0xBF, 106, 0]), "Play");
+        assert_eq!(read(&[0xBF, 108, 127]), "Shift");
+        assert_eq!(read(&[0xBF, 106, 127]), "Click");
+        // Shift let go first: the release is still the twin's.
+        assert_eq!(read(&[0xBF, 108, 0]), "Shift");
+        assert_eq!(read(&[0xBF, 106, 0]), "Click");
+        assert_eq!(read(&[0xBF, 106, 127]), "Play");
+        let play = lx.controls.iter().position(|control| control.label == "Play").unwrap();
+        let click = lx.controls[play].twin.unwrap();
+        assert!(lx.visible(play, None, false) && !lx.visible(click, None, false));
+        assert!(!lx.visible(play, None, true) && lx.visible(click, None, true));
     }
 
     #[test]

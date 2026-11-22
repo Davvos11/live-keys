@@ -1405,6 +1405,7 @@ fn main() -> anyhow::Result<()> {
     settings.set_default_plugin_folders(string_model(default_plugin_search_paths()));
     state.set_master_effects(ModelRc::from(rack.master_effects.clone()));
     state.set_master_slot(MASTER_SLOT as i32);
+    state.set_selected_slot(config.borrow().selected_slot.min(SLOT_COUNT - 1) as i32);
     {
         let config = config.borrow();
         state.set_master_volume_db(config.master_volume_db);
@@ -1601,6 +1602,34 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         logic.on_midi_panic(move || engine.borrow_mut().panic());
+    }
+
+    {
+        let config = config.clone();
+        let rack = rack.clone();
+        let app_weak = app.as_weak();
+        logic.on_select_slot(move |slot| {
+            let slot = (slot.max(0) as usize).min(SLOT_COUNT - 1);
+            let mut config = config.borrow_mut();
+            if config.selected_slot != slot {
+                config.selected_slot = slot;
+                log_on_err(config::save(&config));
+                // "The selected slot" targets resolve elsewhere now.
+                rack.mappings.setup_dirty.set(true);
+                rack.mappings.view_dirty.set(true);
+            }
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_selected_slot(slot as i32);
+            }
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_step_instrument_preset(move |slot, step| {
+            step_instrument_preset(&engine, &rack, slot.max(0) as usize, step);
+        });
     }
 
     {
@@ -3085,6 +3114,8 @@ fn main() -> anyhow::Result<()> {
     if started.get() && (restored.get() || rack.session_changed_since.get().is_some()) {
         save_session(&engine, &rack);
     }
+    // Keyboards in DAW mode go back to their own.
+    engine.borrow().close_surfaces();
     Ok(())
 }
 
@@ -3548,6 +3579,46 @@ fn index_of(items: &[String], value: Option<&str>) -> i32 {
 
 /// Hands the engine the devices the control surfaces panel shows, if that
 /// changed, and shows them in the panel's summary.
+/// Loads the preset `step` presets on (wrapping) from the current one of
+/// `slot`'s instrument, in the order the browser lists them (favourites
+/// aside); with none current, the first (or last, going back).
+fn step_instrument_preset(engine: &RefCell<Engine>, rack: &Rack, slot: usize, step: i32) {
+    let Some(key) = engine.borrow().slot(slot).and_then(|chain| chain.instrument.as_ref().map(|meta| meta.key)) else {
+        return;
+    };
+    let presets = engine.borrow().presets(key);
+    if presets.is_empty() {
+        return;
+    }
+    let count = presets.len() as i32;
+    let current = rack
+        .current_presets
+        .borrow()
+        .get(&key)
+        .and_then(|current| presets.iter().position(|preset| preset.id == current.preset.id));
+    let next = match current {
+        Some(index) => (index as i32 + step).rem_euclid(count),
+        None if step < 0 => count - 1,
+        None => 0,
+    } as usize;
+    let preset = presets[next].clone();
+    let result = engine.borrow_mut().load_preset(key, &preset.id);
+    let engine = engine.borrow();
+    let error = match result {
+        Ok(()) => {
+            rack.set_current_preset(key, Some(preset));
+            rack.refresh_param_rows(&engine, key);
+            rack.mark_slot_changed(slot);
+            None
+        }
+        Err(err) => {
+            log::error!("failed to load preset '{}': {err:#}", preset.name);
+            Some(format!("Loading \"{}\" failed: {err}", preset.name))
+        }
+    };
+    rack.refresh_slot(&engine, slot, error);
+}
+
 fn sync_surfaces(engine: &mut Engine, config: &config::AppConfig, surfaces: &surfaces::SurfacesUi, app: Option<&AppWindow>) {
     if let Some(devices) = surfaces.take_devices_to_apply(config) {
         let ports = engine.set_surface_devices(devices);

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use live_keys_core::MidiEvent;
-use live_keys_surfaces::{ControlKind, Reading, Shown, Surface};
+use live_keys_surfaces::{ControlKind, Read, Reader, Reading, Shown, Surface};
 
 /// A target, as an index into the setup's targets.
 pub type TargetId = usize;
@@ -127,6 +127,15 @@ pub struct Waiting {
     pub at: Option<f32>,
 }
 
+/// A control waiting to pick its target up was moved: the target is above it
+/// (`up`) or below (for a device that can say so, see `Driver::pick_up`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PickUp {
+    pub surface: usize,
+    pub control: usize,
+    pub up: bool,
+}
+
 #[derive(Debug, Default)]
 struct LinkState {
     /// The target follows the control.
@@ -178,12 +187,15 @@ struct TargetState {
 /// Every mapping of one setup, and their state.
 pub struct Mappings {
     surfaces: Vec<Arc<Surface>>,
+    /// Per surface, its page and shift.
+    readers: Vec<Reader>,
     controls: Vec<ControlState>,
     /// `(surface, control)` → index into `controls`.
     by_control: HashMap<(usize, usize), usize>,
     targets: Vec<TargetState>,
     writes: Vec<Write>,
     waiting: Vec<Waiting>,
+    pick_ups: Vec<PickUp>,
     feedback: Vec<Feedback>,
 }
 
@@ -221,24 +233,60 @@ impl Mappings {
             });
         }
         Self {
+            readers: surfaces.iter().map(|surface| Reader::new(surface)).collect(),
             surfaces,
             controls: states,
             by_control,
             targets,
             writes: Vec::new(),
             waiting: Vec::new(),
+            pick_ups: Vec::new(),
             feedback: Vec::new(),
         }
     }
 
-    /// Applies a MIDI event from surface `surface`.
-    pub fn event(&mut self, surface: usize, event: &MidiEvent, now: Instant) {
-        let Some(device) = self.surfaces.get(surface).cloned() else { return };
-        if let Some((control, reading)) = device.read(event) {
+    /// Surface `surface`'s page and shift, to carry them over to new mappings.
+    pub fn reader(&self, surface: usize) -> Option<&Reader> {
+        self.readers.get(surface)
+    }
+
+    /// Carries surface `surface`'s page and shift over from old mappings.
+    pub fn set_reader(&mut self, surface: usize, reader: Reader) {
+        if let Some(slot) = self.readers.get_mut(surface) {
+            *slot = reader;
+        }
+    }
+
+    /// Applies a MIDI event from port `port` of surface `surface`; says what
+    /// it was. A page change sends that page's controls (and those on no
+    /// page) their values again: devices tend to clear their lights then.
+    pub fn event(&mut self, surface: usize, port: u8, event: &MidiEvent, now: Instant) -> Read {
+        let Some(device) = self.surfaces.get(surface).cloned() else { return Read::default() };
+        let read = self.readers[surface].read(&device, port, event);
+        if read.page_changed {
+            let page = self.readers[surface].page();
+            for index in 0..self.controls.len() {
+                let setup = &self.controls[index].setup;
+                let on_page = device.controls.get(setup.control).is_some_and(|control| control.page.is_none_or(|p| Some(p) == page));
+                if setup.surface == surface && on_page {
+                    self.controls[index].shown = None;
+                    self.show(index, false);
+                }
+            }
+        }
+        if let Some((control, reading)) = read.control {
             if let Some(&index) = self.by_control.get(&(surface, control)) {
                 self.reading(index, reading, now);
+                // Moved while waiting to pick its target up: which way it is.
+                let state = &self.controls[index];
+                if let (Reading::Value(_), Takeover::PickUp, Some(at), Some(hardware)) =
+                    (reading, state.setup.takeover, state.waiting, state.hardware)
+                    && !state.jumps()
+                {
+                    self.pick_ups.push(PickUp { surface, control, up: at > hardware });
+                }
             }
-        } else if let Some((pads, pressure)) = device.pad_pressure(event) {
+        } else if let Some((pads, pressure)) = read.pressure.clone() {
             // The held pads' pressure.
             for pad in pads {
                 if let Some(&index) = self.by_control.get(&(surface, pad))
@@ -248,6 +296,7 @@ impl Mappings {
                 }
             }
         }
+        read
     }
 
     fn reading(&mut self, index: usize, reading: Reading, now: Instant) {
@@ -571,6 +620,24 @@ impl Mappings {
         std::mem::take(&mut self.waiting)
     }
 
+    /// The pick-up hints since the last call, oldest first.
+    pub fn take_pick_ups(&mut self) -> Vec<PickUp> {
+        std::mem::take(&mut self.pick_ups)
+    }
+
+    /// Which of surface `surface`'s controls (as many as it has) drive
+    /// something.
+    pub fn mapped(&self, surface: usize) -> Vec<bool> {
+        let count = self.surfaces.get(surface).map_or(0, |surface| surface.controls.len());
+        let mut mapped = vec![false; count];
+        for control in self.controls.iter().filter(|control| control.setup.surface == surface) {
+            if let Some(slot) = mapped.get_mut(control.setup.control) {
+                *slot = true;
+            }
+        }
+        mapped
+    }
+
     /// Notes whether control `index`'s first range target is somewhere else
     /// than the hardware, for its ghost in the panel.
     fn update_waiting(&mut self, index: usize) {
@@ -643,12 +710,12 @@ mod tests {
     }
 
     fn cc(mappings: &mut Mappings, value: u8, now: Instant) -> Vec<f32> {
-        mappings.event(0, &MidiEvent::from_raw(0, &[0xB0, 1, value]).unwrap(), now);
+        mappings.event(0, 1, &MidiEvent::from_raw(0, &[0xB0, 1, value]).unwrap(), now);
         mappings.take_writes().iter().map(|write| write.position).collect()
     }
 
     fn note(mappings: &mut Mappings, note: u8, velocity: u8) -> Vec<f32> {
-        mappings.event(0, &MidiEvent::from_raw(0, &[0x90, note, velocity]).unwrap(), Instant::now());
+        mappings.event(0, 1, &MidiEvent::from_raw(0, &[0x90, note, velocity]).unwrap(), Instant::now());
         mappings.take_writes().iter().map(|write| write.position).collect()
     }
 
@@ -671,10 +738,14 @@ mod tests {
         let mut mappings = mappings(vec![setup(FADER, Takeover::PickUp, FULL)], 0.5);
         assert!(cc(&mut mappings, 10, now).is_empty());
         assert_eq!(mappings.take_waiting()[0].at, Some(0.5));
+        // The target is above: "move it up", each move.
+        assert_eq!(mappings.take_pick_ups(), [PickUp { surface: 0, control: FADER, up: true }]);
         assert!(cc(&mut mappings, 40, now).is_empty());
-        // Past it: picked up.
+        assert_eq!(mappings.take_pick_ups().len(), 1);
+        // Past it: picked up, no more hints.
         assert_eq!(cc(&mut mappings, 80, now), [80.0 / 127.0]);
         assert_eq!(mappings.take_waiting()[0].at, None);
+        assert!(mappings.take_pick_ups().is_empty());
         assert_eq!(cc(&mut mappings, 20, now), [20.0 / 127.0]);
         // Moved elsewhere: lost again until reached.
         mappings.set_position(0, 0.9);
@@ -836,7 +907,7 @@ mod tests {
         mover.feedback = true;
         let mut mappings = Mappings::new(vec![surface], vec![sent, mover], vec![0.0]);
         let move_second = |mappings: &mut Mappings, value: u8| {
-            mappings.event(0, &MidiEvent::from_raw(0, &[0xB0, 2, value]).unwrap(), now);
+            mappings.event(0, 1, &MidiEvent::from_raw(0, &[0xB0, 2, value]).unwrap(), now);
             mappings.take_writes().len()
         };
         assert_eq!(move_second(&mut mappings, 100), 1);
@@ -846,5 +917,37 @@ mod tests {
         assert!(mappings.take_feedback().is_empty());
         // Moved for real, it takes the target.
         assert_eq!(cc(&mut mappings, 20, now), [20.0 / 127.0]);
+    }
+
+    #[test]
+    fn a_page_change_shows_that_pages_lights_again() {
+        let surface = Arc::new(
+            Surface::from_json(
+                r#"{ "id": "t", "name": "t",
+                    "pages": [{ "id": "a", "name": "A", "button": "To A" }, { "id": "b", "name": "B", "button": "To B" }],
+                    "banks": [
+                    { "name": "a", "kind": "button", "columns": 1, "page": "a", "feedback": true, "controls": [{ "cc": 21 }] },
+                    { "name": "b", "kind": "button", "columns": 1, "page": "b", "feedback": true, "controls": [{ "cc": 47 }] },
+                    { "name": "p", "kind": "button", "columns": 2, "controls": [{ "cc": 113, "label": "To A" }, { "cc": 114, "label": "To B" }] }
+                ] }"#,
+            )
+            .unwrap(),
+        );
+        let toggle = |control| {
+            let mut setup = setup(control, Takeover::Jump, Mode::Toggle { levels: vec![0.0, 1.0] });
+            setup.feedback = true;
+            setup
+        };
+        let mut mappings = Mappings::new(vec![surface], vec![toggle(0), toggle(1)], vec![1.0]);
+        mappings.resync_feedback();
+        mappings.take_feedback();
+        let mut press = |cc: u8| {
+            mappings.event(0, 1, &MidiEvent::from_raw(0, &[0xB0, cc, 127]).unwrap(), Instant::now());
+            mappings.take_feedback().iter().map(|f| f.control).collect::<Vec<_>>()
+        };
+        // On page A already: nothing changes.
+        assert!(press(113).is_empty());
+        assert_eq!(press(114), [1]);
+        assert_eq!(press(113), [0]);
     }
 }

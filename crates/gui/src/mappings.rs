@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use live_keys_engine::{
     ControlSetup, Engine, Link, MASTER_SLOT, MAX_BPM, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
-    Takeover, TargetSpec, ToValue,
+    SurfaceSetup, Takeover, TargetSpec, ToValue,
 };
 use live_keys_surfaces::{ControlKind, Message, Surface};
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,16 @@ impl MappingMode {
             ControlKind::Fader | ControlKind::Knob => Self::Direct { from: 0.0, to: 1.0 },
             ControlKind::Button => Self::Toggle { levels: default_levels(steps) },
             ControlKind::Pad => Self::Momentary { value: 1.0, velocity: false },
+        }
+    }
+
+    /// As [`MappingMode::default_for`], for learn target kind `target`: a
+    /// drawbar is mirrored, as a fader mapped to it moves like it (pulled down
+    /// is louder on a drawbar, pushed up on a fader).
+    fn default_for_target(kind: ControlKind, steps: &[f32], target: i32) -> Self {
+        match Self::default_for(kind, steps) {
+            Self::Direct { from, to } if target == kinds::DRAWBAR => Self::Mirrored { from, to },
+            mode => mode,
         }
     }
 
@@ -209,6 +219,15 @@ pub enum RackTarget {
     MetronomeVolume,
     MetronomePlay,
     Tempo,
+    /// Whatever the selected slot's panel shows at row position `index`.
+    SelectedPanel { index: usize },
+    /// The selected slot's panel's drawbar `index`, if it has drawbars.
+    SelectedDrawbar { index: usize },
+    /// Selects the slot `step` slots on (wrapping): a button's press.
+    SelectSlot { step: i32 },
+    /// Loads the selected slot's instrument's preset `step` presets on from
+    /// the current one: a button's press.
+    InstrumentPreset { step: i32 },
 }
 
 /// A modulated target's base, as a plugin's slot preset keeps it: the
@@ -285,6 +304,9 @@ pub enum Concrete {
     MetronomeVolume,
     MetronomePlay,
     Tempo,
+    /// Actions on a press (position 1), nothing on release.
+    SelectSlot(i32),
+    InstrumentPreset(i32),
 }
 
 /// What the rest of the GUI knows that mappings need.
@@ -368,6 +390,15 @@ impl Ctx<'_> {
             RackTarget::MetronomeVolume => Concrete::MetronomeVolume,
             RackTarget::MetronomePlay => Concrete::MetronomePlay,
             RackTarget::Tempo => Concrete::Tempo,
+            RackTarget::SelectedPanel { index } => {
+                return self.resolve(&RackTarget::Panel { slot: self.config.selected_slot, index: *index });
+            }
+            RackTarget::SelectedDrawbar { index } => {
+                let (key, panel) = self.panels.get(self.config.selected_slot).copied().flatten()?;
+                Concrete::Plugin { key, target: self.plugin_target(key, panel.drawbars.get(*index)?)? }
+            }
+            RackTarget::SelectSlot { step } => Concrete::SelectSlot(*step),
+            RackTarget::InstrumentPreset { step } => Concrete::InstrumentPreset(*step),
         })
     }
 }
@@ -439,6 +470,7 @@ impl Resolved {
             Concrete::MetronomeVolume => config.metronome.volume,
             Concrete::MetronomePlay => f32::from(u8::from(ctx.metronome_playing)),
             Concrete::Tempo => (f32::from(config.metronome.bpm) - MIN_BPM) / (MAX_BPM - MIN_BPM),
+            Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => 0.0,
         }
     }
 
@@ -465,7 +497,9 @@ impl Resolved {
     fn steps(&self) -> Vec<f32> {
         match &self.concrete {
             Concrete::Plugin { .. } => self.control.as_ref().map(profiles::Control::steps).unwrap_or_default(),
-            Concrete::Mute(_) | Concrete::MetronomePlay => vec![0.0, 1.0],
+            Concrete::Mute(_) | Concrete::MetronomePlay | Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => {
+                vec![0.0, 1.0]
+            }
             _ => Vec::new(),
         }
     }
@@ -486,6 +520,7 @@ impl Resolved {
             Concrete::MetronomeVolume => format!("{} %", (position * 100.0).round()),
             Concrete::MetronomePlay => on_off(position >= 0.5),
             Concrete::Tempo => format!("{} BPM", tempo(position)),
+            Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => String::new(),
         }
     }
 
@@ -503,6 +538,10 @@ impl Resolved {
             Concrete::MetronomeVolume => "Click volume".into(),
             Concrete::MetronomePlay => "Play/stop".into(),
             Concrete::Tempo => "Tempo".into(),
+            Concrete::SelectSlot(step) => if *step < 0 { "Previous slot" } else { "Next slot" }.into(),
+            Concrete::InstrumentPreset(step) => {
+                if *step < 0 { "Previous preset" } else { "Next preset" }.into()
+            }
         }
     }
 
@@ -514,6 +553,8 @@ impl Resolved {
             }
             Concrete::Volume(slot) | Concrete::Mute(slot) | Concrete::Transpose(slot) => slot_name(*slot),
             Concrete::MetronomeVolume | Concrete::MetronomePlay | Concrete::Tempo => "Metronome".into(),
+            Concrete::SelectSlot(_) => "Rack".into(),
+            Concrete::InstrumentPreset(_) => format!("Selected slot ({})", ctx.config.selected_slot + 1),
         }
     }
 }
@@ -692,6 +733,37 @@ impl MappingsUi {
 
     /// Writes the mappings kept in every scene and the controls' settings
     /// into `config`, for saving.
+    /// Installs `surface`'s default mappings as the user's (kept in every
+    /// scene) if they never were: once per surface, so deleting one is for
+    /// good. Returns whether it did.
+    pub fn install_defaults(&self, surface: &Surface, config: &mut AppConfig) -> bool {
+        if surface.spec.defaults.is_empty() || config.surfaces.defaults_installed.contains(&surface.id) {
+            return false;
+        }
+        {
+            let mut global = self.global.borrow_mut();
+            for default in &surface.spec.defaults {
+                let mut value = default.clone();
+                if let Some(fields) = value.as_object_mut()
+                    && let Some(label) = fields.get("control").and_then(|control| control.as_str()).map(str::to_string)
+                {
+                    let control = ControlRef { surface: surface.id.clone(), control: label };
+                    fields.insert("control".into(), serde_json::to_value(control).unwrap_or_default());
+                }
+                match serde_json::from_value::<GlobalMapping>(value) {
+                    Ok(mapping) if !global.contains(&mapping) => global.push(mapping),
+                    Ok(_) => {}
+                    Err(err) => log::warn!("{}: a default mapping doesn't read: {err}", surface.id),
+                }
+            }
+        }
+        config.surfaces.defaults_installed.push(surface.id.clone());
+        self.store(config);
+        self.setup_dirty.set(true);
+        self.view_dirty.set(true);
+        true
+    }
+
     pub fn store(&self, config: &mut AppConfig) {
         config.surfaces.mappings = self.global.borrow().clone();
         config.surfaces.controls = self.controls.borrow().clone();
@@ -757,7 +829,7 @@ impl MappingsUi {
     /// Builds the mapping thread's setup from every mapping that applies to
     /// what's loaded, for `surfaces` (the shown devices with a surface): for
     /// `Engine::set_mappings`, then [`MappingsUi::install`] with the rest.
-    pub fn build_setup(&self, ctx: &Ctx, surfaces: &[(Arc<str>, Arc<Surface>)]) -> (MapperSetup, Installed) {
+    pub fn build_setup(&self, ctx: &Ctx, surfaces: &[SurfaceSetup]) -> (MapperSetup, Installed) {
         let mut targets: Vec<SetupTarget> = Vec::new();
         let mut by_concrete: HashMap<Concrete, usize> = HashMap::new();
         let mut specs: Vec<TargetSpec> = Vec::new();
@@ -765,7 +837,12 @@ impl MappingsUi {
         let mut mapped = HashSet::new();
         let mut signature = Signature::new();
         let all = self.all(ctx);
-        for (surface_index, (device, surface)) in surfaces.iter().enumerate() {
+        for (surface_index, shown) in surfaces.iter().enumerate() {
+            let (device, surface) = (&shown.device, &shown.surface);
+            // The surface itself: which one, how it's read, its ports.
+            let ports: Vec<String> = shown.ports.iter().map(|(name, port)| format!("{name}={port}")).collect();
+            let fingerprint = format!("{device}\n{}\n{:?}\n{}", surface.id, surface.options, ports.join(","));
+            signature.push((fingerprint, usize::MAX, ControlSettings::default(), Vec::new()));
             for (control_index, control) in surface.controls.iter().enumerate() {
                 let reference = ControlRef { surface: surface.id.clone(), control: control.label.clone() };
                 let mut links = Vec::new();
@@ -1023,7 +1100,7 @@ impl MappingsUi {
                 let steps = Resolved::new(ctx, Self::candidate_concrete(ctx, &candidate).unwrap_or(Concrete::Tempo))
                     .map(|resolved| resolved.steps())
                     .unwrap_or_default();
-                let mode = MappingMode::default_for(selected.kind(), &steps);
+                let mode = MappingMode::default_for_target(selected.kind(), &steps, kind);
                 let keep = if matches!(candidate, Candidate::Rack(_)) { Keep::Global } else { Keep::Scene };
                 self.add(ctx, &selected.reference, candidate, mode, keep)
             }
@@ -1101,7 +1178,7 @@ impl MappingsUi {
                     .map(|resolved| resolved.steps())
                     .unwrap_or_default();
                 let keep = if matches!(candidate, Candidate::Rack(_)) { Keep::Global } else { Keep::Scene };
-                Popup::Draft { candidate, mode: MappingMode::default_for(selected.kind(), &steps), keep }
+                Popup::Draft { candidate, mode: MappingMode::default_for_target(selected.kind(), &steps, kind), keep }
             }
         };
         *self.popup.borrow_mut() = Some(popup);
@@ -1585,6 +1662,26 @@ impl PluginTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shipped_default_mappings_read_and_name_real_controls() {
+        for (name, json) in live_keys_surfaces::SHIPPED {
+            let surface = Surface::from_json(json).unwrap();
+            let mut config = AppConfig::default();
+            let mappings = MappingsUi::new(&config);
+            mappings.install_defaults(&surface, &mut config);
+            assert_eq!(config.surfaces.mappings.len(), surface.spec.defaults.len(), "{name}: a default doesn't read");
+            for mapping in &config.surfaces.mappings {
+                assert!(
+                    surface.controls.iter().any(|control| control.label == mapping.control.control),
+                    "{name}: no control {}",
+                    mapping.control.control
+                );
+            }
+            // Once only.
+            assert!(!mappings.install_defaults(&surface, &mut config));
+        }
+    }
 
     #[test]
     fn mappings_round_trip_through_json() {

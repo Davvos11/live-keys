@@ -87,8 +87,10 @@ impl Learn {
             editor.as_mut().is_some_and(|editor| {
                 let mut changed = false;
                 let device = editor.device.clone();
-                for event in events.iter().filter(|event| *event.device == *device) {
-                    changed |= editor.event(&event.event);
+                for event in &events {
+                    if let Some(port) = self.surfaces.port_of_device(&event.device, &device) {
+                        changed |= editor.event(port, &event.event);
+                    }
                 }
                 changed
             })
@@ -107,6 +109,15 @@ impl Learn {
             self.apply(applied);
         }
         let surfaces_changed = self.surfaces.take_changed();
+        if surfaces_changed {
+            // A surface shown for the first time brings its default mappings.
+            let mut config = self.config.borrow_mut();
+            for shown in self.surfaces.shown_surfaces() {
+                if self.rack.mappings.install_defaults(&shown.surface, &mut config) {
+                    self.config_dirty.set(true);
+                }
+            }
+        }
         if surfaces_changed {
             self.rack.mappings.setup_dirty.set(true);
             self.rack.mappings.view_dirty.set(true);
@@ -195,6 +206,23 @@ impl Learn {
             Concrete::Tempo => {
                 if let Some(logic) = &logic {
                     logic.invoke_set_metronome_bpm(mappings::tempo(position) as i32);
+                }
+            }
+            // Actions: on the press.
+            Concrete::SelectSlot(step) => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    let selected = self.config.borrow().selected_slot as i32;
+                    logic.invoke_select_slot((selected + step).rem_euclid(SLOT_COUNT as i32));
+                }
+            }
+            Concrete::InstrumentPreset(step) => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    let selected = self.config.borrow().selected_slot as i32;
+                    logic.invoke_step_instrument_preset(selected, step);
                 }
             }
         }
@@ -334,6 +362,29 @@ impl Learn {
                 learn.rack.mappings.select(&device, control as usize, surface);
                 learn.refresh_view();
             }
+        });
+        let learn = self.clone();
+        logic.on_surface_page(move |device, page| {
+            learn.surfaces.set_page(&device, page.max(0) as usize);
+        });
+        let learn = self.clone();
+        logic.on_surface_variant(move |device, step| {
+            let mut config = learn.config.borrow_mut();
+            if learn.surfaces.step_variant(&device, step, &mut config) {
+                learn.surfaces.refresh(&config);
+                learn.config_dirty.set(true);
+            }
+        });
+        let learn = self.clone();
+        logic.on_toggle_surface_driver(move |device| {
+            let mut config = learn.config.borrow_mut();
+            let off = &mut config.surfaces.without_driver;
+            match off.iter().position(|known| *known == device.as_str()) {
+                Some(index) => drop(off.remove(index)),
+                None => off.push(device.to_string()),
+            }
+            learn.surfaces.refresh(&config);
+            learn.config_dirty.set(true);
         });
         let learn = self.clone();
         logic.on_learn_click(move |kind, slot, index| {
@@ -490,7 +541,13 @@ impl Learn {
                 }
                 _ => None,
             };
-            let mut controls = control_views(&surface);
+            // Pages are drawn one at a time: the selected bank's, or the first.
+            let page = editor
+                .selected
+                .and_then(|bank| surface.banks.get(bank))
+                .and_then(|bank| bank.page)
+                .or_else(|| surface.first_page());
+            let mut controls = control_views(&surface, page, false);
             if let Some(control) = learning.and_then(|control| controls.get_mut(control)) {
                 control.selected = true;
             }
@@ -503,6 +560,11 @@ impl Learn {
                 width: surface.width as f32,
                 height: surface.height as f32,
                 controls: ModelRc::from(self.edit_controls.clone()),
+                pages: ModelRc::default(),
+                page: page.map_or(-1, |page| page as i32),
+                variant: Default::default(),
+                driver: Default::default(),
+                driver_on: false,
             });
             let banks: Vec<EditBank> = surface
                 .banks
@@ -515,6 +577,7 @@ impl Learn {
                     height: bank.height as f32,
                     name: bank.name.as_str().into(),
                     selected: editor.selected == Some(index),
+                    hidden: bank.page.is_some() && bank.page != page,
                 })
                 .collect();
             crate::sync_model(&self.edit_banks, banks);

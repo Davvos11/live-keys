@@ -26,16 +26,18 @@ component ControlLabel inherits Text {
     horizontal-alignment: center;
 }
 
-// The fader's cell is 28×100. While its target is elsewhere (MIDI learn's
-// pick-up or glide), the cap is drawn at the target, and the hardware's
-// position as a ghost.
+// The fader's cell is 28×100 unless its bank says otherwise (the track
+// follows its height). While its target is elsewhere (MIDI learn's pick-up or
+// glide), the cap is drawn at the target, and the hardware's position as a
+// ghost.
 component SurfaceFader inherits Rectangle {
     in property <SurfaceControlView> control;
-    property <length> track: 70px;
+    property <length> track: root.height - 30px;
+    property <length> middle: root.width / 2;
     property <float> shown: root.control.waiting ? root.control.target : root.control.value;
 
     Rectangle {
-        x: 12px;
+        x: root.middle - 2px;
         y: 6px;
         width: 4px;
         height: root.track;
@@ -43,7 +45,7 @@ component SurfaceFader inherits Rectangle {
         background: Theme.control-border;
     }
     Rectangle {
-        x: 12px;
+        x: root.middle - 2px;
         y: 6px + root.track * (1 - root.shown);
         width: 4px;
         height: root.track * root.shown;
@@ -51,7 +53,7 @@ component SurfaceFader inherits Rectangle {
         background: SurfaceSizes.value-colour(root.control.mapped);
     }
     if root.control.waiting : Rectangle {
-        x: 5px;
+        x: root.middle - 9px;
         y: 2px + root.track * (1 - root.control.value);
         width: 18px;
         height: 8px;
@@ -61,7 +63,7 @@ component SurfaceFader inherits Rectangle {
         background: Theme.text-muted.with-alpha(0.15);
     }
     Rectangle {
-        x: 5px;
+        x: root.middle - 9px;
         y: 2px + root.track * (1 - root.shown);
         width: 18px;
         height: 8px;
@@ -75,8 +77,9 @@ component SurfaceFader inherits Rectangle {
     }
 }
 
-// The knob's cell is 44×54. While its target is elsewhere, the pointer shows
-// the target, and a ghost dot the hardware's position.
+// The knob's cell is 44×54 unless its bank says otherwise (the dial shrinks
+// in a lower one). While its target is elsewhere, the pointer shows the
+// target, and a ghost dot the hardware's position.
 component SurfaceKnob inherits Rectangle {
     in property <SurfaceControlView> control;
     property <angle> start: -135deg;
@@ -91,10 +94,10 @@ component SurfaceKnob inherits Rectangle {
     }
 
     dial := Rectangle {
-        x: 6px;
+        width: min(32px, root.height - 16px);
+        height: self.width;
+        x: (root.width - self.width) / 2;
         y: 3px;
-        width: 32px;
-        height: 32px;
         Path {
             width: 100%;
             height: 100%;
@@ -228,6 +231,57 @@ component SurfaceDrawing inherits Rectangle {
             clicked => { AppLogic.edit-surface(root.surface.device, false); }
         }
     }
+    // Its pages, the shown one highlighted; clicking one shows it.
+    if root.surface.known && (root.surface.pages.length > 0 || root.surface.driver != "") : HorizontalLayout {
+        x: name.preferred-width + 40px;
+        y: 0;
+        height: root.name-height;
+        spacing: 8px;
+        alignment: start;
+        for page[index] in root.surface.pages : Text {
+            text: page;
+            font-size: Theme.tiny-font-size;
+            font-weight: index == root.surface.page ? 600 : 400;
+            color: index == root.surface.page ? Theme.accent : page-area.has-hover ? Theme.text : Theme.text-faint;
+            vertical-alignment: center;
+            page-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.surface-page(root.surface.device, index); }
+            }
+        }
+        // The page's variant (the keyboard's preset): click for the next,
+        // right-click for the previous.
+        if root.surface.variant != "" : Text {
+            text: "◂ " + root.surface.variant + " ▸";
+            font-size: Theme.tiny-font-size;
+            color: variant-area.has-hover ? Theme.text : Theme.text-faint;
+            vertical-alignment: center;
+            variant-area := TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down {
+                        if event.button == PointerEventButton.left {
+                            AppLogic.surface-variant(root.surface.device, 1);
+                        } else if event.button == PointerEventButton.right {
+                            AppLogic.surface-variant(root.surface.device, -1);
+                        }
+                    }
+                }
+            }
+        }
+        // The driver's switch: "DAW mode" on or off.
+        if root.surface.driver != "" : Text {
+            text: root.surface.driver + (root.surface.driver-on ? " on" : " off");
+            font-size: Theme.tiny-font-size;
+            font-weight: root.surface.driver-on ? 600 : 400;
+            color: root.surface.driver-on ? Theme.accent : driver-area.has-hover ? Theme.text : Theme.text-faint;
+            vertical-alignment: center;
+            driver-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.toggle-surface-driver(root.surface.device); }
+            }
+        }
+    }
     if root.surface.known : Rectangle {
         y: root.name-height;
         width: root.surface.width * 1px;
@@ -238,6 +292,7 @@ component SurfaceDrawing inherits Rectangle {
             y: control.y * 1px;
             width: control.width * 1px;
             height: control.height * 1px;
+            visible: !control.hidden;
             border-radius: 4px;
             border-width: control.selected ? 2px : area.has-hover ? 1px : 0px;
             border-color: control.selected ? Theme.accent : Theme.control-border;
@@ -731,6 +786,7 @@ export component SurfaceEditor inherits Rectangle {
                     width: AppState.edit-surface.width * 1px;
                     height: AppState.edit-surface.height * 1px;
                     for bank[index] in AppState.edit-banks : Rectangle {
+                        visible: !bank.hidden;
                         x: bank.x * 1px - 4px;
                         y: bank.y * 1px - 4px;
                         width: bank.width * 1px + 8px;
@@ -740,6 +796,7 @@ export component SurfaceEditor inherits Rectangle {
                         border-color: bank.selected ? Theme.accent : Theme.control-border;
                     }
                     for control[index] in AppState.edit-surface.controls : Rectangle {
+                        visible: !control.hidden;
                         x: control.x * 1px;
                         y: control.y * 1px;
                         width: control.width * 1px;
@@ -758,6 +815,7 @@ export component SurfaceEditor inherits Rectangle {
                     }
                     // Each bank's handle, above it: click selects, drag moves.
                     for bank[index] in AppState.edit-banks : Rectangle {
+                        visible: !bank.hidden;
                         x: bank.x * 1px - 4px;
                         y: bank.y * 1px - 4px - root.handle;
                         width: bank.width * 1px + 8px;
