@@ -125,7 +125,8 @@ LPD8**. More come from users' own surfaces (an "export" is just the JSON file).
 
 ## The bottom panel (boards 1, 7)
 
-Under the scenes pane and the slots (the sidebar keeps the full height), 140 px:
+Under the scenes pane and the slots, 140 px (as built later: under the sidebar too, the window's
+whole width, so a keyboard's surface fits beside the left column):
 
 - **Left column** (as wide as the scenes pane): "Control surfaces" with a collapse button;
   "MIDI learn" (stays lit as "Learning…" in learn mode) and "Edit layout"; and a dropdown

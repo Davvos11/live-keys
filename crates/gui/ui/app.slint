@@ -12,8 +12,8 @@ import { SurfacesPanel, SurfaceSizes, SurfaceEditor } from "surfaces.slint";
 export { AppState, AppLogic, ParamsWindow, SettingsWindow }
 
 // The Live view (scenes and slots, 1200×995 in the Penpot design's "MIDI learn
-// 1" window board) with the control surfaces panel under it, and the right
-// sidebar (300 wide) beside them.
+// 1" window board) with the right sidebar (300 wide) beside it, and the control
+// surfaces panel under both, the window's whole width.
 //
 // The panel's room comes from the window's height: tall enough, it's docked and
 // expanded (unless the user collapsed it); a little short, the slots give up
@@ -75,15 +75,15 @@ export component AppWindow inherits Window {
 
     // Pinned to the window, so the window's height (which the panel's room is
     // computed from) doesn't come from this layout.
-    HorizontalLayout {
+    VerticalLayout {
       x: 0;
       y: 0;
       width: root.width;
       height: root.height;
-      VerticalLayout {
-        horizontal-stretch: 1;
+      HorizontalLayout {
+        vertical-stretch: 1;
         Rectangle {
-            vertical-stretch: 1;
+            horizontal-stretch: 1;
             LiveTab {
                 squeeze: root.squeeze;
                 choose-plugin(slot, category) => { root.choose-plugin(slot, category); }
@@ -115,30 +115,31 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        SurfacesPanel {
-            height: root.panel-height;
-            expanded: root.docked-expanded;
-            toggle => {
-                if (root.fits-expanded) {
-                    AppLogic.set-surfaces-collapsed(!AppState.surfaces-collapsed);
-                } else {
-                    root.overlay-open = !root.overlay-open;
-                }
-            }
-        }
-      }
         Sidebar {
             fullscreen: root.full-screen;
             toggle-fullscreen => { root.full-screen = !root.full-screen; }
             choose-effect => { root.choose-plugin(AppState.master-slot, Category.audio-effect); }
         }
+      }
+      // The whole window's width: a keyboard's surface fits beside the left column.
+      SurfacesPanel {
+        height: root.panel-height;
+        expanded: root.docked-expanded;
+        toggle => {
+            if (root.fits-expanded) {
+                AppLogic.set-surfaces-collapsed(!AppState.surfaces-collapsed);
+            } else {
+                root.overlay-open = !root.overlay-open;
+            }
+        }
+      }
     }
 
     // Over the bottom of the slots, above the panel's row.
     if root.overlay-open && !root.docked-expanded : Rectangle {
         x: 0;
         y: root.height - root.panel-height - self.height;
-        width: root.width - 300px;
+        width: root.width;
         height: SurfaceSizes.expanded;
         drop-shadow-blur: 24px;
         drop-shadow-offset-y: -6px;
@@ -157,7 +158,7 @@ export component AppWindow inherits Window {
     if AppState.editing : Rectangle {
         x: 0;
         y: max(0px, root.height - 460px);
-        width: root.width - 300px;
+        width: root.width;
         height: min(root.height, 460px);
         drop-shadow-blur: 24px;
         drop-shadow-offset-y: -6px;

@@ -67,10 +67,10 @@ cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effect
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
 # pinned favourites); an effect's square shows its LV2 inline display if it has one, a click opens
 # its GUI (or parameter window), a right-click its menu, dragging it reorders), then the right
-# sidebar: a master transpose, a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
+# sidebar: icon buttons for Settings (a window of its own: plugin folders, Rescan, discovered
+# plugins), MIDI panic and fullscreen (also F11), a master transpose, a metronome (volume knob with play/stop under it, beat dots, BPM stepper, time
 # signature, subdivision, Tap), the master output (volume slider, master audio effects, mute, output device), the MIDI
-# inputs, Settings (a window of its own: plugin folders, Rescan, discovered plugins) and MIDI panic;
-# a fullscreen button (and F11) top right; under the scenes and slots, the control surfaces panel
+# inputs; under all of it, the window's whole width, the control surfaces panel
 # (the MIDI controllers chosen, drawn as their faders/knobs/pads/buttons, moving as the hardware does)
 cargo run -p live-keys-gui --release
 SLINT_LIVE_PREVIEW=1 cargo run -p live-keys-gui --release --features slint/live-preview
@@ -854,8 +854,9 @@ behind format-agnostic cores:
 
 - **`crates/gui`** (`live-keys-gui`, binary `live-keys-gui`) — the Slint app. `build.rs`
   (`slint-build`) compiles `ui/app.slint`: one window, no tabs — `live_tab.slint` (the scenes
-  and slots) over the **control surfaces panel** (`surfaces.slint`), with the **right
-  sidebar** (`sidebar.slint`, 300 wide) beside them. The window opens at, and can't shrink
+  and slots) with the **right sidebar** (`sidebar.slint`, 300 wide) beside it, and the
+  **control surfaces panel** (`surfaces.slint`) under both, the window's whole width (so a
+  keyboard like the LX88+ fits without scrolling at the minimum width). The window opens at, and can't shrink
   below, 1500×995 (in the Penpot design, the Live view is 1200×995 and the right sidebar
   300×995, as drawn inside its "MIDI learn" window boards — "MIDI learn 1" at the minimum
   size, "MIDI learn 8" full screen with the LX88+). Its layout is pinned to the window (`x`/`y`/`width`/`height`) because the panel's
@@ -865,7 +866,7 @@ behind format-agnostic cores:
   44 px row whose button shows it expanded over the bottom of the slots. Whatever the panel
   takes beyond the 995 px the slots need, the slots give up as padding: `SlotPanel.squeeze`
   (0..1, through `LiveTab`) shrinks the header by up to 40 px, closes the gap between the zigzag knob rows, and the first tab's padding and
-  spacing. F11 and the button at the end of the sidebar's transpose row toggle `full-screen`;
+  spacing. F11 and the fullscreen icon at the top of the sidebar toggle `full-screen`;
   Escape leaves MIDI learn — both in the `key-pressed` of a `FocusScope` around the whole
   window (key events go up from the focused element through its parents; `KeyBinding`s in it
   didn't fire), which gets the focus back when learn mode starts or stops. **The surfaces panel**
@@ -1011,8 +1012,9 @@ behind format-agnostic cores:
   `SampleDownload` in `main` keeps the slot, the plugin and the worker thread; the poll timer's
   `poll_download` updates the progress and, once it's done, invokes `pick-plugin` again, which
   now loads it; for `AppState.master-slot` the picker shows audio
-  effects only (no tabs). **The sidebar** (`ui/sidebar.slint`, after the design's "Right
-  sidebar"): the master transposition (`TransposeSection`: a `Stepper`,
+  effects only (no tabs). **The sidebar** (`ui/sidebar.slint`, after the design's
+  sidebar): a row of icon buttons — Settings, MIDI panic (`midi-panic` → `Engine::panic`)
+  and, at its end, fullscreen (`ToolbarSection`) —, the master transposition (`TransposeSection`: a `Stepper`,
   `set-master-transpose` → `AppConfig.master_transpose`, ±`MAX_TRANSPOSE`, added to every
   slot's own in its `MidiFilter` — `SlotConfig::filter(master_transpose)` — and not part of
   scenes), the metronome (`MetronomeSection`: a volume `LabelledKnob`, `BeatDots` from
@@ -1024,8 +1026,8 @@ behind format-agnostic cores:
   or dragged, an `FxStrip` of `AppState.master-effects`
   (exported from `slot_panel.slint`, as slot `AppState.master-slot`) with its own
   `PresetPopup`, a mute button and
-  the output device `Select`), the MIDI inputs, then Settings and MIDI panic
-  (`midi-panic` → `Engine::panic`). The metronome's settings are `AppConfig.metronome`
+  the output device `Select`), then the MIDI inputs; the rest of its height is empty, as it
+  ends above the surfaces panel. The metronome's settings are `AppConfig.metronome`
   (`src/metronome.rs`: `MetronomeConfig` — BPM, time signature and subdivision as indices into
   `SIGNATURES`/`Subdivision::ALL`, volume 0..1, squared into the click's level — plus
   `TapTempo`: the average of up to five taps, starting over after a 2 s pause; unit-tested);

@@ -1,5 +1,6 @@
-// The right sidebar, after the Penpot design (its "MIDI learn" window boards): the master
-// transposition, the metronome, the master output, the MIDI inputs, then Settings and MIDI panic.
+// The right sidebar, after the Penpot design (its "MIDI learn" window boards): Settings,
+// MIDI panic and fullscreen as icons, the master transposition, the metronome, the master
+// output and the MIDI inputs. It ends above the control surfaces panel.
 import { CheckBox } from "std-widgets.slint";
 import { AppState, AppLogic, Category, EffectRow, MidiInputRow } from "globals.slint";
 import { Theme, Icons, KButton, DropdownButton, ListItem, Select, Stepper } from "widgets.slint";
@@ -68,10 +69,31 @@ component BeatDots inherits Rectangle {
 
 // Semitones added to every slot's notes, on top of each slot's own; and, at
 // the window's top-right corner, the fullscreen button.
-component TransposeSection inherits HorizontalLayout {
+// Settings and MIDI panic on the left, fullscreen on the right, as icons.
+component ToolbarSection inherits HorizontalLayout {
     in property <bool> fullscreen;
     callback toggle-fullscreen();
 
+    vertical-stretch: 0;
+    padding: 5px;
+    spacing: 6px;
+
+    KButton {
+        icon: Icons.settings-2;
+        clicked => { AppLogic.open-settings(); }
+    }
+    KButton {
+        icon: Icons.alert;
+        clicked => { AppLogic.midi-panic(); }
+    }
+    Rectangle { horizontal-stretch: 1; }
+    KButton {
+        icon: root.fullscreen ? Icons.minimize : Icons.maximize;
+        clicked => { root.toggle-fullscreen(); }
+    }
+}
+
+component TransposeSection inherits HorizontalLayout {
     vertical-stretch: 0;
     padding: 5px;
     padding-top: 10px;
@@ -103,11 +125,6 @@ component TransposeSection inherits HorizontalLayout {
             kind: 4;
             slot: AppState.master-slot;
         }
-    }
-    Rectangle { width: 6px; }
-    KButton {
-        icon: root.fullscreen ? Icons.minimize : Icons.maximize;
-        clicked => { root.toggle-fullscreen(); }
     }
 }
 
@@ -447,10 +464,12 @@ export component Sidebar inherits Rectangle {
     }
 
     VerticalLayout {
-        TransposeSection {
+        ToolbarSection {
             fullscreen: root.fullscreen;
             toggle-fullscreen => { root.toggle-fullscreen(); }
         }
+        Divider { }
+        TransposeSection { }
         Divider { }
         MetronomeSection { }
         Divider { }
@@ -463,34 +482,9 @@ export component Sidebar inherits Rectangle {
             }
         }
         Divider { }
-        Rectangle { vertical-stretch: 1; }
-        Divider { }
         MidiSection { }
-        Divider { }
-        VerticalLayout {
-            vertical-stretch: 0;
-            padding-top: 11px;
-            padding-bottom: 11px;
-            spacing: 9px;
-            HorizontalLayout {
-                alignment: center;
-                KButton {
-                    width: 124px;
-                    icon: Icons.settings-2;
-                    text: "Settings";
-                    clicked => { AppLogic.open-settings(); }
-                }
-            }
-            HorizontalLayout {
-                alignment: center;
-                KButton {
-                    width: 124px;
-                    icon: Icons.alert;
-                    text: "MIDI panic";
-                    clicked => { AppLogic.midi-panic(); }
-                }
-            }
-        }
+        // The rest is free: the surfaces panel runs under it.
+        Rectangle { vertical-stretch: 1; }
     }
 
     preset-popup := PresetPopup {
