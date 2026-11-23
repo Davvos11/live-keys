@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -62,14 +62,8 @@ export global AppState {
     // every scene, matching or not.
     in property <[SceneRow]> scene-rows: Platform.uses-mock-data ? MockData.scene-rows : [];
     in property <int> scene-count: Platform.uses-mock-data ? MockData.scene-count : 0;
-    // The scene last recalled or saved ("" if none), and whether any slot it
-    // includes changed since.
+    // The scene last recalled or saved ("" if none).
     in property <string> current-scene: Platform.uses-mock-data ? MockData.current-scene : "";
-    in property <bool> current-scene-changed: Platform.uses-mock-data ? MockData.current-scene-changed : false;
-    // Per slot, its mode in the scene being saved or edited (set by
-    // `AppLogic.begin-scene-save`/`begin-scene-edit`, changed by
-    // `set-scene-slot-mode`).
-    in property <[SceneSlotChoice]> scene-form-slots: Platform.uses-mock-data ? MockData.scene-form-slots : [];
     // The last scene error; empty if none.
     in property <string> scene-status: Platform.uses-mock-data ? MockData.scene-status : "";
     // The name of the scene being saved over, edited or deleted (for saving:
@@ -200,6 +194,7 @@ export global AppLogic {
     callback learn-add-level(/* row */ int);
     callback learn-remove-level(/* row */ int, /* level */ int);
     callback learn-set-value(/* row */ int, /* position */ float);
+    callback learn-set-invert-light(/* row */ int, bool);
     callback learn-set-velocity(/* row */ int, /* on */ bool);
     // Where it's kept (0 with the scene, 1 in every scene) and, for a panel
     // control, whether it's that parameter or that panel position.
@@ -279,17 +274,10 @@ export global AppLogic {
     callback save-preset(/* key */ int, /* name */ string);
     // Deletes the plugin's current preset.
     callback delete-preset(/* key */ int);
-    // Slot presets. Choosing a folder row opens it; choosing a preset loads it.
-    callback choose-slot-preset(/* slot */ int, /* index into slot-preset-rows */ int);
-    // Back from a folder to the list of folders.
-    callback show-slot-preset-folders(/* slot */ int);
-    callback save-slot-preset(/* slot */ int, /* name */ string);
-    // Deletes the slot's current slot preset.
-    callback delete-slot-preset(/* slot */ int);
     // Channel uses the same encoding as `SlotState.midi-channel`.
     callback set-slot-filter(/* slot */ int, /* channel */ int, /* note-low */ int, /* note-high */ int, /* velocity-low */ int, /* velocity-high */ int);
     callback set-slot-volume(/* slot */ int, /* dB */ float);
-    // Which tab a slot shows (0 the panel and audio effects, 2 MIDI), so only
+    // Which tab a slot shows (0 the panel and audio effects, 1 MIDI), so only
     // visible effects' inline displays are rendered.
     callback set-slot-tab(/* slot */ int, /* tab */ int);
     // The instrument panel on a slot's first tab. `cell` indexes
@@ -312,20 +300,27 @@ export global AppLogic {
     callback pick-param-search(/* index */ int);
     // Scenes. `index` is into `AppState.scene-rows`; -1 means the current scene.
     callback filter-scenes(/* query */ string);
+    // Recalls the scene: its unsaved changes (its draft) if it has any. The
+    // current scene's unsaved changes are kept as its draft.
     callback load-scene(/* index */ int);
-    // Fills the form's slot modes: the current scene's, else restore for
-    // every slot with plugins and leave unchanged for the others.
+    // Starts the save form from the current scene's name.
     callback begin-scene-save();
-    // Makes the scene the one to edit, and fills the form from it.
+    // Makes the scene the one to rename.
     callback begin-scene-edit(/* index */ int);
     // Makes the scene the one to delete.
     callback begin-scene-delete(/* index */ int);
-    callback set-scene-slot-mode(/* slot */ int, /* mode */ int);
+    // Saves the slots as a scene: those with an instrument restored, the
+    // others cleared.
     callback save-scene(/* name */ string);
-    // Saves the slots' current setups over the scene, keeping its slot modes.
+    // Saves the slots' current setups over the scene, as `save-scene` does.
     callback overwrite-scene(/* index */ int);
-    // Renames the scene being edited and gives it the form's slot modes.
+    // Renames the scene being edited.
     callback edit-scene(/* name */ string);
+    // A changed scene's hover buttons: save its changes (the current scene's
+    // slots, another's draft) over it, or drop them (the current scene is
+    // recalled again as saved).
+    callback save-scene-changes(/* index */ int);
+    callback discard-scene-changes(/* index */ int);
     callback delete-scene();
     // Copies the scene as "<name> copy", right after it.
     callback duplicate-scene(/* index */ int);

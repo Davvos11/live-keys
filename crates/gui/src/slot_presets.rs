@@ -1,12 +1,11 @@
 //! Slot presets: a slot's whole chain — which plugins, in which order, and each
-//! one's settings — saved under a name and recalled in one go.
+//! one's settings — saved as a folder and recalled in one go. Scenes, the
+//! session and a cleared slot's undo are made of them.
 //!
-//! Each preset is a folder `<root>/<instrument>/<name>/` holding `slot.json` (the
-//! chain) and one state file per plugin in its format's own standard form (an LV2
-//! state bundle, a `.vstpreset`), written by `Engine::save_state_file`. These
-//! aren't the plugins' own presets, so they don't show up in the plugins' preset
-//! lists. The instrument folder is only for people browsing the files; grouping
-//! goes by the instrument id in `slot.json`.
+//! Each is a folder holding `slot.json` (the chain) and one state file per
+//! plugin in its format's own standard form (an LV2 state bundle, a
+//! `.vstpreset`), written by `Engine::save_state_file`. These aren't the
+//! plugins' own presets, so they don't show up in the plugins' preset lists.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::mappings::{SavedValue, SceneMapping};
 
 const FILE_NAME: &str = "slot.json";
-/// The folder of presets of slots without an instrument.
-pub const NO_INSTRUMENT: &str = "No instrument";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotPreset {
@@ -32,14 +29,6 @@ pub struct SlotPreset {
 }
 
 impl SlotPreset {
-    pub fn instrument_id(&self) -> Option<&str> {
-        self.instrument.as_ref().map(|plugin| plugin.id.as_str())
-    }
-
-    pub fn instrument_name(&self) -> &str {
-        self.instrument.as_ref().map_or(NO_INSTRUMENT, |plugin| plugin.name.as_str())
-    }
-
     pub fn effects(&self, section: Section) -> &[PluginState] {
         match section {
             Section::Midi => &self.midi_effects,
@@ -115,33 +104,6 @@ pub struct Stored {
     pub preset: SlotPreset,
 }
 
-/// Where slot presets live: `~/.local/share/live-keys/slot-presets` on Linux.
-fn root() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("live-keys").join("slot-presets"))
-}
-
-/// Every slot preset, sorted by name. Unreadable ones are skipped (and logged).
-pub fn list() -> Vec<Stored> {
-    let mut found = Vec::new();
-    let Some(root) = root() else {
-        return found;
-    };
-    let folders = fs::read_dir(&root).into_iter().flatten().flatten();
-    for preset_dir in folders.flat_map(|folder| fs::read_dir(folder.path()).into_iter().flatten().flatten()) {
-        let dir = preset_dir.path();
-        let file = dir.join(FILE_NAME);
-        if !file.is_file() {
-            continue;
-        }
-        match read(&file) {
-            Ok(preset) => found.push(Stored { dir, preset }),
-            Err(err) => log::warn!("skipping slot preset {}: {err:#}", file.display()),
-        }
-    }
-    found.sort_by_key(|stored| stored.preset.name.to_lowercase());
-    found
-}
-
 fn read(file: &Path) -> Result<SlotPreset> {
     let text = fs::read_to_string(file)?;
     Ok(serde_json::from_str(&text)?)
@@ -161,25 +123,6 @@ struct Loaded {
     key: PluginKey,
     id: String,
     name: String,
-}
-
-/// Saves slot `slot`'s chain as slot preset `name`, replacing one of the same
-/// name for the same instrument. `plugin_extras` gives what each plugin needs
-/// saving besides its state.
-pub fn save(
-    engine: &mut Engine,
-    slot: usize,
-    name: &str,
-    plugin_extras: impl Fn(PluginKey) -> PluginExtras,
-) -> Result<Stored> {
-    let chain = engine.slot(slot).context("no such slot")?;
-    anyhow::ensure!(chain.plugins().next().is_some(), "the slot is empty");
-    let instrument_name = chain.instrument.as_ref().map_or(NO_INSTRUMENT, |meta| meta.name.as_str());
-    let root = root().context("no data folder to save slot presets in")?;
-    let folder = root.join(file_name(instrument_name));
-    let dir = folder.join(file_name(name));
-    let preset = replace_dir(&dir, |temp| write(engine, slot, name, temp, plugin_extras))?;
-    Ok(Stored { dir, preset })
 }
 
 /// Writes slot `slot`'s chain into the empty folder `dir`: `slot.json` and a
@@ -257,23 +200,6 @@ pub fn replace_dir<T>(dir: &Path, fill: impl FnOnce(&Path) -> Result<T>) -> Resu
     }
     fs::rename(&temp, dir)?;
     Ok(value)
-}
-
-/// Deletes the slot preset in `dir`, and its instrument folder if that's left
-/// empty.
-pub fn delete(dir: &Path) -> Result<()> {
-    let root = root().context("no data folder")?;
-    anyhow::ensure!(
-        dir.starts_with(&root) && dir.join(FILE_NAME).is_file(),
-        "{} isn't a slot preset",
-        dir.display()
-    );
-    fs::remove_dir_all(dir)?;
-    if let Some(folder) = dir.parent() {
-        // Fails (harmlessly) unless empty.
-        let _ = fs::remove_dir(folder);
-    }
-    Ok(())
 }
 
 /// `name` as a folder name: path separators and other troublesome characters

@@ -15,7 +15,7 @@ const DISPLAY_SIZE: f32 = 78.0;
 
 /// A slot's tabs, as `SlotPanel`'s `tab`: which of its effects show.
 const TAB_PANEL: i32 = 0;
-const TAB_MIDI: i32 = 2;
+const TAB_MIDI: i32 = 1;
 
 struct Rendered {
     /// `None` when the plugin had nothing to show.

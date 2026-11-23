@@ -57,12 +57,12 @@ cargo run --release -- --plugin <id> --midi-port <substr> --audio-device <substr
 cargo run --release -- --plugin <id> --effect <id> --effect <id>   # MIDI effects → instrument → audio
                                                # effects; each --effect goes where its kind belongs
 
-# GUI (live-keys-gui) — one window after the Penpot design (no tabs): a scenes pane on the left — per slot restore/clear/leave unchanged, searchable,
-# renamable — then 6 rack slots in a 3×2 grid, each: a header (instrument photo and name, its GUI,
-# mute and ✕-clear-with-undo buttons, a volume knob, its presets), then three tabs — the instrument's
+# GUI (live-keys-gui) — one window after the Penpot design (no tabs): a scenes pane on the left — searchable,
+# renamable, a scene's unsaved changes kept when switching away (save/discard on hover) — then 6 rack slots in
+# a 3×2 grid, each: a header (instrument photo and name, its GUI,
+# mute and ✕-clear-with-undo buttons, a volume knob, its presets), then two tabs — the instrument's
 # panel (setBfree's drawbars, then a row of five knobs/switches/levers, each picked by right-click
-# from its profile's controls or any parameter) and the audio effects as squares; the slot presets (the whole chain with
-# every plugin's settings, browsed by instrument); MIDI effects, the inputs it listens to, a MIDI
+# from its profile's controls or any parameter) and the audio effects as squares; MIDI effects, the inputs it listens to, a MIDI
 # channel/note-range/velocity-range filter and a transposition. Up to 8 MIDI effects → an
 # instrument → up to 8 audio effects, added through a plugin picker popup (tabs per kind, search,
 # pinned favourites); an effect's square shows its LV2 inline display if it has one, a click opens
@@ -87,10 +87,10 @@ LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui --release
 # preset variants, drivers switched off and defaults installed, the selected slot,
 # and per slot: MIDI inputs + filter, volume), saved as they change. User control surfaces are
 # ~/.local/share/live-keys/surfaces/*.json.
-# The rack itself (every slot's chain and the master chain, plugin settings, current slot preset and
-# scene, open plugin windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
-# once the rack is quiet, and restored on startup. Slot presets live in
-# ~/.local/share/live-keys/slot-presets/, scenes in ~/.local/share/live-keys/scenes/.
+# The rack itself (every slot's chain and the master chain, plugin settings, current scene, open plugin
+# windows) is the session in ~/.local/share/live-keys/session/, saved on exit and after changes
+# once the rack is quiet, and restored on startup. Scenes live in ~/.local/share/live-keys/scenes/,
+# their unsaved changes in ~/.local/share/live-keys/scene-drafts/.
 
 # Manual LV2-UI-hosting smoke tests (not part of the app; see "LV2 plugin GUI hosting" below)
 cargo run -p live-keys-lv2-ui --example test_helm    # External UI path
@@ -640,7 +640,9 @@ behind format-agnostic cores:
     driver's display). `Mappings` keeps a `Reader` per surface (`event(surface, port,
     event)`); a page change shows that page's (and page-less) controls' feedback again.
     Controls with feedback (`ControlSetup::feedback`) always jump and are sent their first
-    target's state when it changes from elsewhere (`take_feedback`; `resync_feedback` sends
+    target's state (turned around — 1 − p, lit ↔ unlit — when its `Link::invert_feedback`:
+    the GUI's "Invert light", `invert_light` on a `GlobalMapping`/`SceneMapping`, `None` = the
+    target's default, on for mutes, `RackTarget::inverts_light`) when it changes from elsewhere (`take_feedback`; `resync_feedback` sends
     all), their own echo ignored. The thread sends those through `midir` output
     connections of its own (the device's port by name, opened on first use; at most every
     10 ms per control, no repeats; `Engine::resync_feedback`, which the GUI calls when the
@@ -865,7 +867,9 @@ behind format-agnostic cores:
   collapsed it (`AppConfig.surfaces.collapsed`, `set-surfaces-collapsed`); otherwise it's one
   44 px row whose button shows it expanded over the bottom of the slots. Whatever the panel
   takes beyond the 995 px the slots need, the slots give up as padding: `SlotPanel.squeeze`
-  (0..1, through `LiveTab`) shrinks the header by up to 40 px, closes the gap between the zigzag knob rows, and the first tab's padding and
+  (0..1, through `LiveTab`) shrinks the header by up to 40 px — taken from above the preset
+  dropdown (top padding, gaps, a smaller name row and volume knob), so the dropdown keeps a
+  margin above the tab bar —, closes the gap between the zigzag knob rows, and the first tab's padding and
   spacing. F11 and the fullscreen icon at the top of the sidebar toggle `full-screen`;
   Escape leaves MIDI learn — both in the `key-pressed` of a `FocusScope` around the whole
   window (key events go up from the focused element through its parents; `KeyBinding`s in it
@@ -911,10 +915,14 @@ behind format-agnostic cores:
   `steps`/`text_at`, or a plain one) into the engine's setup (`build_setup`; not handed over
   if it does what the last did, so takeover state survives; rebuilt when `setup_dirty`, set
   by `refresh_slot`, panel rebuilds, surface changes and edits), and runs learn mode: the
-  selected control (clicked in the panel — `learn-select` — or moved), the targets pane's
-  rows (`LearnTargetRow`s), the right-click popup (a draft until "Assign"), and `LearnFlags`
+  selected control (clicked in the panel — `learn-select`, which also starts learn mode,
+  there being no button for it, and ends it when the control clicked is the one selected —
+  or moved while learning), the targets pane's rows (`LearnTargetRow`s; a target just
+  assigned — clicked, Assign, an action — opens expanded, `MappingsUi::expand_next`), the
+  right-click popup (a draft until "Assign"), and `LearnFlags`
   — per on-screen target 0/1/2 (not a target, possible, the selected control's), and for a
-  selected button or pad the **actions menu** ("+ Action…" in the learn pane, `ActionsPopup`:
+  selected button or pad the **actions menu** (the "+ Action" row ending the learn pane's
+  targets, `AddActionRow`, opens `ActionsPopup`:
   `mappings::actions(ActionMenu, scenes)` — previous/next scene, "Scene by name…" and
   "Scene by number…" (each opening a second list, `ActionItem::Open`; numbers up to at least
   8, so buttons can be mapped before the scenes exist), previous/next slot, the selected
@@ -942,8 +950,11 @@ behind format-agnostic cores:
   device-without-surface card's buttons. Saving reloads the library
   (`SurfacesUi::reload`) and `sync_surfaces`.
   `ui/learn.slint`: `LearnPane` (over the scenes pane while `AppState.learning`),
-  `TargetSettings` (mode, range, levels, momentary value, kept with the scene or in every
-  scene, this parameter or this panel position), and `LearnTarget`, laid over each target
+  `TargetSettings` (mode, range, levels, momentary value, "Invert light" for a control with
+  feedback (`learn-set-invert-light`), kept with the scene or in every
+  scene, this parameter or this panel position; a toggle's level sliders are in a `for`, so
+  `MappingsUi::refresh_view` refills the rows' (and the popup's) levels models in place —
+  a new model would rebuild the sliders mid-drag), and `LearnTarget`, laid over each target
   widget while learning (outlined; filled and badged when the selected control's; click
   adds or removes, right-click opens its popup). **Look:** the Live view and sidebar follow the Penpot
   design (its components have Slint counterparts): `ui/theme.slint` has `Theme` (the design's
@@ -954,7 +965,8 @@ behind format-agnostic cores:
   (`fonts/`, imported in `theme.slint`, the window's `default-font-family`), Lucide icons
   (`icons/`, lucide-static 0.460.0 — add new ones from the same version) and CC0/public-domain
   photos (`photos/`, 600×300, with `CREDITS.md`). `ui/widgets.slint` has the design's
-  components: `KButton` (icon and/or label; `active` = the primary colour), `TextField`,
+  components: `KButton` (icon and/or label; `active` = the primary colour; `tooltip`, shown
+  by Slint's `Tooltip` on hover and its accessible label; `icon-size`), `TextField`,
   `DropdownButton`, `Select` (a ComboBox look-alike on a `PopupWindow`), `ListItem`, `TabBar`,
   `Stepper`, `FxSlot` (an 80px square: the effect's inline display, `EffectRow.display`/
   `has-display`, fitted, with the name only on hover; else the name over a compressor/filter
@@ -1049,7 +1061,7 @@ behind format-agnostic cores:
   chain lives in the session, not in scenes or slot presets. On the Rust side it's slot
   `MASTER_SLOT` too: `slot_of` finds its plugins, and `Rack::refresh_slot` hands it to
   `refresh_master` (its effect rows and `AppState.master-status`, through the window handle in
-  `Rack::app`); `mark_slot_changed` and `set_current_slot_preset` only note a session change
+  `Rack::app`); `mark_slot_changed` only notes a session change
   for it. **The Settings window** (`ui/settings_window.slint`: `SettingsWindow`, created once
   at startup, shown by `open-settings`) has the plugin folders (add/remove), Rescan, every
   discovered plugin with its kind and format, and the `AboutSlint` attribution; being a window
@@ -1072,7 +1084,7 @@ behind format-agnostic cores:
   `midi-effects`/`audio-effects: [EffectRow]`, the panel's `drawbars`/`cells`/`pool`, `artwork`, `muted`,
   `closed-name`, status, routing; an `EffectRow` is one plugin's name/key, whether its
   GUI/parameter window is open, its FX-square curve and its current preset). A slot with
-  nothing in it is a big + (picks an instrument) with a "Slot presets…" popup; one just cleared
+  nothing in it is a big + (picks an instrument); one just cleared
   by ✕ shows 'Closed "<name>"…' with Undo and Dismiss. Otherwise: a **header** — the photo
   (`Artwork.photos[artwork]`, `slot_view::artwork` matching words in the instrument's name)
   under a dark gradient, buttons for the instrument's own GUI (gear), mute (`toggle-slot-mute`:
@@ -1112,7 +1124,7 @@ behind format-agnostic cores:
   effects as an `FxStrip`: one row of `EffectSquare`s (+ appends one), three fitting a slot,
   scrolling sideways by dragging in the gaps between squares, the mouse wheel (anywhere on
   it) or a thin scrollbar under it (shown when they don't fit; its thumb can be dragged);
-  tab 2 `SlotPresets`; tab 3 the
+  tab 2 the
   MIDI effects (another `FxGrid`), input toggles, channel `Select`, note and velocity
   `RangeSlider`s, and a transpose `Stepper` (`set-slot-transpose`: `SlotConfig.transpose`,
   ±`MAX_TRANSPOSE` (48) semitones, into the slot's `MidiFilter`; part of `SlotRouting`, so
@@ -1126,13 +1138,13 @@ behind format-agnostic cores:
   when moving forward — and dropping calls `move-effect`; in a strip, holding it within 24 px
   of either end scrolls the row). **Inline displays** (`src/inline_displays.rs`): the poll
   timer's `Rack::render_inline_displays` renders, for every row of a section whose tab shows
-  (a slot's audio effects on tab 1, MIDI effects on tab 3 — `set-slot-tab` reports the
+  (a slot's audio effects on tab 1, MIDI effects on tab 2 — `set-slot-tab` reports the
   slot's tab — the master chain always), the displays that asked (`Engine::
   inline_display_dirty`), at most every 33 ms each, at 78 px × the window's scale factor
   (redrawn when that changes), into `EffectRow.display`; `plugin_row` takes the last one. **Clear with undo:** `clear-slot` first saves the chain as a slot
   preset in `<data dir>/live-keys/undo/slot-<n>/` (`slot_view::snapshot`) and keeps it with the
-  routing and the slot preset shown in `Rack::closed`; `undo-clear` loads it back through
-  `load_slot_preset` and restores those; `dismiss-closed`, or anything loading into the slot
+  routing in `Rack::closed`; `undo-clear` loads it back through
+  `load_slot_preset` and restores the routing; `dismiss-closed`, or anything loading into the slot
   (`refresh_slot` sees plugins), forgets it. Scene recalls that clear a slot don't keep one.
   Each plugin's presets (instrument from its dropdown, an effect's from its popup) open
   `PresetPopup` (`ui/preset_bar.slint`, a `PopupWindow` closing itself when the browser closes
@@ -1148,53 +1160,55 @@ behind format-agnostic cores:
   `preset-rows`, `preset-count`, `preset-query`) and in Rust as `Rack::browser`
   (`PresetBrowser`: the plugin's presets, read when it opens, the query and the shown ones),
   filtered in Rust like the plugin picker. Preset errors go to the slot's status line.
-  **Slot presets** (`src/slot_presets.rs`, `ui/slot_presets.slint`, a slot's second tab): a
-  slot's whole chain under a name — a folder
-  `<data dir>/live-keys/slot-presets/<instrument name>/<name>/` with `slot.json` (each
-  plugin's id, name, state file, and its plugin preset + changed flag, so its preset bar shows
-  them again) and one state file per plugin from `Engine::save_state_file` (saved into a
-  temporary folder and swapped in, so a failed save keeps the old one; the same name for the
-  same instrument overwrites). The browser groups them by instrument id (`SlotFolder`: all
-  folders, or one — `Of(None)` for slots without an instrument); a newly loaded instrument
-  opens its folder, an empty slot shows all folders (`Rack::last_instruments` notices the
-  change in `refresh_slot`). Clicking a preset loads it at once (`load_slot_preset`): the
-  instrument is kept if it's already the same plugin, a section's effects are kept if their
-  ids match in order, otherwise replaced; then every plugin's state is restored; plugins that
-  fail to load are skipped and reported in the slot's status line. A grey "changed" shows
-  once the chain changes, any of its plugins' parameters moves, or a plugin preset is loaded
-  (`Rack::mark_slot_changed`). Slot presets don't include the MIDI routing or volume (those
-  are about the keyboard split and the mix, which scenes cover).
+  **Slot presets** (`src/slot_presets.rs`): a slot's whole chain as a folder with
+  `slot.json` (each plugin's id, name, state file, its plugin preset + changed flag, so its
+  preset bar shows them again, and its scene mappings) and one state file per plugin from
+  `Engine::save_state_file` (`slot_presets::write`; `replace_dir` fills a temporary folder
+  and swaps it in, so a failed save keeps the old one). Not browsable in the UI (the slot
+  tab for a library of them was dropped): scenes, the session and clear-with-undo are made
+  of them. `load_slot_preset` loads one into a slot: the instrument is kept if it's already
+  the same plugin, a section's effects are kept if their ids match in order, otherwise
+  replaced; then every plugin's state is restored; plugins that fail to load are skipped and
+  reported in the slot's status line. They don't include the MIDI routing or volume (scenes
+  keep those beside them).
   **Scenes** (`src/scenes.rs`, `ui/scenes.slint`: `ScenesPane`, a fixed-width pane left of the
   slots — a search field, then a list starting with "+ New scene", which opens the save form):
   what recalling does to each slot — `SlotMode` restore, clear (`clear_slot`: remove
   its plugins and reset its routing and volume to the defaults) or leave unchanged — under a
-  name. A folder
+  name. Saving (`save_scene`, `slots_to_save`) restores every slot with an instrument and
+  clears every slot without; leave unchanged is no longer offered (older scenes may still
+  have it). A folder
   `<data dir>/live-keys/scenes/<name>/` with `scene.json` (per slot: its index, mode, and,
   if it was saved as restored, a `SavedSlot`: its `config::SlotRouting` — MIDI inputs mask,
-  channel, note/velocity ranges, transposition, volume, mute — the library slot preset it showed, and its chain
+  channel, note/velocity ranges, transposition, volume, mute — and its chain
   subfolder) plus per saved slot a subfolder `slot-<n>/` that is a complete slot preset
   (`slot_presets::write`; saved via `slot_presets::replace_dir`, the same temp-folder swap).
-  Save… and Edit share one form (`Rack::scene_form_slots`, a `SceneSlotChoice` per slot: mode
-  and whether restore is possible), a segmented Restore/Clear/Unchanged per slot. Saving
-  defaults to the current scene's modes, else restore for slots with plugins; the same name
-  overwrites. Edit (`scenes::update`) renames — refusing a name another scene has — and
-  changes modes; a slot without saved data can't be set to restore, one with data keeps it
-  whatever its mode, so it can go back to restore (overwriting a scene copies the saved data
-  of its non-restored slots into the new save). The list is in the user's order — rows are
+  The form saves (the same name overwrites) or renames (`scenes::rename`, refusing a name
+  another scene has). The list is in the user's order — rows are
   dragged (`SceneItem`'s touch area: past 4 px a press becomes a drag, with a drop line;
   `move-scene`) and the order kept in `<root>/order.json` (`scenes::move_to`; new scenes go
   last). Right-clicking a row (`ContextMenuArea`, on top of the touch area, which would
-  otherwise take the right-click) offers Load, Save (overwrite: the slots' current setups,
-  keeping its modes), Edit…, Duplicate (`scenes::duplicate`: "<name> copy", "copy 2", …,
-  placed right after it) and Delete…; edit and delete act on `Rack::scene_target` (set by
-  `begin-scene-edit`/`begin-scene-delete`; -1 would mean the current scene). Each row shows a boxed slot number per
-  restored slot and a crossed-out one per cleared slot (`SceneRow.modes`, `SlotHint`).
-  Clicking a scene recalls it (`load_scene`): restored slots go through `load_slot_preset`
-  (plugins already in place are kept) and get their routing and volume back, cleared ones go
-  through `clear_slot` (also behind each slot's ✕), the rest are left alone. A
+  otherwise take the right-click) offers Load, Save (overwrite: the slots' current setups),
+  Rename…, Duplicate (`scenes::duplicate`: "<name> copy", "copy 2", …,
+  placed right after it; not its draft) and Delete…; rename and delete act on
+  `Rack::scene_target` (set by `begin-scene-edit`/`begin-scene-delete`; -1 would mean the
+  current scene). Clicking a scene recalls it (`recall_scene` → `load_scene`): restored
+  slots go through `load_slot_preset` (plugins already in place are kept) and get their
+  routing and volume back, cleared ones go through `clear_slot` (also behind each slot's ✕),
+  the rest are left alone. A
   grey "changed" shows once a restored or cleared slot's chain, any of its plugins'
-  parameters, a plugin or slot preset, its routing or its volume changes
+  parameters, a plugin preset, its routing or its volume changes
   (`Rack::mark_scene_changed`, called from `mark_slot_changed` and the routing handlers).
+  **Drafts:** recalling another scene while the current one is changed first saves the
+  rack as that scene's draft (`scenes::save_draft`, same rule and layout, in
+  `<data dir>/live-keys/scene-drafts/<folder>/`; if that fails nothing is recalled), so its
+  row keeps "changed" (`SceneRow.changed`: the current scene's flag, else
+  `scenes::has_draft`); recalling a scene with a draft loads the draft, as changed.
+  Recalling the current scene while it's changed does nothing. Hovering a changed row shows
+  two icon buttons (`KButton`s with a `tooltip`): save (`save-scene-changes`: the current
+  scene from the rack, another from its draft, `scenes::apply_draft`) and discard
+  (`discard-scene-changes`: drops the draft, and recalls the current scene as saved).
+  Saving a scene, renaming and deleting carry its draft along (dropped, moved, removed).
   Scene state lives in `Rack` (`scene_store`, `scene_query`, `current_scene`, `scene_rows`)
   and is pushed to `AppState` by `Rack::refresh_scenes`, which the poll timer runs whenever
   `scenes_dirty` is set, since most
@@ -1202,7 +1216,7 @@ behind format-agnostic cores:
   **Session** (`src/session.rs`): the rack as last saved — per slot a complete slot preset
   in `<data dir>/live-keys/session/slot-<n>/`, and the master chain likewise in `master/`
   (`slot_presets::write`, the folder swapped in
-  via `replace_dir`), and `session.json` with each slot's library slot preset, which plugins
+  via `replace_dir`), and `session.json` with which plugins
   had their GUI or parameter window open (`session::Position`, from
   `SlotChain::position_of`), and the current scene with its changed flag. Routing, volumes,
   devices etc. aren't in it: the config has them. `save_session` runs on exit (always — some
@@ -1213,7 +1227,7 @@ behind format-agnostic cores:
   silent (`Engine::take_slot_peak` ≤ `SILENCE`) for `AUTOSAVE_QUIET` — saving lends LV2
   plugins with state, which silences them, so never while playing. `restore_session` runs
   once the first plugin scan is installed: each slot through `load_slot_preset`, then
-  the slot presets and scene shown, then the plugin windows reopened (`invoke_open_plugin_gui`,
+  the scene shown, then the plugin windows reopened (`invoke_open_plugin_gui`,
   `invoke_toggle_params`). A marker file (`session.restoring`) is written for the duration:
   if it's there at startup, the last restore crashed or hung, so this one is skipped (with
   a note in slot 1's status line) and the marker cleared, so the next start tries again.

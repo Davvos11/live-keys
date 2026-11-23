@@ -2,38 +2,10 @@ import { ListView } from "std-widgets.slint";
 import { AppLogic, AppState, SceneRow } from "globals.slint";
 import { Theme, Icons, KButton, ListItem, TextField } from "widgets.slint";
 
-// A slot number in a box: the slot is restored, or — crossed out — cleared.
-component SlotHint inherits Rectangle {
-    in property <int> slot;
-    in property <bool> clear;
-    in property <color> tint;
-
-    width: 18px;
-    height: 18px;
-    border-radius: 3px;
-    border-width: 1px;
-    border-color: root.tint;
-
-    Text {
-        text: root.slot + 1;
-        font-size: Theme.tiny-font-size;
-        color: root.tint;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    if root.clear : Path {
-        width: 100%;
-        height: 100%;
-        viewbox-width: 18;
-        viewbox-height: 18;
-        commands: "M 3 15 L 15 3";
-        stroke: root.tint;
-        stroke-width: 1.5px;
-    }
-}
-
 // A scene row. Clicking recalls it; dragging moves it in the list; right-click
-// offers loading, saving over, editing, duplicating and deleting it.
+// offers loading, saving over, renaming, duplicating and deleting it. A changed
+// one shows "changed", and while hovered, buttons to save or discard the
+// changes.
 component SceneItem inherits Rectangle {
     in property <SceneRow> entry;
     // Where a row being dragged here would land: 0 nowhere, 1 above this row,
@@ -45,6 +17,8 @@ component SceneItem inherits Rectangle {
     callback edit();
     callback duplicate();
     callback delete();
+    callback save-changes();
+    callback discard-changes();
     // While dragging, and on letting go: how many rows down (negative: up)
     // from this one the pointer is.
     callback drag(/* rows */ int);
@@ -57,9 +31,6 @@ component SceneItem inherits Rectangle {
         // Rows are spaced 5px apart in the list.
         return Math.round((area.mouse-y - area.pressed-y) / (root.height + 5px));
     }
-
-    // Shown on the current scene once a slot it includes changed since.
-    in property <bool> changed;
 
     height: Theme.control-height;
     border-radius: Theme.radius;
@@ -102,6 +73,32 @@ component SceneItem inherits Rectangle {
                 root.drag(root.rows-moved());
             }
         }
+
+        // Children of the touch area, so hovering them keeps the row hovered.
+        if root.entry.changed && self.has-hover && !root.dragging : HorizontalLayout {
+            x: parent.width - self.preferred-width - 4px;
+            width: self.preferred-width;
+            alignment: end;
+            spacing: 3px;
+            padding-top: 3px;
+            padding-bottom: 3px;
+            KButton {
+                width: 26px;
+                height: 26px;
+                icon: Icons.save;
+                icon-size: 18px;
+                tooltip: "Save changes";
+                clicked => { root.save-changes(); }
+            }
+            KButton {
+                width: 26px;
+                height: 26px;
+                icon: Icons.undo;
+                icon-size: 18px;
+                tooltip: "Discard changes";
+                clicked => { root.discard-changes(); }
+            }
+        }
     }
 
     // On top of the touch area, which would otherwise take the right-click;
@@ -117,7 +114,7 @@ component SceneItem inherits Rectangle {
                 activated => { root.overwrite(); }
             }
             MenuItem {
-                title: "Edit…";
+                title: "Rename…";
                 activated => { root.edit(); }
             }
             MenuItem {
@@ -135,7 +132,8 @@ component SceneItem inherits Rectangle {
 
     HorizontalLayout {
         padding-left: 7px;
-        padding-right: 6px;
+        // Clear of the hover buttons.
+        padding-right: root.entry.changed && area.has-hover && !root.dragging ? 62px : 6px;
         spacing: 3px;
         Text {
             text: root.entry.name;
@@ -145,22 +143,12 @@ component SceneItem inherits Rectangle {
             overflow: elide;
             horizontal-stretch: 1;
         }
-        if root.entry.current && root.changed : Text {
+        // The hover buttons take its place.
+        if root.entry.changed && !(area.has-hover && !root.dragging) : Text {
             text: "changed";
-            color: Theme.on-accent;
+            color: root.entry.current ? Theme.on-accent : Theme.text-faint;
             font-size: Theme.small-font-size;
             vertical-alignment: center;
-        }
-        // What recalling it does to each slot; nothing for slots it leaves alone.
-        for mode[slot] in root.entry.modes : VerticalLayout {
-            alignment: center;
-            // Empty for unchanged slots, and then mustn't take up the slack.
-            horizontal-stretch: 0;
-            if mode != 0 : SlotHint {
-                slot: slot;
-                clear: mode == 2;
-                tint: root.entry.current ? Theme.on-accent : Theme.text-faint;
-            }
         }
     }
 
@@ -171,79 +159,14 @@ component SceneItem inherits Rectangle {
     }
 }
 
-// One option of a `ModeSelect`.
-component ModeOption inherits Rectangle {
-    in property <string> text;
-    in property <bool> active;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    border-radius: Theme.radius;
-    background: root.active ? Theme.accent
-        : area.has-hover && root.enabled ? Theme.control-hover : transparent;
-
-    area := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
-    Text {
-        text: root.text;
-        font-size: Theme.small-font-size;
-        color: root.active ? Theme.on-accent : root.enabled ? Theme.text : Theme.text-faint;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// What recalling the scene does to one slot: restore, clear, or leave unchanged.
-component ModeSelect inherits VerticalLayout {
-    in property <int> slot;
-    in property <int> mode;
-    in property <bool> can-restore;
-
-    spacing: 2px;
-    Text {
-        text: "Slot \{root.slot + 1}";
-        color: Theme.text-muted;
-        font-size: Theme.small-font-size;
-    }
-    Rectangle {
-        height: 26px;
-        border-radius: Theme.radius;
-        border-width: 1px;
-        border-color: Theme.control-border;
-        background: Theme.control;
-        HorizontalLayout {
-            padding: 1px;
-            spacing: 1px;
-            ModeOption {
-                text: "Restore";
-                active: root.mode == 1;
-                enabled: root.can-restore;
-                clicked => { AppLogic.set-scene-slot-mode(root.slot, 1); }
-            }
-            ModeOption {
-                text: "Clear";
-                active: root.mode == 2;
-                clicked => { AppLogic.set-scene-slot-mode(root.slot, 2); }
-            }
-            ModeOption {
-                text: "Unchanged";
-                active: root.mode == 0;
-                clicked => { AppLogic.set-scene-slot-mode(root.slot, 0); }
-            }
-        }
-    }
-}
-
 // The Live tab's left pane: a search over the scenes, then the list — "+ New
-// scene" (saving the slots as a scene, with what it does to each slot), and the
-// scenes, each with what it does to which slot; the current one (greyed
-// "changed" once a slot it restores or clears changed since it was recalled or
-// saved) in the primary colour. Clicking a scene recalls it straight away;
-// right-clicking one offers saving over, editing and deleting it.
+// scene" (saving the slots as a scene), and the scenes; the current one in the
+// primary colour. A scene shows "changed" once a slot changed since it was
+// recalled or saved, and keeps its changes (as a draft) when another is
+// recalled. Clicking a scene recalls it straight away; right-clicking one
+// offers saving over, renaming and deleting it.
 export component ScenesPane inherits VerticalLayout {
-    // 0: browsing, 1: saving, 2: confirming a delete, 3: editing.
+    // 0: browsing, 1: saving, 2: confirming a delete, 3: renaming.
     property <int> mode: 0;
     // The row being dragged and the row it would land on; -1 when not dragging.
     property <int> drag-from: -1;
@@ -294,21 +217,16 @@ export component ScenesPane inherits VerticalLayout {
                 spacing: 6px;
                 name := TextField {
                     placeholder: "Scene name";
-                    // Saving over the current scene is the common case; editing
-                    // starts from the scene's own name.
+                    // Saving over the current scene is the common case;
+                    // renaming starts from the scene's own name.
                     text: AppState.scene-target-name;
                     init => { self.grab-focus(); }
                     accepted(text) => { root.submit(text); }
                 }
-                for choice[slot] in AppState.scene-form-slots : ModeSelect {
-                    slot: slot;
-                    mode: choice.mode;
-                    can-restore: choice.can-restore;
-                }
                 HorizontalLayout {
                     spacing: 4px;
                     KButton {
-                        text: root.mode == 1 ? "Save" : "Apply";
+                        text: root.mode == 1 ? "Save" : "Rename";
                         active: true;
                         horizontal-stretch: 1;
                         enabled: name.text != "";
@@ -369,13 +287,14 @@ export component ScenesPane inherits VerticalLayout {
                     padding-bottom: 5px;
                     SceneItem {
                         entry: row;
-                        changed: AppState.current-scene-changed;
                         dragged: index == root.drag-from;
                         drop-line: root.drag-from < 0 || index != root.drag-to || index == root.drag-from ? 0
                             : index < root.drag-from ? 1 : 2;
                         choose => { AppLogic.load-scene(index); }
                         overwrite => { AppLogic.overwrite-scene(index); }
                         duplicate => { AppLogic.duplicate-scene(index); }
+                        save-changes => { AppLogic.save-scene-changes(index); }
+                        discard-changes => { AppLogic.discard-scene-changes(index); }
                         edit => {
                             AppLogic.begin-scene-edit(index);
                             root.mode = 3;

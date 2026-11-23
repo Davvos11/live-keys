@@ -300,7 +300,8 @@ component SurfaceDrawing inherits Rectangle {
             if control.kind == 1 : SurfaceKnob { control: control; }
             if control.kind == 2 : SurfacePad { control: control; }
             if control.kind == 3 : SurfaceButton { control: control; }
-            // Clicking a control learns it (MIDI learn).
+            // Clicking a control starts MIDI learn with it selected; clicking
+            // the selected one again ends it.
             area := TouchArea {
                 mouse-cursor: pointer;
                 clicked => { AppLogic.learn-select(root.surface.device, index); }
@@ -425,11 +426,6 @@ export component SurfacesPanel inherits Rectangle {
         SurfaceDevices {
             width: 280px;
         }
-        KButton {
-            text: "MIDI learn";
-            active: AppState.learning;
-            clicked => { AppLogic.set-learning(!AppState.learning); }
-        }
         Rectangle { horizontal-stretch: 1; }
         KButton {
             icon: Icons.chevron-up;
@@ -464,15 +460,8 @@ export component SurfacesPanel inherits Rectangle {
                         clicked => { root.toggle(); }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
-                HorizontalLayout {
-                    KButton {
-                        text: "MIDI learn";
-                        active: AppState.learning;
-                        clicked => { AppLogic.set-learning(!AppState.learning); }
-                    }
-                }
                 SurfaceDevices { }
+                Rectangle { vertical-stretch: 1; }
             }
         }
         // The surfaces, side by side, scrolling sideways when they don't fit.

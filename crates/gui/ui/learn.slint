@@ -1,7 +1,7 @@
 // MIDI learn (Penpot: "MIDI learn 2" and "3"): the targets pane over the scenes
 // pane, a target's settings, and the outline over every on-screen control that
 // can be a target. See `docs/design/midi-learn.md`.
-import { CheckBox, ScrollView } from "std-widgets.slint";
+import { CheckBox, ScrollView, Switch } from "std-widgets.slint";
 import { AppState, AppLogic, LearnTargetRow } from "globals.slint";
 import { Theme, Icons, KButton, ListItem, Segmented } from "widgets.slint";
 import { RangeSlider, SingleSlider } from "range_slider.slint";
@@ -136,6 +136,24 @@ component TargetSettings inherits VerticalLayout {
             changed source => { self.checked = self.source; }
             toggled => { AppLogic.learn-set-velocity(root.row-index, self.checked); }
     }
+    // A control with feedback (a motor fader, a lit button): what it shows
+    // of the target, turned around — on for a mute, so a playing slot's
+    // button is lit.
+    if AppState.learn-control.feedback : HorizontalLayout {
+        spacing: 8px;
+        Caption {
+            text: "Invert light";
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Switch {
+            checked: root.target.invert-light;
+            // Clicking sets `checked` itself, replacing the binding above.
+            property <bool> source: root.target.invert-light;
+            changed source => { self.checked = self.source; }
+            toggled => { AppLogic.learn-set-invert-light(root.row-index, self.checked); }
+        }
+    }
     if root.target.panel >= 0 : Segmented {
         options: ["This parameter", "This panel position"];
         current: root.target.panel;
@@ -233,8 +251,32 @@ component TargetRow inherits Rectangle {
     }
 }
 
-// The pane over the scenes while learning: the selected control and its
-// targets.
+// The last row of the targets list for a button or pad: opens the actions
+// menu.
+component AddActionRow inherits Rectangle {
+    callback clicked();
+
+    height: 26px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: area.has-hover ? Theme.control-hover : Theme.control;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        Text {
+            text: "+ Action";
+            color: Theme.text-faint;
+            font-size: Theme.small-font-size;
+            vertical-alignment: center;
+        }
+    }
+}
+
 // What a button or pad can do beyond the controls on screen: a list to pick
 // one from (`AppState.learn-actions`), added as a press.
 component ActionsPopup inherits PopupWindow {
@@ -269,6 +311,8 @@ component ActionsPopup inherits PopupWindow {
     }
 }
 
+// The pane over the scenes while learning: the selected control and its
+// targets.
 export component LearnPane inherits Rectangle {
     background: Theme.background;
 
@@ -323,13 +367,8 @@ export component LearnPane inherits Rectangle {
                 }
             }
         }
-        // Faders and knobs: how they take over a target that's elsewhere.
-        if AppState.learn-control.selected && AppState.learn-control.feedback : Text {
-            text: "This control is sent its target's value, so it's always where its target is.";
-            color: Theme.text-muted;
-            font-size: Theme.small-font-size;
-            wrap: word-wrap;
-        }
+        // Faders and knobs: how they take over a target that's elsewhere (a
+        // control with feedback is always where its target is).
         if AppState.learn-control.selected && AppState.learn-control.kind <= 1 && !AppState.learn-control.feedback : VerticalLayout {
             spacing: 2px;
             Caption { text: "When the target is elsewhere"; }
@@ -340,7 +379,7 @@ export component LearnPane inherits Rectangle {
             }
         }
         if AppState.learn-control.selected : CheckBox {
-            text: "Also pass to the slots";
+            text: "Also send to instruments";
             checked: AppState.learn-control.pass-through;
             property <bool> source: AppState.learn-control.pass-through;
             changed source => { self.checked = self.source; }
@@ -364,6 +403,13 @@ export component LearnPane inherits Rectangle {
                     index: index;
                     expanded: index == AppState.learn-expanded;
                 }
+                // Buttons and pads: scenes, slots, presets, panic.
+                if AppState.learn-actions.length > 0 : AddActionRow {
+                    clicked => {
+                        AppLogic.learn-open-actions();
+                        actions-popup.show();
+                    }
+                }
             }
         }
         if !AppState.learn-control.selected : Rectangle { vertical-stretch: 1; }
@@ -375,14 +421,6 @@ export component LearnPane inherits Rectangle {
                 clicked => { AppLogic.learn-remove-all(); }
             }
             Rectangle { horizontal-stretch: 1; }
-            // Buttons and pads: scenes, slots, presets, panic.
-            if AppState.learn-actions.length > 0 : KButton {
-                text: "+ Action…";
-                clicked => {
-                    AppLogic.learn-open-actions();
-                    actions-popup.show();
-                }
-            }
         }
     }
 

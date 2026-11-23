@@ -17,7 +17,7 @@ use live_keys_engine::{
 };
 use live_keys_surfaces::{ControlKind, Message, Surface};
 use serde::{Deserialize, Serialize};
-use slint::{ModelRc, VecModel};
+use slint::{Model, ModelRc, VecModel};
 
 use crate::config::{self, AppConfig};
 use crate::profiles;
@@ -254,6 +254,10 @@ pub struct SceneMapping {
     pub target: PluginTarget,
     #[serde(flatten)]
     pub mode: MappingMode,
+    /// The control's light (feedback) turned around; `None`: the target's
+    /// default (off for a parameter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invert_light: Option<bool>,
 }
 
 /// A mapping kept in every scene (the config).
@@ -263,6 +267,18 @@ pub struct GlobalMapping {
     pub target: RackTarget,
     #[serde(flatten)]
     pub mode: MappingMode,
+    /// The control's light (feedback) turned around; `None`: the target's
+    /// default ([`RackTarget::inverts_light`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invert_light: Option<bool>,
+}
+
+impl RackTarget {
+    /// Whether a control's light shows this target turned around unless the
+    /// user says otherwise: a mute's, so a button is lit while its slot plays.
+    pub fn inverts_light(&self) -> bool {
+        matches!(self, RackTarget::Mute { .. })
+    }
 }
 
 /// How a fader or knob takes over a target that's elsewhere, as kept.
@@ -727,7 +743,7 @@ impl Selected {
 enum Popup {
     Assigned(Entry),
     /// Not assigned yet: its settings so far, kept with the scene or not.
-    Draft { candidate: Candidate, mode: MappingMode, keep: Keep },
+    Draft { candidate: Candidate, mode: MappingMode, keep: Keep, invert_light: Option<bool> },
 }
 
 /// The kinds of learn-mode targets, as the UI numbers them.
@@ -768,7 +784,7 @@ pub struct Installed {
 /// What a setup does: per mapped control (device, control, its settings),
 /// its targets and modes. A setup that does the same as the last isn't
 /// handed over again, so the mapping thread keeps its takeover state.
-type Signature = Vec<(String, usize, ControlSettings, Vec<(Concrete, MappingMode)>)>;
+type Signature = Vec<(String, usize, ControlSettings, Vec<(Concrete, MappingMode, bool)>)>;
 
 /// The current setup's targets, by `TargetId`.
 struct SetupTarget {
@@ -799,6 +815,9 @@ pub struct MappingsUi {
     /// The targets pane's rows, as entries.
     entries: RefCell<Vec<Entry>>,
     expanded: Cell<Option<usize>>,
+    /// A target just assigned to the selected control: its row is expanded
+    /// on the next refresh.
+    expand_next: Cell<Option<Entry>>,
     popup: RefCell<Option<Popup>>,
     generation: Cell<u64>,
     targets: RefCell<Vec<SetupTarget>>,
@@ -811,6 +830,8 @@ pub struct MappingsUi {
     pub view_dirty: Cell<bool>,
     /// `AppState.learn-rows`.
     pub rows: Rc<VecModel<LearnTargetRow>>,
+    /// The popup's levels (`AppState.learn-popup`'s), kept as one model.
+    popup_levels: Rc<VecModel<LearnLevel>>,
 }
 
 impl MappingsUi {
@@ -823,6 +844,7 @@ impl MappingsUi {
             selected: RefCell::default(),
             entries: RefCell::default(),
             expanded: Cell::new(None),
+            expand_next: Cell::new(None),
             popup: RefCell::default(),
             generation: Cell::new(0),
             targets: RefCell::default(),
@@ -831,6 +853,7 @@ impl MappingsUi {
             setup_dirty: Cell::new(true),
             view_dirty: Cell::new(true),
             rows: Rc::new(VecModel::default()),
+            popup_levels: Rc::new(VecModel::default()),
         }
     }
 
@@ -845,13 +868,19 @@ impl MappingsUi {
             return false;
         }
         let mapping =
-            GlobalMapping { control: selected.reference.clone(), target, mode: MappingMode::Momentary { value: 1.0, velocity: false } };
+            GlobalMapping {
+                control: selected.reference.clone(),
+                target,
+                mode: MappingMode::Momentary { value: 1.0, velocity: false },
+                invert_light: None,
+            };
         {
             let mut global = self.global.borrow_mut();
             if global.iter().any(|known| known.control == mapping.control && known.target == mapping.target) {
                 return false;
             }
             global.push(mapping);
+            self.expand_next.set(Some(Entry::Global { index: global.len() - 1 }));
         }
         self.setup_dirty.set(true);
         self.view_dirty.set(true);
@@ -980,7 +1009,7 @@ impl MappingsUi {
                 let reference = ControlRef { surface: surface.id.clone(), control: control.label.clone() };
                 let mut links = Vec::new();
                 let mut signed = Vec::new();
-                for (_, _, concrete, mode) in all.iter().filter(|(_, c, _, _)| *c == reference) {
+                for (entry, _, concrete, mode) in all.iter().filter(|(_, c, _, _)| *c == reference) {
                     let Some(concrete) = concrete else { continue };
                     let target = match by_concrete.get(concrete) {
                         Some(&target) => target,
@@ -998,8 +1027,9 @@ impl MappingsUi {
                     let (low, high) = engine_mode.reach();
                     let reach = &mut targets[target].reach;
                     *reach = (reach.0 + low, reach.1 + high);
-                    links.push(Link { target, mode: engine_mode });
-                    signed.push((concrete.clone(), mode.clone()));
+                    let invert_feedback = self.inverts_light(*entry);
+                    links.push(Link { target, mode: engine_mode, invert_feedback });
+                    signed.push((concrete.clone(), mode.clone(), invert_feedback));
                 }
                 if links.is_empty() {
                     continue;
@@ -1235,7 +1265,9 @@ impl MappingsUi {
                     .unwrap_or_default();
                 let mode = MappingMode::default_for_target(selected.kind(), &steps, kind);
                 let keep = if matches!(candidate, Candidate::Rack(_)) { Keep::Global } else { Keep::Scene };
-                self.add(ctx, &selected.reference, candidate, mode, keep)
+                let added = self.add(ctx, &selected.reference, candidate.clone(), mode, keep);
+                self.expand_next.set(self.entry_of(ctx, &candidate));
+                added
             }
         };
         self.setup_dirty.set(true);
@@ -1254,7 +1286,7 @@ impl MappingsUi {
         match candidate {
             Candidate::Plugin { key, target, .. } if keep == Keep::Scene => {
                 let slot = ctx.slot_of(key);
-                self.scene.borrow_mut().entry(key).or_default().push(SceneMapping { control: control.clone(), target, mode });
+                self.scene.borrow_mut().entry(key).or_default().push(SceneMapping { control: control.clone(), target, mode, invert_light: None });
                 (false, slot)
             }
             Candidate::Plugin { key, target, panel } => {
@@ -1266,11 +1298,11 @@ impl MappingsUi {
                         RackTarget::Plugin { slot, plugin: meta.id.clone(), target }
                     }
                 };
-                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target: rack_target, mode });
+                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target: rack_target, mode, invert_light: None });
                 (true, None)
             }
             Candidate::Rack(target) => {
-                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target, mode });
+                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target, mode, invert_light: None });
                 (true, None)
             }
         }
@@ -1311,7 +1343,12 @@ impl MappingsUi {
                     .map(|resolved| resolved.steps())
                     .unwrap_or_default();
                 let keep = if matches!(candidate, Candidate::Rack(_)) { Keep::Global } else { Keep::Scene };
-                Popup::Draft { candidate, mode: MappingMode::default_for_target(selected.kind(), &steps, kind), keep }
+                Popup::Draft {
+                    candidate,
+                    mode: MappingMode::default_for_target(selected.kind(), &steps, kind),
+                    keep,
+                    invert_light: None,
+                }
             }
         };
         *self.popup.borrow_mut() = Some(popup);
@@ -1321,12 +1358,74 @@ impl MappingsUi {
     /// Assigns the popup's draft.
     pub fn assign_popup(&self, ctx: &Ctx) -> (bool, Option<usize>) {
         let Some(selected) = self.selected.borrow().clone() else { return (false, None) };
-        let Some(Popup::Draft { candidate, mode, keep }) = self.popup.borrow().clone() else { return (false, None) };
+        let Some(Popup::Draft { candidate, mode, keep, invert_light }) = self.popup.borrow().clone() else {
+            return (false, None);
+        };
         let result = self.add(ctx, &selected.reference, candidate.clone(), mode, keep);
-        *self.popup.borrow_mut() = self.entry_of(ctx, &candidate).map(Popup::Assigned);
+        let entry = self.entry_of(ctx, &candidate);
+        if let Some(entry) = entry {
+            self.set_invert_light_of(entry, invert_light);
+        }
+        *self.popup.borrow_mut() = entry.map(Popup::Assigned);
+        self.expand_next.set(entry);
         self.setup_dirty.set(true);
         self.view_dirty.set(true);
         result
+    }
+
+    /// What `entry` keeps of "Invert light" (`None`: the target's default).
+    fn invert_light_of(&self, entry: Entry) -> Option<bool> {
+        match entry {
+            Entry::Scene { key, index } => self.scene.borrow().get(&key)?.get(index)?.invert_light,
+            Entry::Global { index } => self.global.borrow().get(index)?.invert_light,
+        }
+    }
+
+    fn set_invert_light_of(&self, entry: Entry, invert_light: Option<bool>) {
+        match entry {
+            Entry::Scene { key, index } => {
+                if let Some(mapping) = self.scene.borrow_mut().get_mut(&key).and_then(|m| m.get_mut(index)) {
+                    mapping.invert_light = invert_light;
+                }
+            }
+            Entry::Global { index } => {
+                if let Some(mapping) = self.global.borrow_mut().get_mut(index) {
+                    mapping.invert_light = invert_light;
+                }
+            }
+        }
+    }
+
+    /// Whether `entry`'s control shows its target turned around.
+    fn inverts_light(&self, entry: Entry) -> bool {
+        match entry {
+            Entry::Scene { key, index } => self.invert_light_of(Entry::Scene { key, index }).unwrap_or(false),
+            Entry::Global { index } => self
+                .global
+                .borrow()
+                .get(index)
+                .is_some_and(|mapping| mapping.invert_light.unwrap_or_else(|| mapping.target.inverts_light())),
+        }
+    }
+
+    /// Sets row `row`'s "Invert light" (-1: the popup's). Returns whether the
+    /// config changed, and the slot whose scene mappings did.
+    pub fn set_invert_light(&self, ctx: &Ctx, row: i32, on: bool) -> (bool, Option<usize>) {
+        if row < 0
+            && let Some(Popup::Draft { invert_light, .. }) = &mut *self.popup.borrow_mut()
+        {
+            *invert_light = Some(on);
+            self.view_dirty.set(true);
+            return (false, None);
+        }
+        let Some(entry) = self.row_entry(row) else { return (false, None) };
+        self.set_invert_light_of(entry, Some(on));
+        self.setup_dirty.set(true);
+        self.view_dirty.set(true);
+        match entry {
+            Entry::Scene { key, .. } => (false, ctx.slot_of(key)),
+            Entry::Global { .. } => (true, None),
+        }
     }
 
     /// Expands row `row` of the targets pane (or collapses it).
@@ -1495,12 +1594,16 @@ impl MappingsUi {
             return (false, None);
         }
         let candidate = Candidate::Plugin { key, target, panel: panel_position };
+        let invert_light = self.invert_light_of(entry);
         let (mut config_changed, mut slot) = self.remove(ctx, entry);
         let (added_config, added_slot) =
             self.add(ctx, &selected.reference, candidate.clone(), mode, Keep::of(global, panel));
         config_changed |= added_config;
         slot = slot.or(added_slot);
         let moved = self.entry_of(ctx, &candidate);
+        if let Some(moved) = moved {
+            self.set_invert_light_of(moved, invert_light);
+        }
         if row >= 0 {
             // The moved row stays expanded.
             let rows = self.rows_of(ctx, &selected.reference);
@@ -1597,9 +1700,24 @@ impl MappingsUi {
             entries.push(*entry);
             rows.push(self.row(ctx, *entry, concrete.as_ref(), mode));
         }
+        if let Some(assigned) = self.expand_next.take()
+            && let Some(row) = entries.iter().position(|entry| *entry == assigned)
+        {
+            self.expanded.set(Some(row));
+        }
         *self.entries.borrow_mut() = entries;
         if self.expanded.get().is_some_and(|row| row >= rows.len()) {
             self.expanded.set(None);
+        }
+        // A row's levels stay the model they were, refilled: a new model would
+        // rebuild the level sliders, ending a drag on one.
+        for (index, row) in rows.iter_mut().enumerate() {
+            if let Some(old) = self.rows.row_data(index)
+                && let Some(levels) = old.levels.as_any().downcast_ref::<VecModel<LearnLevel>>()
+            {
+                sync_model(levels, row.levels.iter().collect());
+                row.levels = old.levels.clone();
+            }
         }
         sync_model(&self.rows, rows);
         let popup = match self.popup.borrow().clone() {
@@ -1607,9 +1725,11 @@ impl MappingsUi {
                 .iter()
                 .find(|(e, ..)| *e == entry)
                 .map(|(entry, _, concrete, mode)| (self.row(ctx, *entry, concrete.as_ref(), mode), true)),
-            Some(Popup::Draft { candidate, mode, keep }) => {
+            Some(Popup::Draft { candidate, mode, keep, invert_light }) => {
                 let concrete = Self::candidate_concrete(ctx, &candidate);
                 let mut row = self.view_row(ctx, concrete.as_ref(), &mode);
+                row.invert_light = invert_light
+                    .unwrap_or_else(|| matches!(&candidate, Candidate::Rack(target) if target.inverts_light()));
                 row.kept = i32::from(keep != Keep::Scene);
                 row.can_keep_with_scene = matches!(candidate, Candidate::Plugin { .. });
                 row.panel = match candidate {
@@ -1621,11 +1741,17 @@ impl MappingsUi {
             }
             None => None,
         };
+        let popup = popup.map(|(mut row, assigned)| {
+            sync_model(&self.popup_levels, row.levels.iter().collect());
+            row.levels = ModelRc::from(self.popup_levels.clone());
+            (row, assigned)
+        });
         (popup, self.expanded.get().map_or(-1, |row| row as i32))
     }
 
     fn row(&self, ctx: &Ctx, entry: Entry, concrete: Option<&Concrete>, mode: &MappingMode) -> LearnTargetRow {
         let mut row = self.view_row(ctx, concrete, mode);
+        row.invert_light = self.inverts_light(entry);
         match entry {
             Entry::Scene { key, index } => {
                 row.kept = 0;
@@ -1828,6 +1954,7 @@ mod tests {
                 target: PluginTarget::Param { symbol: "brightness".into() },
             },
             mode: MappingMode::Mirrored { from: 0.2, to: 0.8 },
+            invert_light: Some(true),
         };
         let json = serde_json::to_string(&mapping).unwrap();
         assert_eq!(serde_json::from_str::<GlobalMapping>(&json).unwrap(), mapping);
@@ -1835,6 +1962,7 @@ mod tests {
             control: ControlRef { surface: "s".into(), control: "P1".into() },
             target: PluginTarget::Setbfree { function: "upper.drawbar16".into() },
             mode: MappingMode::Toggle { levels: vec![0.0, 0.5, 1.0] },
+            invert_light: None,
         };
         let json = serde_json::to_string(&scene).unwrap();
         assert_eq!(serde_json::from_str::<SceneMapping>(&json).unwrap(), scene);

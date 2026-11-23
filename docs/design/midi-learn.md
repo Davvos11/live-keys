@@ -70,8 +70,8 @@ Three parts:
   a modulated one: see "Values: base, modulation, effective".
 - **Mappings are applied off the GUI thread**, as immediately as possible: a mapping thread
   of its own, straight to the audio thread. See "How it runs".
-- **A mapped CC no longer reaches the slots** by default; per control, "also pass to the slots"
-  sends it to both.
+- **A mapped CC no longer reaches the slots** by default; per control, "also send to
+  instruments" sends it to both.
 - **Keeping hardware and targets in step** (takeover): feedback to the hardware where it can
   show values (motor faders, LED rings, lit buttons and pads), otherwise one of jump, glide
   (default for controls without feedback) or pick up — with the hardware's position shown as a
@@ -163,18 +163,19 @@ whole width, so a keyboard's surface fits beside the left column):
 
 ## MIDI learn mode (board 2)
 
-Entered from "MIDI learn", by clicking a surface control, or by the context menu of a slot
-control ("Learn MIDI…", which selects nothing until a hardware control moves). Left by
-Done, Escape, or clicking "Learning…" again.
+Entered by clicking a surface control in the panel (there's no "MIDI learn" button). Left by
+Done, Escape, or clicking the selected control again.
 
 - **Selecting a control**: click it in the panel, or **move it on the hardware** — the last
   control moved becomes the selected one (unless "Lock" — see open question 7). The selected
   control is outlined in the panel.
 - **The targets pane** covers the scenes pane: the control's label, kind, surface and message;
-  its takeover mode and an "Also pass to the slots" switch (off by default; see "How it runs");
+  its takeover mode and an "Also send to instruments" switch (off by default; see "How it runs");
   a hint; its targets as rows (target name, slot and plugin, and a chip with mode and range —
   "Mirrored 20–80 %", "Modulate ±20 %"); clicking a row expands it to its settings (as
-  board 3) — one expanded at a time; ✕ removes it. "Remove all targets" and "Done" at the
+  board 3) — one expanded at a time, and a target just assigned (clicked, the popup's
+  Assign, an action) opens expanded; ✕ removes it. For a button or pad, the list ends in a
+  compact "+ Action" row that opens the actions menu. "Remove all targets" and "Done" at the
   bottom. Without a selected control: "Move a control or click one below."
 - **Possible targets** are outlined (dashed, primary colour) wherever they're visible: every
   panel control (knobs, switches, levers, drawbars), each slot's volume knob and mute, the
@@ -307,7 +308,13 @@ either.
 own message with the value: a fader/knob's CC with the first target's position (encoders with
 LED rings take the same CC on most devices), a button's or pad's note/CC with on (127, or the
 surface's "lit" velocity — some pads choose a colour by it) when its first target is at a
-non-zero level, off otherwise; momentary buttons light while held. Values are sent only when
+non-zero level, off otherwise; momentary buttons light while held. Per link, **"Invert light"**
+(a switch in the target's settings, shown only for a control with feedback) turns that around:
+a position p is shown as 1 − p, lit as unlit. It's on by default for mute targets (a slot's or
+the master's), so a button is lit while its slot plays and dark while muted — the LX88+'s
+shipped mute mappings get it that way — and off for everything else; kept with the mapping
+(`invert_light` in `slot.json` or the config, left out while it's the target's default).
+Values are sent only when
 they change, at most every 10 ms per control, and not straight back to a control that just
 sent the same value (motor faders fight otherwise). On connecting a device and after loading
 a scene, every control with feedback is sent its value.
@@ -499,10 +506,10 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    pane, highlighting, click to assign, the right-click popup; the mapping thread, its audio
    ring and the claim table with pass-through; storage with the scene (`slot.json`) or in
    every scene (config); jump, glide and pick up with the ghost. Left for later: the
-   parameter window's rows as targets (so an effect's parameters can't be mapped yet), "Learn
-   MIDI…" in a slot control's context menu, scene and panic targets, selection lock. Learn
-   mode is entered from the panel's "MIDI learn" button or by clicking a surface control, and
-   left with Done or Escape; the popup of a target not mapped yet has "Assign to <control>"
+   parameter window's rows as targets (so an effect's parameters can't be mapped yet), scene
+   and panic targets, selection lock. Learn mode is entered by clicking a surface control
+   (the panel's "MIDI learn" button was dropped later), and left with Done, Escape or a click
+   on the selected control; the popup of a target not mapped yet has "Assign to <control>"
    (its settings so far apply), one mapped edits it live.
 3. **Done (2026-11-22).** The value layers: modulate and momentary modulate, the knob's
    modulation display, bases saved in `slot.json`. As built:
@@ -528,8 +535,7 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
      as its own message; pads and buttons are lit with `lit` (velocity or CC value, default
      127) and unlit with 0 / a note-off. Shipped: the LPD8's pads (checked on the hardware);
      the LX88+ has none yet (unknown which of its controls light up from outside).
-   - A control with feedback always jumps (the learn pane says so instead of offering
-     takeover). It's sent its first target's base along its range, a toggle's on/off, a
+   - A control with feedback always jumps (the learn pane doesn't offer takeover for it). It's sent its first target's base along its range, a toggle's on/off, a
      momentary button's held state; a modulating control shows nothing (it's where it was
      turned). Its own moves aren't sent back; an incoming value equal to what it was last
      sent is taken as its echo (a motor fader arriving) and ignored. Pads and buttons that

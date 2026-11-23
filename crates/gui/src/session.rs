@@ -1,5 +1,5 @@
 //! The session: the rack as it was when the app last saved it — every slot's
-//! chain with each plugin's settings, which slot preset and scene were current,
+//! chain with each plugin's settings, which scene was current,
 //! and which plugin windows were open — restored on startup. (Routing, volumes,
 //! devices and the rest live in the config, which is saved as they change.)
 //!
@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 use live_keys_engine::{ChainPosition, Engine, MASTER_SLOT, PluginKey};
 use serde::{Deserialize, Serialize};
 
-use crate::scenes::SlotPresetRef;
 use crate::slot_presets;
 
 const FILE_NAME: &str = "session.json";
@@ -34,8 +33,6 @@ pub struct SessionSlot {
     pub slot: usize,
     /// The slot's chain, as a slot preset in this subfolder.
     pub chain: String,
-    /// The library slot preset it showed.
-    pub slot_preset: Option<SlotPresetRef>,
     /// Plugins whose own GUI was open.
     pub open_guis: Vec<Position>,
     /// Plugins whose parameter window was open.
@@ -80,7 +77,6 @@ impl From<Position> for ChainPosition {
 
 /// What saving needs to know about one slot besides its chain.
 pub struct SlotToSave {
-    pub slot_preset: Option<SlotPresetRef>,
     pub open_guis: Vec<Position>,
     pub open_params: Vec<Position>,
 }
@@ -94,7 +90,7 @@ fn marker() -> Option<PathBuf> {
 }
 
 /// Saves every slot (`slots`, by slot index) and the current scene.
-/// `plugin_extras` is as for [`slot_presets::save`].
+/// `plugin_extras` is as for [`slot_presets::write`].
 pub fn save(
     engine: &mut Engine,
     slots: Vec<SlotToSave>,
@@ -118,7 +114,6 @@ pub fn save(
             session.slots.push(SessionSlot {
                 slot,
                 chain,
-                slot_preset: to_save.slot_preset,
                 open_guis: to_save.open_guis,
                 open_params: to_save.open_params,
             });

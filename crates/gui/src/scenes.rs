@@ -1,14 +1,19 @@
 //! Scenes: what happens to each slot when a scene is recalled — restored to a
 //! saved setup (its whole chain with every plugin's settings, its MIDI routing
-//! and its volume), cleared, or left unchanged — under a name.
+//! and its volume), cleared, or left unchanged — under a name. Saving one
+//! restores the slots with an instrument and clears the others (leaving a slot
+//! unchanged isn't offered any more, but the format keeps it).
 //!
 //! Each scene is a folder `<root>/<name>/` holding `scene.json` and, per slot
 //! saved as restored, a subfolder `slot-<n>/` that is a complete slot preset
-//! (see `slot_presets`) — a snapshot, independent of the slot presets in the
-//! library. A slot keeps its saved setup when it's later set to clear or leave
-//! unchanged, so it can be set back to restore; one saved without a setup can't.
+//! (see `slot_presets`) — a snapshot of the chain.
 //! The list's order (the user's, by dragging) is `<root>/order.json`: folder
 //! names, first to last; scenes missing from it come after, by name.
+//!
+//! A scene left with unsaved changes (another one recalled while it showed
+//! "changed") keeps them as its **draft**: a folder of the same name and
+//! layout in `<data dir>/live-keys/scene-drafts/`, recalled instead of the
+//! scene until it's saved over the scene or discarded.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,25 +38,6 @@ pub enum SlotMode {
     Clear,
 }
 
-impl SlotMode {
-    /// As the UI numbers them: 0 leave unchanged, 1 restore, 2 clear.
-    pub fn index(self) -> i32 {
-        match self {
-            SlotMode::Leave => 0,
-            SlotMode::Restore => 1,
-            SlotMode::Clear => 2,
-        }
-    }
-
-    pub fn from_index(index: i32) -> Self {
-        match index {
-            1 => SlotMode::Restore,
-            2 => SlotMode::Clear,
-            _ => SlotMode::Leave,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
     pub name: String,
@@ -66,11 +52,6 @@ impl Scene {
 
     pub fn mode(&self, slot: usize) -> SlotMode {
         self.slot(slot).map_or(SlotMode::Leave, |scene_slot| scene_slot.mode)
-    }
-
-    /// Whether slot `slot` has a saved setup to restore.
-    pub fn can_restore(&self, slot: usize) -> bool {
-        self.slot(slot).is_some_and(|scene_slot| scene_slot.saved.is_some())
     }
 
     /// The slots recalling it changes (restores or clears).
@@ -98,16 +79,6 @@ pub struct SavedSlot {
     pub routing: SlotRouting,
     /// The slot's chain, as a slot preset in this subfolder of the scene.
     pub chain: String,
-    /// The library slot preset the slot showed when saved, so it shows again.
-    pub slot_preset: Option<SlotPresetRef>,
-}
-
-/// A library slot preset, as a slot's current one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlotPresetRef {
-    pub dir: PathBuf,
-    pub name: String,
-    pub changed: bool,
 }
 
 /// What saving needs to know about one slot.
@@ -115,7 +86,6 @@ pub struct SlotToSave {
     pub slot: usize,
     pub mode: SlotMode,
     pub routing: SlotRouting,
-    pub slot_preset: Option<SlotPresetRef>,
 }
 
 /// A scene on disk.
@@ -136,6 +106,16 @@ impl Stored {
 /// Where scenes live: `~/.local/share/live-keys/scenes` on Linux.
 fn root() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join("live-keys").join("scenes"))
+}
+
+/// Where scenes' drafts live: `~/.local/share/live-keys/scene-drafts`.
+fn drafts_root() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("live-keys").join("scene-drafts"))
+}
+
+/// The draft folder of the scene in `dir`.
+fn draft_dir(dir: &Path) -> Option<PathBuf> {
+    Some(drafts_root()?.join(dir.file_name()?))
 }
 
 fn folder_name(dir: &Path) -> String {
@@ -185,10 +165,7 @@ pub fn list() -> Vec<Stored> {
         if !file.is_file() {
             continue;
         }
-        let read = fs::read_to_string(&file)
-            .map_err(anyhow::Error::from)
-            .and_then(|text| Ok(serde_json::from_str::<Scene>(&text)?));
-        match read {
+        match read(&dir) {
             Ok(scene) => found.push(Stored { dir, scene }),
             Err(err) => log::warn!("skipping scene {}: {err:#}", file.display()),
         }
@@ -201,58 +178,20 @@ pub fn list() -> Vec<Stored> {
     found
 }
 
-/// Saves `slots` as scene `name`, replacing one of the same name; slots set to
-/// restore have their setup saved. Other slots keep the setup they have in
-/// `previous` (the scene being overwritten, if any), so they can still be set
-/// back to restore. `plugin_extras` is as for [`slot_presets::save`].
+/// Saves `slots` as scene `name`, replacing one of the same name (and its
+/// draft); slots set to restore have their setup saved. `plugin_extras` is as
+/// for [`slot_presets::write`].
 pub fn save(
     engine: &mut Engine,
     name: &str,
     slots: &[SlotToSave],
-    previous: Option<&Stored>,
     plugin_extras: impl Fn(PluginKey) -> slot_presets::PluginExtras,
 ) -> Result<Stored> {
-    anyhow::ensure!(
-        slots.iter().any(|to_save| to_save.mode != SlotMode::Leave),
-        "every slot is set to leave unchanged"
-    );
     let root = root().context("no data folder to save scenes in")?;
     fs::create_dir_all(&root)?;
     let dir = root.join(slot_presets::file_name(name));
-    let scene = slot_presets::replace_dir(&dir, |temp| {
-        let mut scene = Scene {
-            name: name.to_string(),
-            slots: Vec::new(),
-        };
-        for to_save in slots {
-            let saved = if to_save.mode == SlotMode::Restore {
-                let chain = format!("slot-{}", to_save.slot + 1);
-                let chain_dir = temp.join(&chain);
-                fs::create_dir(&chain_dir)?;
-                slot_presets::write(engine, to_save.slot, name, &chain_dir, &plugin_extras)
-                    .with_context(|| format!("slot {}", to_save.slot + 1))?;
-                Some(SavedSlot {
-                    routing: to_save.routing,
-                    chain,
-                    slot_preset: to_save.slot_preset.clone(),
-                })
-            } else if let Some(previous) = previous
-                && let Some(saved) = previous.scene.slot(to_save.slot).and_then(|slot| slot.saved.clone())
-            {
-                copy_dir(&previous.dir.join(&saved.chain), &temp.join(&saved.chain))?;
-                Some(saved)
-            } else {
-                None
-            };
-            scene.slots.push(SceneSlot {
-                slot: to_save.slot,
-                mode: to_save.mode,
-                saved,
-            });
-        }
-        write(temp, &scene)?;
-        Ok(scene)
-    })?;
+    let scene = slot_presets::replace_dir(&dir, |temp| fill(engine, temp, name, slots, &plugin_extras))?;
+    discard_draft(&dir)?;
     let name = folder_name(&dir);
     change_order(|order| {
         if !order.contains(&name) {
@@ -260,6 +199,102 @@ pub fn save(
         }
     })?;
     Ok(Stored { dir, scene })
+}
+
+/// Saves `slots` as `stored`'s draft, replacing any it had.
+pub fn save_draft(
+    engine: &mut Engine,
+    stored: &Stored,
+    slots: &[SlotToSave],
+    plugin_extras: impl Fn(PluginKey) -> slot_presets::PluginExtras,
+) -> Result<()> {
+    let dir = draft_dir(&stored.dir).context("no data folder to keep the scene's changes in")?;
+    fs::create_dir_all(dir.parent().context("no parent folder")?)?;
+    slot_presets::replace_dir(&dir, |temp| fill(engine, temp, &stored.scene.name, slots, &plugin_extras))?;
+    Ok(())
+}
+
+/// Writes `slots` into the empty folder `dir` as scene `name`.
+fn fill(
+    engine: &mut Engine,
+    dir: &Path,
+    name: &str,
+    slots: &[SlotToSave],
+    plugin_extras: &impl Fn(PluginKey) -> slot_presets::PluginExtras,
+) -> Result<Scene> {
+    anyhow::ensure!(
+        slots.iter().any(|to_save| to_save.mode != SlotMode::Leave),
+        "every slot is set to leave unchanged"
+    );
+    let mut scene = Scene {
+        name: name.to_string(),
+        slots: Vec::new(),
+    };
+    for to_save in slots {
+        let saved = if to_save.mode == SlotMode::Restore {
+            let chain = format!("slot-{}", to_save.slot + 1);
+            let chain_dir = dir.join(&chain);
+            fs::create_dir(&chain_dir)?;
+            slot_presets::write(engine, to_save.slot, name, &chain_dir, plugin_extras)
+                .with_context(|| format!("slot {}", to_save.slot + 1))?;
+            Some(SavedSlot {
+                routing: to_save.routing,
+                chain,
+            })
+        } else {
+            None
+        };
+        scene.slots.push(SceneSlot {
+            slot: to_save.slot,
+            mode: to_save.mode,
+            saved,
+        });
+    }
+    write(dir, &scene)?;
+    Ok(scene)
+}
+
+/// Whether the scene in `dir` has a draft.
+pub fn has_draft(dir: &Path) -> bool {
+    draft_dir(dir).is_some_and(|draft| draft.join(FILE_NAME).is_file())
+}
+
+/// `stored`'s draft, if it has one (as a scene in the draft's folder).
+pub fn draft(stored: &Stored) -> Option<Result<Stored>> {
+    let dir = draft_dir(&stored.dir)?;
+    if !dir.join(FILE_NAME).is_file() {
+        return None;
+    }
+    Some(read(&dir).map(|scene| Stored { dir, scene }))
+}
+
+/// Drops the draft of the scene in `dir`, if it has one.
+pub fn discard_draft(dir: &Path) -> Result<()> {
+    if let Some(draft) = draft_dir(dir)
+        && draft.exists()
+    {
+        fs::remove_dir_all(draft)?;
+    }
+    Ok(())
+}
+
+/// Saves `stored`'s draft over it, and drops the draft.
+pub fn apply_draft(stored: &Stored) -> Result<Stored> {
+    let draft = draft_dir(&stored.dir).filter(|draft| draft.join(FILE_NAME).is_file()).context("no changes to save")?;
+    let scene = slot_presets::replace_dir(&stored.dir, |temp| {
+        copy_dir(&draft, temp)?;
+        let mut scene = read(temp)?;
+        scene.name.clone_from(&stored.scene.name);
+        write(temp, &scene)?;
+        Ok(scene)
+    })?;
+    fs::remove_dir_all(&draft)?;
+    Ok(Stored { dir: stored.dir.clone(), scene })
+}
+
+fn read(dir: &Path) -> Result<Scene> {
+    let text = fs::read_to_string(dir.join(FILE_NAME))?;
+    Ok(serde_json::from_str(&text)?)
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {
@@ -276,35 +311,23 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Renames `stored` to `name` and sets its slots' modes (by slot index; a slot
-/// without a saved setup can't be set to restore). Refuses a name another scene
+/// Renames `stored` to `name` (its draft too). Refuses a name another scene
 /// already has.
-pub fn update(stored: &Stored, name: &str, modes: &[SlotMode]) -> Result<Stored> {
+pub fn rename(stored: &Stored, name: &str) -> Result<Stored> {
     let mut scene = stored.scene.clone();
     scene.name = name.to_string();
-    for (slot, &mode) in modes.iter().enumerate() {
-        anyhow::ensure!(
-            mode != SlotMode::Restore || scene.can_restore(slot),
-            "slot {} has nothing saved to restore",
-            slot + 1
-        );
-        match scene.slots.iter_mut().find(|scene_slot| scene_slot.slot == slot) {
-            Some(scene_slot) => scene_slot.mode = mode,
-            None => scene.slots.push(SceneSlot {
-                slot,
-                mode,
-                saved: None,
-            }),
-        }
-    }
-    anyhow::ensure!(
-        !scene.affected_slots().is_empty(),
-        "every slot is set to leave unchanged"
-    );
     let dir = stored.dir.with_file_name(slot_presets::file_name(name));
     if dir != stored.dir {
         anyhow::ensure!(!dir.exists(), "there's already a scene called \"{name}\"");
         fs::rename(&stored.dir, &dir)?;
+        if let (Some(old_draft), Some(new_draft)) = (draft_dir(&stored.dir), draft_dir(&dir))
+            && old_draft.exists()
+        {
+            if new_draft.exists() {
+                fs::remove_dir_all(&new_draft)?;
+            }
+            fs::rename(&old_draft, &new_draft)?;
+        }
         let (old_name, new_name) = (folder_name(&stored.dir), folder_name(&dir));
         change_order(|order| {
             for name in order.iter_mut().filter(|name| **name == old_name) {
@@ -322,7 +345,7 @@ fn write(dir: &Path, scene: &Scene) -> Result<()> {
 }
 
 /// Copies `stored` as a new scene named "<name> copy" (or "copy 2", …, if
-/// that's taken), placed right after it in the list.
+/// that's taken), placed right after it in the list. Its draft isn't copied.
 pub fn duplicate(stored: &Stored) -> Result<Stored> {
     let root = root().context("no data folder")?;
     let (name, dir) = (1..)
@@ -353,7 +376,7 @@ pub fn duplicate(stored: &Stored) -> Result<Stored> {
     Ok(Stored { dir, scene })
 }
 
-/// Deletes the scene in `dir`.
+/// Deletes the scene in `dir`, and its draft.
 pub fn delete(dir: &Path) -> Result<()> {
     let root = root().context("no data folder")?;
     anyhow::ensure!(
@@ -362,6 +385,7 @@ pub fn delete(dir: &Path) -> Result<()> {
         dir.display()
     );
     fs::remove_dir_all(dir)?;
+    discard_draft(dir)?;
     let name = folder_name(dir);
     change_order(|order| order.retain(|other| *other != name))
 }

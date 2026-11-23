@@ -2,7 +2,7 @@
 // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall
 // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.
 
-import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } from "types.slint";
 
 export global MockData {
     out property <[string]> audio-devices: [
@@ -98,57 +98,16 @@ export global MockData {
         {
             name: "Piano + Hammond",
             current: false,
-            modes: [
-                1,
-                1,
-                0,
-                0,
-                0,
-                0,
-            ],
+            changed: false,
         },
         {
             name: "E-Piano",
             current: false,
-            modes: [
-                1,
-                2,
-                2,
-                0,
-                0,
-                0,
-            ],
+            changed: false,
         },
     ];
     out property <int> scene-count: 2;
     out property <string> current-scene: "";
-    out property <bool> current-scene-changed: false;
-    out property <[SceneSlotChoice]> scene-form-slots: [
-        {
-            mode: 0,
-            can-restore: false,
-        },
-        {
-            mode: 0,
-            can-restore: false,
-        },
-        {
-            mode: 0,
-            can-restore: false,
-        },
-        {
-            mode: 0,
-            can-restore: false,
-        },
-        {
-            mode: 0,
-            can-restore: false,
-        },
-        {
-            mode: 0,
-            can-restore: false,
-        },
-    ];
     out property <string> scene-status: "";
     out property <string> scene-target-name: "";
     out property <[string]> default-plugin-folders: [
@@ -1221,17 +1180,6 @@ export global MockData {
             velocity-low: 1,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "OT P1ANO S",
-            slot-preset-rows: [
-                {
-                    name: "Dynamic C",
-                    folder: false,
-                    count: 0,
-                    current: false,
-                },
-            ],
         },
         {
             artwork: 3,
@@ -1448,17 +1396,6 @@ export global MockData {
             velocity-low: 70,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "setBfree DSP Tonewheel Organ",
-            slot-preset-rows: [
-                {
-                    name: "Init",
-                    folder: false,
-                    count: 0,
-                    current: false,
-                },
-            ],
         },
         {
             artwork: 4,
@@ -1603,10 +1540,6 @@ export global MockData {
             velocity-low: 1,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "Surge XT",
-            slot-preset-rows: [],
         },
         {
             artwork: 4,
@@ -1761,10 +1694,6 @@ export global MockData {
             velocity-low: 1,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "Vital",
-            slot-preset-rows: [],
         },
         {
             artwork: 0,
@@ -1797,35 +1726,6 @@ export global MockData {
             velocity-low: 1,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "",
-            slot-preset-rows: [
-                {
-                    name: "MDA ePiano",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "OT P1ANO S",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "setBfree DSP Tonewheel Organ",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "Surge XT",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-            ],
         },
         {
             artwork: 0,
@@ -1858,35 +1758,6 @@ export global MockData {
             velocity-low: 1,
             velocity-high: 127,
             volume-db: 0,
-            slot-preset-name: "",
-            slot-preset-changed: false,
-            slot-preset-folder: "",
-            slot-preset-rows: [
-                {
-                    name: "MDA ePiano",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "OT P1ANO S",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "setBfree DSP Tonewheel Organ",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-                {
-                    name: "Surge XT",
-                    folder: true,
-                    count: 1,
-                    current: false,
-                },
-            ],
         },
     ];
     out property <int> preset-browser-key: -1;

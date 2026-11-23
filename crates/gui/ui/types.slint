@@ -78,16 +78,6 @@ export struct EffectRow {
     preset-changed: bool,
 }
 
-// One row of a slot's slot-preset browser: an instrument's folder, or a preset.
-export struct SlotPresetRow {
-    name: string,
-    folder: bool,
-    // A folder's number of presets.
-    count: int,
-    // The slot's current preset.
-    current: bool,
-}
-
 // A MIDI device as offered for one MIDI input.
 export struct MidiDeviceRow {
     name: string,
@@ -110,16 +100,9 @@ export struct SceneRow {
     name: string,
     // The scene last recalled or saved.
     current: bool,
-    // Per slot, what recalling it does: 0 leave unchanged, 1 restore, 2 clear.
-    modes: [int],
-}
-
-// One slot in the scene save/edit form.
-export struct SceneSlotChoice {
-    // As in `SceneRow.modes`.
-    mode: int,
-    // Whether there's (or, when saving, will be) a setup to restore.
-    can-restore: bool,
+    // Changed since it was saved: the current scene once a slot changed, or
+    // another scene left with unsaved changes (a draft).
+    changed: bool,
 }
 
 // One cell of the row on a slot's first tab: a control of the instrument's
@@ -218,14 +201,6 @@ export struct SlotState {
     volume-learn: int,
     mute-learn: int,
     transpose-learn: int,
-    // The slot preset last loaded or saved; empty if none.
-    slot-preset-name: string,
-    // Whether the chain or a parameter changed since.
-    slot-preset-changed: bool,
-    // The instrument folder the slot-preset browser shows; empty when it lists
-    // the folders.
-    slot-preset-folder: string,
-    slot-preset-rows: [SlotPresetRow],
 }
 
 // One control of a control surface, as drawn in the bottom panel.
@@ -314,6 +289,9 @@ export struct LearnTargetRow {
     value: float,
     value-text: string,
     velocity: bool,
+    // A control with feedback shows the target turned around (on for mutes
+    // unless changed).
+    invert-light: bool,
     kept: int,
     can-keep-with-scene: bool,
     panel: int,

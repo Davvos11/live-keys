@@ -16,9 +16,17 @@ export component Icon inherits Image {
 export component KButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
+    in property <length> icon-size: 24px;
     in property <bool> active;
     in property <bool> enabled: true;
+    // Shown on hovering a while, and the button's accessible name when it has
+    // no text: an icon-only button's description.
+    in property <string> tooltip;
     callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.text != "" ? root.text : root.tooltip;
+    accessible-action-default => { root.clicked(); }
 
     property <brush> foreground: root.active ? Theme.on-accent : Theme.text-muted;
     property <bool> has-icon: root.icon.width > 0;
@@ -47,6 +55,8 @@ export component KButton inherits Rectangle {
         if root.has-icon : VerticalLayout {
             alignment: center;
             Icon {
+                width: root.icon-size;
+                height: root.icon-size;
                 source: root.icon;
                 tint: root.foreground;
             }
@@ -57,6 +67,9 @@ export component KButton inherits Rectangle {
             font-size: Theme.font-size;
             vertical-alignment: center;
         }
+    }
+    if root.tooltip != "" : Tooltip {
+        text: @markdown("\{root.tooltip}");
     }
 }
 

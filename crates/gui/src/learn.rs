@@ -406,7 +406,12 @@ impl Learn {
         });
         let learn = self.clone();
         logic.on_learn_select(move |device, control| {
-            if let Some(surface) = learn.surfaces.surface_of(&device) {
+            let mappings = &learn.rack.mappings;
+            // Clicking the selected control again ends learning.
+            if mappings.learning() && mappings.selected() == Some((device.to_string(), control as usize)) {
+                mappings.set_learning(false);
+                learn.refresh_view();
+            } else if let Some(surface) = learn.surfaces.surface_of(&device) {
                 learn.rack.mappings.select(&device, control as usize, surface);
                 learn.refresh_view();
             }
@@ -548,6 +553,12 @@ impl Learn {
                     _ => {}
                 }
             });
+        });
+        let learn = self.clone();
+        logic.on_learn_set_invert_light(move |row, on| {
+            let changed = learn.with_ctx(|ctx| learn.rack.mappings.set_invert_light(ctx, row, on));
+            learn.changed(changed);
+            learn.refresh_view();
         });
         let learn = self.clone();
         logic.on_learn_set_velocity(move |row, on| {

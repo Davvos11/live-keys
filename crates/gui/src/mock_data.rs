@@ -11,7 +11,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
     AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
-    SceneRow, SceneSlotChoice, SlotPresetRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel,
+    SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel,
     LearnTargetRow,
 };
 
@@ -117,7 +117,6 @@ slint_struct!(PresetRow { name, user, pinned, after_pinned, current });
 slint_struct!(EffectRow {
     key, name, gui_supported, gui_open, params_open, graph, preset_name, preset_user, preset_changed,
 });
-slint_struct!(SlotPresetRow { name, folder, count, current });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
@@ -126,12 +125,11 @@ slint_struct!(SurfaceControlView {
 slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback });
 slint_struct!(LearnLevel { position, text });
 slint_struct!(LearnTargetRow {
-    name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, kept,
+    name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, invert_light, kept,
     can_keep_with_scene, panel,
 });
 slint_struct!(SurfaceView { name, device, known, connected, width, height, controls, pages, page, variant, driver, driver_on });
-slint_struct!(SceneRow { name, current, modes });
-slint_struct!(SceneSlotChoice { mode, can_restore });
+slint_struct!(SceneRow { name, current, changed });
 slint_struct!(PanelCell {
     widget, label, text, position, default_position, steps, on, choices, index, default_index, value_text, modulated,
     mod_low, mod_high, mod_value,
@@ -141,7 +139,7 @@ slint_struct!(PanelPoolRow { index, name, cell });
 slint_struct!(SlotState {
     artwork, muted, transpose, closed_name, drawbars, cells, pool, instrument, status, midi_effects, audio_effects, midi_inputs, midi_channel, note_low,
     note_high, velocity_low, velocity_high, volume_db, cell_learn, drawbar_learn, volume_learn, mute_learn,
-    transpose_learn, slot_preset_name, slot_preset_changed, slot_preset_folder, slot_preset_rows,
+    transpose_learn,
 });
 
 /// One `out property` of the `MockData` global.
@@ -159,8 +157,8 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
         "// Generated from a running session by `LIVE_KEYS_MOCK_DATA=1 cargo run -p live-keys-gui`\n\
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
-         import { PickerRow, ParamRow, PresetRow, SlotPresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SceneSlotChoice, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } \
+         import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
+         SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } \
          from \"types.slint\";\n\n\
          export global MockData {\n",
     );
@@ -177,8 +175,6 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "[SceneRow]", "scene-rows", &state.get_scene_rows());
     property(&mut out, "int", "scene-count", &state.get_scene_count());
     property(&mut out, "string", "current-scene", &state.get_current_scene());
-    property(&mut out, "bool", "current-scene-changed", &state.get_current_scene_changed());
-    property(&mut out, "[SceneSlotChoice]", "scene-form-slots", &state.get_scene_form_slots());
     property(&mut out, "string", "scene-status", &state.get_scene_status());
     property(&mut out, "string", "scene-target-name", &state.get_scene_target_name());
     property(&mut out, "[string]", "default-plugin-folders", &settings.get_default_plugin_folders());

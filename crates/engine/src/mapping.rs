@@ -78,6 +78,10 @@ impl Mode {
 pub struct Link {
     pub target: TargetId,
     pub mode: Mode,
+    /// What a control with feedback shows of it is turned around: a
+    /// position p as 1 − p, lit as dark (a mute button lit while the slot
+    /// plays).
+    pub invert_feedback: bool,
 }
 
 /// One surface control and its targets.
@@ -400,13 +404,18 @@ impl Mappings {
         }
         let link = control.setup.links.first()?;
         let base = self.targets[link.target].base;
-        match link.mode {
+        let shown = match link.mode {
             Mode::Range { from, to } => (to != from).then(|| Shown::Position(((base - from) / (to - from)).clamp(0.0, 1.0))),
             Mode::Toggle { .. } => Some(Shown::Lit(base > 1e-3)),
             Mode::Momentary { .. } | Mode::MomentaryModulate { .. } => Some(Shown::Lit(control.pressed)),
             // It's wherever it was turned to.
             Mode::Modulate { .. } => None,
-        }
+        }?;
+        Some(match shown {
+            _ if !link.invert_feedback => shown,
+            Shown::Position(position) => Shown::Position(1.0 - position),
+            Shown::Lit(lit) => Shown::Lit(!lit),
+        })
     }
 
     /// Sends control `index` its value if that changed. `own`: after its own
@@ -701,7 +710,7 @@ mod tests {
             pass_through: false,
             release_to_zero: true,
             feedback: false,
-            links: vec![Link { target: 0, mode }],
+            links: vec![Link { target: 0, mode, invert_feedback: false }],
         }
     }
 

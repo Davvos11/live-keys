@@ -241,8 +241,6 @@ pub struct Closed {
     /// The chain, saved as a slot preset.
     pub dir: PathBuf,
     pub routing: config::SlotRouting,
-    /// The library slot preset it showed, and whether it had changed since.
-    pub slot_preset: Option<(PathBuf, String, bool)>,
 }
 
 /// Saves `slot`'s chain where [`Closed`] keeps it, before the slot is cleared.

@@ -5,7 +5,6 @@ import { Knob } from "knob.slint";
 import { DrawbarSection, PanelControls, ParamSearchPopup } from "panel.slint";
 import { RangeSlider } from "range_slider.slint";
 import { PresetPopup } from "preset_bar.slint";
-import { SlotPresets } from "slot_presets.slint";
 import { LearnTarget } from "learn.slint";
 
 // A popup's frame: the background, an outline and a shadow.
@@ -399,10 +398,9 @@ component RowLabel inherits Text {
 
 // One Live-tab slot, after the design: a header (the instrument's photo and
 // name, its plugin window, mute and clear buttons, the volume knob and its
-// presets), then three tabs — the instrument's first parameters and the audio
-// effects, the slot presets, and its MIDI (MIDI effects and routing). A slot
-// with nothing in it is a big + that picks an instrument; one just cleared
-// offers Undo.
+// presets), then two tabs — the instrument's first parameters and the audio
+// effects, and its MIDI (MIDI effects and routing). A slot with nothing in it
+// is a big + that picks an instrument; one just cleared offers Undo.
 export component SlotPanel inherits Rectangle {
     in property <int> slot-index;
     in property <SlotState> slot;
@@ -476,7 +474,7 @@ export component SlotPanel inherits Rectangle {
         }
     }
 
-    // Empty: a + that picks an instrument, or load a slot preset.
+    // Empty: a + that picks an instrument.
     if root.slot.closed-name == "" && root.is-empty : Rectangle {
         add-area := TouchArea {
             mouse-cursor: pointer;
@@ -490,12 +488,6 @@ export component SlotPanel inherits Rectangle {
             commands: "M 45 0 L 45 90 M 0 45 L 90 45";
             stroke: add-area.has-hover ? Theme.text-faint : Theme.control-border;
             stroke-width: 1.5px;
-        }
-        KButton {
-            y: parent.height - self.height - 12px;
-            width: self.preferred-width;
-            text: "Slot presets…";
-            clicked => { empty-presets.show(); }
         }
     }
 
@@ -516,9 +508,13 @@ export component SlotPanel inherits Rectangle {
                 property <color> tint: Artwork.tints[root.slot.artwork];
                 background: @linear-gradient(90deg, self.tint 0%, self.tint.transparentize(0.2) 50%, self.tint.transparentize(1) 100%);
             }
+            // Squeezed, the room it gives up comes from above the preset
+            // dropdown (the top padding, the gaps, the name row), so the
+            // dropdown keeps its margin below.
             VerticalLayout {
                 padding: 5px;
-                spacing: 2px;
+                padding-top: 5px - 4px * root.squeeze;
+                spacing: 2px - 2px * root.squeeze;
                 HorizontalLayout {
                     alignment: end;
                     spacing: 4px;
@@ -559,6 +555,7 @@ export component SlotPanel inherits Rectangle {
                 }
                 Rectangle { vertical-stretch: 1; }
                 HorizontalLayout {
+                    height: 48px - 8px * root.squeeze;
                     spacing: 6px;
                     Rectangle {
                         horizontal-stretch: 1;
@@ -591,8 +588,8 @@ export component SlotPanel inherits Rectangle {
                         }
                     }
                     Rectangle {
-                        width: 48px;
-                        height: 48px;
+                        width: 48px - 8px * root.squeeze;
+                        height: self.width;
                         volume := Knob {
                             width: 100%;
                             height: 100%;
@@ -629,7 +626,7 @@ export component SlotPanel inherits Rectangle {
         }
 
         TabBar {
-            icons: [Icons.gauge, Icons.layers, Icons.keyboard];
+            icons: [Icons.gauge, Icons.keyboard];
             current <=> root.tab;
         }
 
@@ -698,14 +695,9 @@ export component SlotPanel inherits Rectangle {
                         add => { root.choose-plugin(Category.audio-effect); }
                     }
 
-                    if root.tab == 1 : SlotPresets {
-                        slot-index: root.slot-index;
-                        slot: root.slot;
-                    }
-
                     // MIDI: its effects and which MIDI the slot takes.
-                    if root.tab == 2 : RowLabel { text: "MIDI effects"; }
-                    if root.tab == 2 : FxGrid {
+                    if root.tab == 1 : RowLabel { text: "MIDI effects"; }
+                    if root.tab == 1 : FxGrid {
                         effects: root.slot.midi-effects;
                         can-add: root.slot.midi-effects.length < AppState.max-midi-effects;
                         slot-index: root.slot-index;
@@ -713,7 +705,7 @@ export component SlotPanel inherits Rectangle {
                         presets(index) => { root.show-presets(0, index); }
                         add => { root.choose-plugin(Category.midi-effect); }
                     }
-                    if root.tab == 2 : HorizontalLayout {
+                    if root.tab == 1 : HorizontalLayout {
                         spacing: 4px;
                         RowLabel {
                             text: "Inputs";
@@ -726,7 +718,7 @@ export component SlotPanel inherits Rectangle {
                             clicked => { AppLogic.toggle-slot-input(root.slot-index, input); }
                         }
                     }
-                    if root.tab == 2 : HorizontalLayout {
+                    if root.tab == 1 : HorizontalLayout {
                         spacing: 8px;
                         RowLabel {
                             text: "Channel";
@@ -743,7 +735,7 @@ export component SlotPanel inherits Rectangle {
                             }
                         }
                     }
-                    if root.tab == 2 : VerticalLayout {
+                    if root.tab == 1 : VerticalLayout {
                         HorizontalLayout {
                             RowLabel {
                                 text: "Notes";
@@ -765,7 +757,7 @@ export component SlotPanel inherits Rectangle {
                             }
                         }
                     }
-                    if root.tab == 2 : VerticalLayout {
+                    if root.tab == 1 : VerticalLayout {
                         HorizontalLayout {
                             RowLabel {
                                 text: "Velocity";
@@ -787,7 +779,7 @@ export component SlotPanel inherits Rectangle {
                             }
                         }
                     }
-                    if root.tab == 2 : HorizontalLayout {
+                    if root.tab == 1 : HorizontalLayout {
                         spacing: 8px;
                         RowLabel {
                             text: "Transpose";
@@ -838,25 +830,6 @@ export component SlotPanel inherits Rectangle {
         instrument: root.slot.instrument;
         slot-index: root.slot-index;
         replace => { root.choose-plugin(Category.instrument); }
-    }
-
-    // An empty slot's slot presets.
-    empty-presets := PopupWindow {
-        x: 5px;
-        y: 5px;
-        width: root.width - 10px;
-        height: root.height - 10px;
-        close-policy: PopupClosePolicy.close-on-click-outside;
-        PopupFrame {
-            VerticalLayout {
-                padding: 8px;
-                SlotPresets {
-                    slot-index: root.slot-index;
-                    slot: root.slot;
-                }
-                Rectangle { vertical-stretch: 1; }
-            }
-        }
     }
 
     preset-popup := PresetPopup {
