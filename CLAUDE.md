@@ -856,8 +856,9 @@ behind format-agnostic cores:
   (`slint-build`) compiles `ui/app.slint`: one window, no tabs — `live_tab.slint` (the scenes
   and slots) over the **control surfaces panel** (`surfaces.slint`), with the **right
   sidebar** (`sidebar.slint`, 300 wide) beside them. The window opens at, and can't shrink
-  below, 1500×995 (the design's "Live (window minimum)" board is 1200×995, its "Right sidebar"
-  300×995). Its layout is pinned to the window (`x`/`y`/`width`/`height`) because the panel's
+  below, 1500×995 (in the Penpot design, the Live view is 1200×995 and the right sidebar
+  300×995, as drawn inside its "MIDI learn" window boards — "MIDI learn 1" at the minimum
+  size, "MIDI learn 8" full screen with the LX88+). Its layout is pinned to the window (`x`/`y`/`width`/`height`) because the panel's
   room is computed from the window's height (`AppWindow`'s `fits-expanded`/`squeeze`): tall
   enough (≥ 983 px), the panel is docked and expanded (140 px, `SurfaceSizes`) unless the user
   collapsed it (`AppConfig.surfaces.collapsed`, `set-surfaces-collapsed`); otherwise it's one
