@@ -304,17 +304,34 @@ mismatch — the offset simply is the control's position — and toggles and mom
 either.
 
 **Feedback** needs a MIDI output to the device (the output port with the same device name;
-`midir` output connections, opened while the surface is shown). A control's feedback is its
-own message with the value: a fader/knob's CC with the first target's position (encoders with
-LED rings take the same CC on most devices), a button's or pad's note/CC with on (127, or the
-surface's "lit" velocity — some pads choose a colour by it) when its first target is at a
-non-zero level, off otherwise; momentary buttons light while held. Per link, **"Invert light"**
-(a switch in the target's settings, shown only for a control with feedback) turns that around:
-a position p is shown as 1 − p, lit as unlit. It's on by default for mute targets (a slot's or
-the master's), so a button is lit while its slot plays and dark while muted — the LX88+'s
-shipped mute mappings get it that way — and off for everything else; kept with the mapping
-(`invert_light` in `slot.json` or the config, left out while it's the target's default).
-Values are sent only when
+`midir` output connections, opened while the surface is shown). **Where it's set up**
+(agreed 2026-11-23): the surface only says *whether* a control can show a value sent back
+(`"feedback": true`, as its own message) — a fact about the device; *what* it shows is each
+mapping's choice, in the target's settings under **Light** (shown only for a control with
+feedback):
+
+- **Follows this target** (on by default): the light shows this target. A control with
+  several targets shows the first that follows; if none does, it's sent nothing and takes
+  its targets over like a control without feedback (jump, glide or pick up).
+- **Invert light**: a position p is shown as 1 − p, lit as unlit. On by default for mute
+  targets (a slot's or the master's), so a button is lit while its slot plays and dark
+  while muted, and off for everything else.
+- **Colours**, for a control whose device's driver gives it colour pairs (the LX88+'s pads:
+  16 unlit/lit pairs, see `nektar-impact.md` §9): a pair from the palette, drawn as two
+  swatches; default the driver's (orange/green on the LX88+). The driver colours each pad
+  by its light's mapping (or its first mapping's if none follows), and unmapped pads dark.
+- **Lit value**, for any other control (1–127, default 127): "on" as a note's velocity or a
+  CC's value — some devices pick a colour by it (the LX88+'s fader buttons, per its
+  guide: 1–126 green, 127 red).
+
+All four are kept with the mapping (`light_follows`, `invert_light`, `light_colour`,
+`lit_value` in `slot.json` or the config, each left out while it's the default).
+
+A control's feedback is then its own message with its light's target's value: a fader's or
+knob's CC with the position (encoders with LED rings take the same CC on most devices), a
+button's or pad's note/CC with the lit value when its target is at a non-zero level, off
+(0, or a note-on with velocity 0) otherwise; momentary buttons light while held. Values are
+sent only when
 they change, at most every 10 ms per control, and not straight back to a control that just
 sent the same value (motor faders fight otherwise). On connecting a device and after loading
 a scene, every control with feedback is sent its value.
@@ -379,7 +396,8 @@ An example (its message numbers are illustrative, not the LPD8's actual defaults
 }
 ```
 
-Feedback (phase 4): `"feedback": true` on a bank or control, and for pads/buttons `"lit": n`.
+Feedback (phase 4): `"feedback": true` on a bank or control — only whether it can show a
+value; what it shows is per mapping (phase 10).
 
 `devices` are substrings of `midi_device_name`; the first surface (user before shipped) one of
 them matches is the device's. Each control's message is stored on its own (the bank editor's
@@ -395,9 +413,10 @@ editing) and turns the left column into the surface's settings: name, MIDI devic
 
 - **+ Add** opens a menu: a bank of faders, knobs, pads or buttons, or a single fader, knob,
   pad or button. A new bank appears at the right end, selected, with its settings open.
-- **Feedback** per bank: none, or what the hardware shows (motor faders, LED rings, lit
-  buttons/pads, with the velocity that lights a pad), and the bank's default takeover;
-  per control, a different feedback message where a device needs one (rare).
+- **Feedback** per bank: whether its controls show values sent back (motor faders, LED
+  rings, lit buttons/pads) — what they show is set per mapping, not here — and the bank's
+  default takeover; per control, a different feedback message where a device needs one
+  (rare).
 - **Banks** have a frame with a drag handle and their name and size; dragging moves the bank
   (snapping to a 4 px grid and to other banks' edges); clicking selects it and opens its
   settings popup.
@@ -532,8 +551,8 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
 4. **Done (2026-11-22).** Feedback: output connections, per-bank feedback in the surface
    format. As built:
    - A bank (or a control, overriding it) with `"feedback": true` shows values sent back
-     as its own message; pads and buttons are lit with `lit` (velocity or CC value, default
-     127) and unlit with 0 / a note-on with velocity 0 (not a real note-off, which the
+     as its own message; pads and buttons are lit with a lit value (velocity or CC value,
+     default 127; per mapping since phase 10) and unlit with 0 / a note-on with velocity 0 (not a real note-off, which the
      Nektar Impact LX+'s pads ignore — tested 2026-11-23). Shipped: the LPD8's pads (checked on the hardware);
      the LX88+ has none yet (unknown which of its controls light up from outside).
    - A control with feedback always jumps (the learn pane doesn't offer takeover for it). It's sent its first target's base along its range, a toggle's on/off, a
@@ -559,8 +578,8 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    - The left column: name, "+ Add" (a bank of, or a single, fader/knob/pad/button),
      "Learn controls…", a status line, and the selected bank's settings — name, kind,
      rows, columns, numbering, what it sends (CC, note, pitch bend) with channel, first
-     number and step (which renumber every control), a pad's pressure, feedback and lit
-     velocity, "Learn bank" and "Delete bank". The settings sit beside the surface
+     number and step (which renumber every control), a pad's pressure, feedback (its lit
+     velocity went to the mappings in phase 10), "Learn bank" and "Delete bank". The settings sit beside the surface
      rather than in a popup.
    - Banks are framed, with a handle above that selects and drags them (4 px grid; no
      snapping to other banks yet). Clicking a control learns just that one.
@@ -589,6 +608,21 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    "Scene by name…" or "Scene by number…", then the name or number. Shown as "On press".
    The Penpot design's "MIDI learn 6" board draws both steps.
 9. Later: relative/14-bit encoders.
+10. **Done (2026-11-23).** Light settings per target (see "Takeover and feedback"): the
+    surface keeps only whether a control has feedback (its `lit` and the editor's "Lit at"
+    are gone); each mapping says whether the light follows it, inverted or not, and its
+    colour pair (`Driver::palette`; the Nektar driver's fixed orange/green for every mapped
+    pad is now only its default) or lit value. As built: the engine's `Link` carries a
+    `Light` (`follows`, `invert`, `lit`, `colour`); `ControlSetup::light` is the first
+    following link of a control with feedback, which drives `feedback_value`, the echo
+    check and takeover (`ControlState::jumps`); `Feedback` carries the lit value to
+    `Surface::feedback`; `Mappings::mapped` gives the driver each control's chosen pair
+    (`Driver::mapped`, `None` unmapped, `Some(None)` its default), and the driver sends only
+    pads whose code changed. In the learn pane, "Light": "Follows this target", "Invert
+    light", then a `Select` of the palette's pairs with swatches, or a "Lit value"
+    `Stepper`. Tested on the developer's LX88+ (a pad's colours picked per target, a second
+    target taking the light over); the fader buttons' colour by lit value couldn't be told
+    apart on the webcam.
 
 ## Open questions
 

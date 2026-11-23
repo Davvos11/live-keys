@@ -167,7 +167,6 @@ impl Editor {
             channel: 1,
             pressure: None,
             feedback: false,
-            lit: None,
             port: 1,
             page: None,
             toggle: false,

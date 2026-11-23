@@ -21,9 +21,16 @@ pub trait Driver: Send {
     /// is closing: give it back as it was.
     fn disconnect(&mut self, surface: &Surface) -> Vec<Vec<u8>>;
 
-    /// Which of the surface's controls drive something now (per control).
-    fn mapped(&mut self, _surface: &Surface, _mapped: &[bool]) -> Vec<Vec<u8>> {
+    /// Which of the surface's controls drive something now, per control:
+    /// `None` if it doesn't, else the colour pair its mapping chose (a code
+    /// of [`Driver::palette`]; `None` for a control without one).
+    fn mapped(&mut self, _surface: &Surface, _mapped: &[Option<Option<u8>>]) -> Vec<Vec<u8>> {
         Vec::new()
+    }
+
+    /// The colour pairs control `control`'s light can be given, if it can.
+    fn palette(&self, _surface: &Surface, _control: usize) -> Option<Palette> {
+        None
     }
 
     /// Control `control`, waiting to pick its target up, was moved: the
@@ -37,6 +44,67 @@ pub trait Driver: Send {
     fn feedback(&self, _surface: &Surface, _control: usize, _shown: Shown) -> Option<Vec<Vec<u8>>> {
         None
     }
+}
+
+/// A colour a light can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colour {
+    Off,
+    Yellow,
+    Red,
+    Green,
+    Orange,
+}
+
+impl Colour {
+    pub fn name(self) -> &'static str {
+        match self {
+            Colour::Off => "Off",
+            Colour::Yellow => "Yellow",
+            Colour::Red => "Red",
+            Colour::Green => "Green",
+            Colour::Orange => "Orange",
+        }
+    }
+
+    /// As drawn (`0xRRGGBB`); `None` for off.
+    pub fn rgb(self) -> Option<u32> {
+        match self {
+            Colour::Off => None,
+            Colour::Yellow => Some(0xF2_D0_24),
+            Colour::Red => Some(0xE5_3B_2E),
+            Colour::Green => Some(0x3C_C8_4B),
+            Colour::Orange => Some(0xF5_8A_1F),
+        }
+    }
+}
+
+/// A light's two colours, not lit and lit, as the device numbers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourPair {
+    pub code: u8,
+    pub unlit: Colour,
+    pub lit: Colour,
+}
+
+impl ColourPair {
+    /// "Orange / green".
+    pub fn name(&self) -> String {
+        format!("{} / {}", self.unlit.name(), self.lit.name().to_lowercase())
+    }
+}
+
+/// The colour pairs a control's light can be given, and the one a mapped
+/// control gets unless its mapping chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub pairs: &'static [ColourPair],
+    pub default: u8,
+}
+
+/// The palette of control `control` of `surface`, whose driver is `driver`.
+pub fn palette(driver: &str, surface: &Surface, control: usize) -> Option<Palette> {
+    open(driver)?.palette(surface, control)
 }
 
 /// The drivers there are: id (as surfaces name them) and what the panel's
@@ -73,6 +141,32 @@ const PAD_NOTES: [u8; 8] = [60, 62, 64, 65, 67, 69, 71, 72];
 /// A pad colour code: unlit colour, lit colour.
 const OFF_YELLOW: u8 = 0;
 const ORANGE_GREEN: u8 = 10;
+
+/// The pads' colour pairs (Logic's `PAD_COLOR`, §9 of the notes).
+const PAD_COLOURS: [ColourPair; 16] = {
+    use Colour::*;
+    const fn pair(code: u8, unlit: Colour, lit: Colour) -> ColourPair {
+        ColourPair { code, unlit, lit }
+    }
+    [
+        pair(0, Off, Yellow),
+        pair(1, Red, Yellow),
+        pair(2, Green, Yellow),
+        pair(3, Off, Green),
+        pair(4, Red, Green),
+        pair(5, Yellow, Green),
+        pair(6, Off, Red),
+        pair(7, Green, Red),
+        pair(8, Yellow, Red),
+        pair(9, Orange, Yellow),
+        pair(10, Orange, Green),
+        pair(11, Orange, Red),
+        pair(12, Off, Orange),
+        pair(13, Red, Orange),
+        pair(14, Green, Orange),
+        pair(15, Yellow, Orange),
+    ]
+};
 
 /// The Page button's CC (two LEDs in one: A blue, B white).
 const PAGE: u8 = 119;
@@ -155,12 +249,13 @@ impl Driver for NektarLxPlus {
         messages
     }
 
-    /// Mapped pads are orange, green while lit; the others dark.
-    fn mapped(&mut self, surface: &Surface, mapped: &[bool]) -> Vec<Vec<u8>> {
+    /// Mapped pads get their mapping's colours (orange, green while lit,
+    /// unless chosen); the others are dark.
+    fn mapped(&mut self, surface: &Surface, mapped: &[Option<Option<u8>>]) -> Vec<Vec<u8>> {
         let mut codes = [OFF_YELLOW; 8];
-        for (control, _) in mapped.iter().enumerate().filter(|(_, mapped)| **mapped) {
-            if let Some(pad) = Self::pad_of(surface, control) {
-                codes[pad] = ORANGE_GREEN;
+        for (control, colour) in mapped.iter().enumerate() {
+            if let (Some(colour), Some(pad)) = (colour, Self::pad_of(surface, control)) {
+                codes[pad] = colour.filter(|&code| usize::from(code) < PAD_COLOURS.len()).unwrap_or(ORANGE_GREEN);
             }
         }
         if self.pads == Some(codes) {
@@ -171,6 +266,10 @@ impl Driver for NektarLxPlus {
             .filter(|&pad| before.is_none_or(|before| before[pad] != codes[pad]))
             .map(|pad| Self::pad_colour(pad as u8 + 1, codes[pad]))
             .collect()
+    }
+
+    fn palette(&self, surface: &Surface, control: usize) -> Option<Palette> {
+        Self::pad_of(surface, control).map(|_| Palette { pairs: &PAD_COLOURS, default: ORANGE_GREEN })
     }
 
     fn pick_up(&mut self, _surface: &Surface, _control: usize, up: bool) -> Vec<Vec<u8>> {
@@ -218,12 +317,20 @@ mod tests {
         let mut driver = NektarLxPlus::default();
         driver.connect(&surface);
         let pad = |note: u8| surface.controls.iter().position(|c| c.message == Message::Note(note) && c.channel == 15).unwrap();
-        let mut mapped = vec![false; surface.controls.len()];
+        let mut mapped = vec![None; surface.controls.len()];
         // First: all eight.
         assert_eq!(driver.mapped(&surface, &mapped).len(), 8);
         assert!(driver.mapped(&surface, &mapped).is_empty());
-        // P3 (note 64) mapped: only its colour is sent.
-        mapped[pad(64)] = true;
+        // P3 (note 64) mapped, no colour chosen: only its colour is sent, the default.
+        mapped[pad(64)] = Some(None);
         assert_eq!(driver.mapped(&surface, &mapped), [NektarLxPlus::pad_colour(3, ORANGE_GREEN)]);
+        // Its mapping chooses off/red (6), P1 (note 60) gets red/green (4).
+        mapped[pad(64)] = Some(Some(6));
+        mapped[pad(60)] = Some(Some(4));
+        assert_eq!(driver.mapped(&surface, &mapped), [NektarLxPlus::pad_colour(1, 4), NektarLxPlus::pad_colour(3, 6)]);
+        assert!(driver.mapped(&surface, &mapped).is_empty());
+        // Unmapped again: dark.
+        mapped[pad(60)] = None;
+        assert_eq!(driver.mapped(&surface, &mapped), [NektarLxPlus::pad_colour(1, OFF_YELLOW)]);
     }
 }

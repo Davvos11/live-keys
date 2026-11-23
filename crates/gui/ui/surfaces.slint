@@ -714,7 +714,7 @@ export component SurfaceEditor inherits Rectangle {
                             }
                         }
                         Text {
-                            text: "Motor faders, LED rings and lit pads or buttons can show a value sent back.";
+                            text: "Motor faders, LED rings and lit pads or buttons can show a value sent back. What they show is set per mapping, in MIDI learn.";
                             color: Theme.text-faint;
                             font-size: Theme.small-font-size;
                             wrap: word-wrap;
@@ -725,12 +725,6 @@ export component SurfaceEditor inherits Rectangle {
                             property <bool> source: AppState.edit-bank.feedback;
                             changed source => { self.checked = self.source; }
                             toggled => { AppLogic.edit-bank-set("feedback", self.checked ? 1 : 0); }
-                        }
-                        if AppState.edit-bank.feedback && AppState.edit-bank.kind >= 2 : EditNumber {
-                            label: "Lit at";
-                            value: AppState.edit-bank.lit;
-                            minimum: 1;
-                            changed(value) => { AppLogic.edit-bank-set("lit", value); }
                         }
                         HorizontalLayout {
                             spacing: 6px;

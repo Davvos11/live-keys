@@ -555,8 +555,8 @@ impl Learn {
             });
         });
         let learn = self.clone();
-        logic.on_learn_set_invert_light(move |row, on| {
-            let changed = learn.with_ctx(|ctx| learn.rack.mappings.set_invert_light(ctx, row, on));
+        logic.on_learn_set_light(move |row, what, value| {
+            let changed = learn.with_ctx(|ctx| learn.rack.mappings.set_light(ctx, row, &what, value));
             learn.changed(changed);
             learn.refresh_view();
         });
@@ -675,7 +675,6 @@ impl Learn {
                 first: messages.map_or(0, |m| i32::from(m.first)),
                 step: messages.map_or(1, |m| i32::from(m.step)),
                 feedback: bank.feedback,
-                lit: i32::from(bank.lit.unwrap_or(127)),
                 pressure: pressure_index(bank.pressure),
             });
         }
@@ -808,7 +807,6 @@ impl Learn {
                         }
                     }),
                     "feedback" => editor.edit_bank(bank, |spec| spec.feedback = value != 0),
-                    "lit" => editor.edit_bank(bank, |spec| spec.lit = Some(byte.max(1))),
                     "pressure" => editor.edit_bank(bank, |spec| spec.pressure = pressure_of(value)),
                     _ => {}
                 }

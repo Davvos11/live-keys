@@ -1,7 +1,26 @@
 // The Live tab's building blocks, after the components in the Penpot design.
 import { Theme, Icons } from "theme.slint";
+import { ColourPair } from "types.slint";
 
 export { Theme, Icons }
+
+// Small colour squares in a row (a light's colours); transparent shows as an
+// empty frame.
+component Swatches inherits HorizontalLayout {
+    in property <[color]> colours;
+    spacing: 3px;
+    for colour in root.colours : VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.control-border;
+            background: colour;
+        }
+    }
+}
 
 // A Lucide icon, in the colour of the text around it.
 export component Icon inherits Image {
@@ -137,6 +156,8 @@ export component DropdownButton inherits Rectangle {
     in property <string> note;
     in property <bool> open;
     in property <bool> enabled: true;
+    // Colour squares before the text.
+    in property <[color]> swatches;
     callback clicked();
 
     height: Theme.control-height;
@@ -155,6 +176,7 @@ export component DropdownButton inherits Rectangle {
         padding-left: 7px;
         padding-right: 5px;
         spacing: 6px;
+        if root.swatches.length > 0 : Swatches { colours: root.swatches; }
         Text {
             text: root.text != "" ? root.text : root.placeholder;
             color: root.text != "" ? Theme.text : Theme.text-muted;
@@ -185,6 +207,8 @@ export component ListItem inherits Rectangle {
     in property <bool> action;
     // Grey text after the name ("changed", a count).
     in property <string> note;
+    // Colour squares before the name.
+    in property <[color]> swatches;
     out property <bool> has-hover: area.has-hover;
     callback clicked();
 
@@ -204,6 +228,7 @@ export component ListItem inherits Rectangle {
         padding-left: 7px;
         padding-right: 7px;
         spacing: 6px;
+        if root.swatches.length > 0 : Swatches { colours: root.swatches; }
         Text {
             text: root.text;
             color: root.selected ? Theme.on-accent : root.action ? Theme.text-muted : Theme.text;
@@ -222,9 +247,11 @@ export component ListItem inherits Rectangle {
     }
 }
 
-// A dropdown that picks one of `model`, like a ComboBox.
+// A dropdown that picks one of `model`, like a ComboBox; with `swatches`
+// (one per option), each option's two colours are drawn before its name.
 export component Select inherits Rectangle {
     in property <[string]> model;
+    in property <[ColourPair]> swatches;
     in-out property <int> current-index;
     callback selected(/* index */ int);
 
@@ -234,6 +261,8 @@ export component Select inherits Rectangle {
         width: 100%;
         height: 100%;
         text: root.model[root.current-index];
+        swatches: root.current-index >= 0 && root.current-index < root.swatches.length
+            ? [root.swatches[root.current-index].unlit, root.swatches[root.current-index].lit] : [];
         open: popup.is-open;
         clicked => { popup.show(); }
     }
@@ -260,6 +289,7 @@ export component Select inherits Rectangle {
                     y: index * 30px;
                     height: 28px;
                     text: option;
+                    swatches: index < root.swatches.length ? [root.swatches[index].unlit, root.swatches[index].lit] : [];
                     selected: index == root.current-index;
                     clicked => {
                         root.current-index = index;

@@ -490,7 +490,7 @@ impl State {
             let driven = self.drivers.get(device);
             let messages = driven
                 .and_then(|active| active.driver.feedback(surface, feedback.control, feedback.shown))
-                .or_else(|| surface.feedback(feedback.control, feedback.shown).map(|message| vec![message.to_vec()]));
+                .or_else(|| surface.feedback(feedback.control, feedback.shown, feedback.lit).map(|message| vec![message.to_vec()]));
             if let Some(messages) = messages {
                 if let Some(Some(output)) = self.outputs.get(feedback.surface) {
                     self.feedback.send(output, feedback.control, messages, feedback.again, now);

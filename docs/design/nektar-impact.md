@@ -483,8 +483,12 @@ run by the mapping thread, which owns the output connections:
 - **takeover display**: when a control set to pick up is moved while waiting, "UP" or "dn"
   depending on which side of its target it is; nothing when it catches up (its value
   replaces it). Glide, the default, needs none.
-- **pads**: lit by note-on (feedback as today); colours per pad from the mapping (mapped:
-  orange unlit / green lit; unmapped: off / yellow), sent when the setup changes.
+- **pads**: lit by note-on (feedback as today); colours per pad from the mapping, sent when
+  the setup changes. Since 2026-11-23 the colour pair is each mapping's choice (the learn
+  pane's "Colours", `Driver::palette`: the 16 pairs of §9, drawn as swatches); the driver
+  only proposes the default for a mapped pad, orange unlit / green lit, and makes unmapped
+  pads off / yellow. A pad with several targets takes the pair of the one its light follows
+  (else its first). Only pads whose code changed are sent.
 - **Page LED** (blue/white) and **Clips/Scenes** (green), as feedback of those buttons.
 - SysEx encoding and checksum as §3, unit-tested.
 
@@ -553,6 +557,10 @@ user's to edit or delete; nothing re-adds them). For the LX88+:
   UP/dn for a fader set to pick up; fader-button LEDs showing a slot's mute; Track −/+
   moving the selected slot; Inst knobs and faders on the selected slot's panel and
   drawbars; Patch + loading the next preset; Play starting the metronome.
+- 2026-11-23, light settings per target: pad colours chosen per mapping (P1 off/red →
+  off/green → a second target's red/yellow once the first stopped following) showed on the
+  pads as chosen. A fader button's lit value (127 vs 126, red vs green per the guide)
+  couldn't be told apart on the webcam: still to check by eye.
 - The defaults ship in the surface file's `defaults`, each installed once
   (`AppConfig.surfaces.defaults_installed`). Loop, Stop, Record and their Shift functions
   (Back, Set L/R, Undo, Mode) are left unmapped.

@@ -3,12 +3,26 @@
 // can be a target. See `docs/design/midi-learn.md`.
 import { CheckBox, ScrollView, Switch } from "std-widgets.slint";
 import { AppState, AppLogic, LearnTargetRow } from "globals.slint";
-import { Theme, Icons, KButton, ListItem, Segmented } from "widgets.slint";
+import { Theme, Icons, KButton, ListItem, Segmented, Select, Stepper } from "widgets.slint";
 import { RangeSlider, SingleSlider } from "range_slider.slint";
 
 component Caption inherits Text {
     color: Theme.text-muted;
     font-size: Theme.small-font-size;
+}
+
+// A light setting: its label, and the control for it on the right.
+component LightRow inherits HorizontalLayout {
+    in property <string> text;
+    spacing: 8px;
+    Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: Theme.small-font-size;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    @children
 }
 
 // One target's settings (a row of the pane expanded, or the popup's): its
@@ -136,22 +150,58 @@ component TargetSettings inherits VerticalLayout {
             changed source => { self.checked = self.source; }
             toggled => { AppLogic.learn-set-velocity(root.row-index, self.checked); }
     }
-    // A control with feedback (a motor fader, a lit button): what it shows
-    // of the target, turned around — on for a mute, so a playing slot's
-    // button is lit.
-    if AppState.learn-control.feedback : HorizontalLayout {
-        spacing: 8px;
-        Caption {
-            text: "Invert light";
-            vertical-alignment: center;
-            horizontal-stretch: 1;
+    // A control with feedback (a motor fader, a lit button): what its light
+    // shows of this target — whether it follows it at all (of several
+    // targets, the first that does), turned around (on for a mute, so a
+    // playing slot's button is lit), and its colours (a pad whose device has
+    // colour pairs) or lit value (the rest).
+    if AppState.learn-control.feedback : VerticalLayout {
+        spacing: 4px;
+        Caption { text: "Light"; }
+        LightRow {
+            text: "Follows this target";
+            Switch {
+                checked: root.target.light-follows;
+                // Clicking sets `checked` itself, replacing the binding above.
+                property <bool> source: root.target.light-follows;
+                changed source => { self.checked = self.source; }
+                toggled => { AppLogic.learn-set-light(root.row-index, "follows", self.checked ? 1 : 0); }
+            }
         }
-        Switch {
-            checked: root.target.invert-light;
-            // Clicking sets `checked` itself, replacing the binding above.
-            property <bool> source: root.target.invert-light;
-            changed source => { self.checked = self.source; }
-            toggled => { AppLogic.learn-set-invert-light(root.row-index, self.checked); }
+        LightRow {
+            text: "Invert light";
+            Switch {
+                checked: root.target.invert-light;
+                property <bool> source: root.target.invert-light;
+                changed source => { self.checked = self.source; }
+                toggled => { AppLogic.learn-set-light(root.row-index, "invert", self.checked ? 1 : 0); }
+            }
+        }
+        if AppState.learn-control.palette.length > 0 : LightRow {
+            text: "Colours";
+            Select {
+                width: 180px;
+                model: AppState.learn-control.palette;
+                swatches: AppState.learn-control.palette-colours;
+                current-index: root.target.light-colour;
+                // Picking sets `current-index` itself, replacing the binding.
+                property <int> source: root.target.light-colour;
+                changed source => { self.current-index = self.source; }
+                selected(index) => { AppLogic.learn-set-light(root.row-index, "colour", index); }
+            }
+        }
+        if AppState.learn-control.palette.length == 0 : LightRow {
+            text: "Lit value";
+            Stepper {
+                minimum: 1;
+                maximum: 127;
+                signed: false;
+                value: root.target.lit-value;
+                // Stepping sets `value` itself, replacing the binding.
+                property <int> source: root.target.lit-value;
+                changed source => { self.value = self.source; }
+                changed(value) => { AppLogic.learn-set-light(root.row-index, "lit", value); }
+            }
         }
     }
     if root.target.panel >= 0 : Segmented {

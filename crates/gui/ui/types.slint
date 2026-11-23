@@ -262,8 +262,14 @@ export struct EditBankSettings {
     first: int,
     step: int,
     feedback: bool,
-    lit: int,
     pressure: int,
+}
+
+// A light's two colours, not lit and lit (transparent: off), as a select
+// draws them.
+export struct ColourPair {
+    unlit: color,
+    lit: color,
 }
 
 // One level of a MIDI-learn toggle: its position 0..1 along the target's
@@ -291,9 +297,14 @@ export struct LearnTargetRow {
     value: float,
     value-text: string,
     velocity: bool,
-    // A control with feedback shows the target turned around (on for mutes
-    // unless changed).
+    // What a control with feedback shows of the target: whether its light
+    // follows it (of several, the first that does), turned around (on for
+    // mutes unless changed), the colour pair (an index into the control's
+    // palette, -1 without one) or else the lit value (1–127).
+    light-follows: bool,
     invert-light: bool,
+    light-colour: int,
+    lit-value: int,
     kept: int,
     can-keep-with-scene: bool,
     panel: int,
@@ -318,6 +329,10 @@ export struct LearnControl {
     // It shows its target's value sent back (motor fader, LED ring, lit
     // button): no takeover needed.
     feedback: bool,
+    // The colour pairs its light can be given (its device's driver's), by
+    // name and as swatches; empty: it's lit by a value instead.
+    palette: [string],
+    palette-colours: [ColourPair],
 }
 
 // A MIDI device shown in the control surfaces panel.

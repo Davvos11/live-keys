@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -194,7 +194,9 @@ export global AppLogic {
     callback learn-add-level(/* row */ int);
     callback learn-remove-level(/* row */ int, /* level */ int);
     callback learn-set-value(/* row */ int, /* position */ float);
-    callback learn-set-invert-light(/* row */ int, bool);
+    // A target's light (-1: the popup's): "follows" and "invert" (0/1),
+    // "colour" (an index into the control's palette), "lit" (1–127).
+    callback learn-set-light(/* row */ int, /* what */ string, /* value */ int);
     callback learn-set-velocity(/* row */ int, /* on */ bool);
     // Where it's kept (0 with the scene, 1 in every scene) and, for a panel
     // control, whether it's that parameter or that panel position.

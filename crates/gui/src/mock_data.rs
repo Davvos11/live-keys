@@ -11,7 +11,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
     AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
-    SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel,
+    SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel, ColourPair,
     LearnTargetRow,
 };
 
@@ -56,6 +56,12 @@ impl ToSlint for f32 {
         // Display never uses exponents; Slint has no literal for NaN/infinity.
         let value = if self.is_finite() { *self } else { 0.0 };
         let _ = write!(out, "{value}");
+    }
+}
+
+impl ToSlint for slint::Color {
+    fn write_slint(&self, out: &mut String, _indent: usize) {
+        let _ = write!(out, "#{:02x}{:02x}{:02x}{:02x}", self.red(), self.green(), self.blue(), self.alpha());
     }
 }
 
@@ -122,10 +128,12 @@ slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
     kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target, hidden, active,
 });
-slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback });
+slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback, palette, palette_colours });
+slint_struct!(ColourPair { unlit, lit });
 slint_struct!(LearnLevel { position, text });
 slint_struct!(LearnTargetRow {
-    name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, invert_light, kept,
+    name, place, chip, greyed, mode, from, to, from_text, to_text, levels, value, value_text, velocity, light_follows, invert_light,
+    light_colour, lit_value, kept,
     can_keep_with_scene, panel,
 });
 slint_struct!(SurfaceView { name, device, known, connected, width, height, controls, pages, page, variant, driver, driver_on });

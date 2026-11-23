@@ -12,16 +12,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use live_keys_engine::{
-    ControlSetup, Engine, Link, MASTER_SLOT, MAX_BPM, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
+    ControlSetup, Engine, Light, Link, MASTER_SLOT, MAX_BPM, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
     SurfaceSetup, Takeover, TargetSpec, ToValue,
 };
+use live_keys_surfaces::driver::{self, Colour, Palette};
 use live_keys_surfaces::{ControlKind, Message, Surface};
 use serde::{Deserialize, Serialize};
-use slint::{Model, ModelRc, VecModel};
+use slint::{Color, Model, ModelRc, SharedString, VecModel};
 
 use crate::config::{self, AppConfig};
 use crate::profiles;
-use crate::{LearnControl, LearnLevel, LearnTargetRow, sync_model};
+use crate::{ColourPair, LearnControl, LearnLevel, LearnTargetRow, sync_model};
 
 /// A control's default glide time.
 const DEFAULT_GLIDE_MS: u32 = 200;
@@ -254,10 +255,8 @@ pub struct SceneMapping {
     pub target: PluginTarget,
     #[serde(flatten)]
     pub mode: MappingMode,
-    /// The control's light (feedback) turned around; `None`: the target's
-    /// default (off for a parameter).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invert_light: Option<bool>,
+    #[serde(flatten)]
+    pub light: LightSettings,
 }
 
 /// A mapping kept in every scene (the config).
@@ -267,10 +266,54 @@ pub struct GlobalMapping {
     pub target: RackTarget,
     #[serde(flatten)]
     pub mode: MappingMode,
-    /// The control's light (feedback) turned around; `None`: the target's
-    /// default ([`RackTarget::inverts_light`]).
+    #[serde(flatten)]
+    pub light: LightSettings,
+}
+
+/// What a control with feedback (a lit button, a motor fader) shows of a
+/// mapping's target. A device only says whether a control has a light; what
+/// it shows is the mapping's choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightSettings {
+    /// The control's light shows this target (of several, the first that
+    /// does; none: no light, and faders and knobs take their targets over
+    /// again).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub light_follows: bool,
+    /// The light turned around; `None`: the target's default (on for a
+    /// mute, [`RackTarget::inverts_light`]; off otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invert_light: Option<bool>,
+    /// For a control whose device gives its light colour pairs: the pair's
+    /// code; `None`: the device's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_colour: Option<u8>,
+    /// For any other: "on" as a note's velocity or a CC's value, 1..=127;
+    /// `None`: 127.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lit_value: Option<u8>,
+}
+
+impl Default for LightSettings {
+    fn default() -> Self {
+        Self { light_follows: true, invert_light: None, light_colour: None, lit_value: None }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// "On" for a lit control unless a mapping says otherwise.
+const DEFAULT_LIT: u8 = 127;
+
+/// A light colour as its swatch is drawn (off: transparent, an empty frame).
+fn swatch(colour: Colour) -> Color {
+    colour.rgb().map_or(Color::from_argb_u8(0, 0, 0, 0), |rgb| Color::from_argb_encoded(0xFF00_0000 | rgb))
 }
 
 impl RackTarget {
@@ -745,7 +788,7 @@ impl Selected {
 enum Popup {
     Assigned(Entry),
     /// Not assigned yet: its settings so far, kept with the scene or not.
-    Draft { candidate: Candidate, mode: MappingMode, keep: Keep, invert_light: Option<bool> },
+    Draft { candidate: Candidate, mode: MappingMode, keep: Keep, light: LightSettings },
 }
 
 /// The kinds of learn-mode targets, as the UI numbers them.
@@ -786,7 +829,7 @@ pub struct Installed {
 /// What a setup does: per mapped control (device, control, its settings),
 /// its targets and modes. A setup that does the same as the last isn't
 /// handed over again, so the mapping thread keeps its takeover state.
-type Signature = Vec<(String, usize, ControlSettings, Vec<(Concrete, MappingMode, bool)>)>;
+type Signature = Vec<(String, usize, ControlSettings, Vec<(Concrete, MappingMode, Light)>)>;
 
 /// The current setup's targets, by `TargetId`.
 struct SetupTarget {
@@ -874,7 +917,7 @@ impl MappingsUi {
                 control: selected.reference.clone(),
                 target,
                 mode: MappingMode::Momentary { value: 1.0, velocity: false },
-                invert_light: None,
+                light: LightSettings::default(),
             };
         {
             let mut global = self.global.borrow_mut();
@@ -1029,9 +1072,9 @@ impl MappingsUi {
                     let (low, high) = engine_mode.reach();
                     let reach = &mut targets[target].reach;
                     *reach = (reach.0 + low, reach.1 + high);
-                    let invert_feedback = self.inverts_light(*entry);
-                    links.push(Link { target, mode: engine_mode, invert_feedback });
-                    signed.push((concrete.clone(), mode.clone(), invert_feedback));
+                    let light = self.engine_light(*entry);
+                    links.push(Link { target, mode: engine_mode, light });
+                    signed.push((concrete.clone(), mode.clone(), light));
                 }
                 if links.is_empty() {
                     continue;
@@ -1046,7 +1089,7 @@ impl MappingsUi {
                     glide: Duration::from_millis(u64::from(settings.glide_ms)),
                     pass_through: settings.pass_through,
                     release_to_zero: control.kind == ControlKind::Pad,
-                    feedback: control.feedback.is_some(),
+                    feedback: control.feedback,
                     links,
                 });
             }
@@ -1288,7 +1331,7 @@ impl MappingsUi {
         match candidate {
             Candidate::Plugin { key, target, .. } if keep == Keep::Scene => {
                 let slot = ctx.slot_of(key);
-                self.scene.borrow_mut().entry(key).or_default().push(SceneMapping { control: control.clone(), target, mode, invert_light: None });
+                self.scene.borrow_mut().entry(key).or_default().push(SceneMapping { control: control.clone(), target, mode, light: LightSettings::default() });
                 (false, slot)
             }
             Candidate::Plugin { key, target, panel } => {
@@ -1300,11 +1343,11 @@ impl MappingsUi {
                         RackTarget::Plugin { slot, plugin: meta.id.clone(), target }
                     }
                 };
-                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target: rack_target, mode, invert_light: None });
+                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target: rack_target, mode, light: LightSettings::default() });
                 (true, None)
             }
             Candidate::Rack(target) => {
-                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target, mode, invert_light: None });
+                self.global.borrow_mut().push(GlobalMapping { control: control.clone(), target, mode, light: LightSettings::default() });
                 (true, None)
             }
         }
@@ -1349,7 +1392,7 @@ impl MappingsUi {
                     candidate,
                     mode: MappingMode::default_for_target(selected.kind(), &steps, kind),
                     keep,
-                    invert_light: None,
+                    light: LightSettings::default(),
                 }
             }
         };
@@ -1360,13 +1403,13 @@ impl MappingsUi {
     /// Assigns the popup's draft.
     pub fn assign_popup(&self, ctx: &Ctx) -> (bool, Option<usize>) {
         let Some(selected) = self.selected.borrow().clone() else { return (false, None) };
-        let Some(Popup::Draft { candidate, mode, keep, invert_light }) = self.popup.borrow().clone() else {
+        let Some(Popup::Draft { candidate, mode, keep, light }) = self.popup.borrow().clone() else {
             return (false, None);
         };
         let result = self.add(ctx, &selected.reference, candidate.clone(), mode, keep);
         let entry = self.entry_of(ctx, &candidate);
         if let Some(entry) = entry {
-            self.set_invert_light_of(entry, invert_light);
+            self.set_light_of(entry, light);
         }
         *self.popup.borrow_mut() = entry.map(Popup::Assigned);
         self.expand_next.set(entry);
@@ -1375,24 +1418,25 @@ impl MappingsUi {
         result
     }
 
-    /// What `entry` keeps of "Invert light" (`None`: the target's default).
-    fn invert_light_of(&self, entry: Entry) -> Option<bool> {
+    /// What `entry` keeps of its control's light.
+    fn light_of(&self, entry: Entry) -> LightSettings {
         match entry {
-            Entry::Scene { key, index } => self.scene.borrow().get(&key)?.get(index)?.invert_light,
-            Entry::Global { index } => self.global.borrow().get(index)?.invert_light,
+            Entry::Scene { key, index } => self.scene.borrow().get(&key).and_then(|m| m.get(index)).map(|m| m.light),
+            Entry::Global { index } => self.global.borrow().get(index).map(|m| m.light),
         }
+        .unwrap_or_default()
     }
 
-    fn set_invert_light_of(&self, entry: Entry, invert_light: Option<bool>) {
+    fn set_light_of(&self, entry: Entry, light: LightSettings) {
         match entry {
             Entry::Scene { key, index } => {
                 if let Some(mapping) = self.scene.borrow_mut().get_mut(&key).and_then(|m| m.get_mut(index)) {
-                    mapping.invert_light = invert_light;
+                    mapping.light = light;
                 }
             }
             Entry::Global { index } => {
                 if let Some(mapping) = self.global.borrow_mut().get_mut(index) {
-                    mapping.invert_light = invert_light;
+                    mapping.light = light;
                 }
             }
         }
@@ -1401,27 +1445,63 @@ impl MappingsUi {
     /// Whether `entry`'s control shows its target turned around.
     fn inverts_light(&self, entry: Entry) -> bool {
         match entry {
-            Entry::Scene { key, index } => self.invert_light_of(Entry::Scene { key, index }).unwrap_or(false),
+            Entry::Scene { .. } => self.light_of(entry).invert_light.unwrap_or(false),
             Entry::Global { index } => self
                 .global
                 .borrow()
                 .get(index)
-                .is_some_and(|mapping| mapping.invert_light.unwrap_or_else(|| mapping.target.inverts_light())),
+                .is_some_and(|mapping| mapping.light.invert_light.unwrap_or_else(|| mapping.target.inverts_light())),
         }
     }
 
-    /// Sets row `row`'s "Invert light" (-1: the popup's). Returns whether the
-    /// config changed, and the slot whose scene mappings did.
-    pub fn set_invert_light(&self, ctx: &Ctx, row: i32, on: bool) -> (bool, Option<usize>) {
+    /// `entry`'s light as the mapping thread takes it.
+    fn engine_light(&self, entry: Entry) -> Light {
+        let light = self.light_of(entry);
+        Light {
+            follows: light.light_follows,
+            invert: self.inverts_light(entry),
+            lit: light.lit_value.unwrap_or(DEFAULT_LIT).clamp(1, 127),
+            colour: light.light_colour,
+        }
+    }
+
+    /// The selected control's light colour pairs, if its device's driver
+    /// gives it some (and runs: not with the driver switched off).
+    fn palette(&self) -> Option<Palette> {
+        let selected = self.selected.borrow();
+        let selected = selected.as_ref()?;
+        let driver = selected.surface.driver.as_deref().filter(|_| !selected.surface.options.one_port)?;
+        driver::palette(driver, &selected.surface, selected.control)
+    }
+
+    /// Changes row `row`'s light setting `what` (-1: the popup's): "follows"
+    /// and "invert" (0/1), "colour" (an index into the selected control's
+    /// palette), "lit" (1–127). Returns whether the config changed, and the
+    /// slot whose scene mappings did.
+    pub fn set_light(&self, ctx: &Ctx, row: i32, what: &str, value: i32) -> (bool, Option<usize>) {
+        let palette = self.palette();
+        let change = |light: &mut LightSettings| match what {
+            "follows" => light.light_follows = value != 0,
+            "invert" => light.invert_light = Some(value != 0),
+            "colour" => {
+                if let Some(pair) = palette.and_then(|palette| usize::try_from(value).ok().and_then(|i| palette.pairs.get(i))) {
+                    light.light_colour = Some(pair.code);
+                }
+            }
+            "lit" => light.lit_value = Some(value.clamp(1, 127) as u8),
+            _ => {}
+        };
         if row < 0
-            && let Some(Popup::Draft { invert_light, .. }) = &mut *self.popup.borrow_mut()
+            && let Some(Popup::Draft { light, .. }) = &mut *self.popup.borrow_mut()
         {
-            *invert_light = Some(on);
+            change(light);
             self.view_dirty.set(true);
             return (false, None);
         }
         let Some(entry) = self.row_entry(row) else { return (false, None) };
-        self.set_invert_light_of(entry, Some(on));
+        let mut light = self.light_of(entry);
+        change(&mut light);
+        self.set_light_of(entry, light);
         self.setup_dirty.set(true);
         self.view_dirty.set(true);
         match entry {
@@ -1596,7 +1676,7 @@ impl MappingsUi {
             return (false, None);
         }
         let candidate = Candidate::Plugin { key, target, panel: panel_position };
-        let invert_light = self.invert_light_of(entry);
+        let light = self.light_of(entry);
         let (mut config_changed, mut slot) = self.remove(ctx, entry);
         let (added_config, added_slot) =
             self.add(ctx, &selected.reference, candidate.clone(), mode, Keep::of(global, panel));
@@ -1604,7 +1684,7 @@ impl MappingsUi {
         slot = slot.or(added_slot);
         let moved = self.entry_of(ctx, &candidate);
         if let Some(moved) = moved {
-            self.set_invert_light_of(moved, invert_light);
+            self.set_light_of(moved, light);
         }
         if row >= 0 {
             // The moved row stays expanded.
@@ -1652,6 +1732,7 @@ impl MappingsUi {
             ControlKind::Button => "Button",
         };
         let settings = self.controls.borrow_mut().get(&selected.reference.key()).cloned().unwrap_or_default();
+        let palette = self.palette();
         LearnControl {
             selected: true,
             label: control.label.as_str().into(),
@@ -1659,7 +1740,17 @@ impl MappingsUi {
             kind: control.kind as i32,
             takeover: TakeoverSetting::ALL.iter().position(|t| *t == settings.takeover).unwrap_or(1) as i32,
             pass_through: settings.pass_through,
-            feedback: control.feedback.is_some(),
+            feedback: control.feedback,
+            palette: ModelRc::from(Rc::new(VecModel::from(
+                palette.iter().flat_map(|palette| palette.pairs).map(|pair| SharedString::from(pair.name())).collect::<Vec<_>>(),
+            ))),
+            palette_colours: ModelRc::from(Rc::new(VecModel::from(
+                palette
+                    .iter()
+                    .flat_map(|palette| palette.pairs)
+                    .map(|pair| ColourPair { unlit: swatch(pair.unlit), lit: swatch(pair.lit) })
+                    .collect::<Vec<_>>(),
+            ))),
         }
     }
 
@@ -1727,11 +1818,13 @@ impl MappingsUi {
                 .iter()
                 .find(|(e, ..)| *e == entry)
                 .map(|(entry, _, concrete, mode)| (self.row(ctx, *entry, concrete.as_ref(), mode), true)),
-            Some(Popup::Draft { candidate, mode, keep, invert_light }) => {
+            Some(Popup::Draft { candidate, mode, keep, light }) => {
                 let concrete = Self::candidate_concrete(ctx, &candidate);
                 let mut row = self.view_row(ctx, concrete.as_ref(), &mode);
-                row.invert_light = invert_light
+                let invert = light
+                    .invert_light
                     .unwrap_or_else(|| matches!(&candidate, Candidate::Rack(target) if target.inverts_light()));
+                self.show_light(&mut row, light, invert);
                 row.kept = i32::from(keep != Keep::Scene);
                 row.can_keep_with_scene = matches!(candidate, Candidate::Plugin { .. });
                 row.panel = match candidate {
@@ -1751,9 +1844,23 @@ impl MappingsUi {
         (popup, self.expanded.get().map_or(-1, |row| row as i32))
     }
 
+    /// Fills `row`'s light settings.
+    fn show_light(&self, row: &mut LearnTargetRow, light: LightSettings, invert: bool) {
+        row.light_follows = light.light_follows;
+        row.invert_light = invert;
+        row.lit_value = i32::from(light.lit_value.unwrap_or(DEFAULT_LIT));
+        row.light_colour = self
+            .palette()
+            .and_then(|palette| {
+                let code = light.light_colour.unwrap_or(palette.default);
+                palette.pairs.iter().position(|pair| pair.code == code)
+            })
+            .map_or(-1, |index| index as i32);
+    }
+
     fn row(&self, ctx: &Ctx, entry: Entry, concrete: Option<&Concrete>, mode: &MappingMode) -> LearnTargetRow {
         let mut row = self.view_row(ctx, concrete, mode);
-        row.invert_light = self.inverts_light(entry);
+        self.show_light(&mut row, self.light_of(entry), self.inverts_light(entry));
         match entry {
             Entry::Scene { key, index } => {
                 row.kept = 0;
@@ -1956,7 +2063,7 @@ mod tests {
                 target: PluginTarget::Param { symbol: "brightness".into() },
             },
             mode: MappingMode::Mirrored { from: 0.2, to: 0.8 },
-            invert_light: Some(true),
+            light: LightSettings { invert_light: Some(true), light_colour: Some(6), ..LightSettings::default() },
         };
         let json = serde_json::to_string(&mapping).unwrap();
         assert_eq!(serde_json::from_str::<GlobalMapping>(&json).unwrap(), mapping);
@@ -1964,7 +2071,7 @@ mod tests {
             control: ControlRef { surface: "s".into(), control: "P1".into() },
             target: PluginTarget::Setbfree { function: "upper.drawbar16".into() },
             mode: MappingMode::Toggle { levels: vec![0.0, 0.5, 1.0] },
-            invert_light: None,
+            light: LightSettings { light_follows: false, lit_value: Some(5), ..LightSettings::default() },
         };
         let json = serde_json::to_string(&scene).unwrap();
         assert_eq!(serde_json::from_str::<SceneMapping>(&json).unwrap(), scene);

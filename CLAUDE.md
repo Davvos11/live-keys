@@ -639,11 +639,16 @@ behind format-agnostic cores:
     `take_pick_ups` a pick-up control moved while waiting (which way to move it, for a
     driver's display). `Mappings` keeps a `Reader` per surface (`event(surface, port,
     event)`); a page change shows that page's (and page-less) controls' feedback again.
-    Controls with feedback (`ControlSetup::feedback`) always jump and are sent their first
-    target's state (turned around — 1 − p, lit ↔ unlit — when its `Link::invert_feedback`:
-    the GUI's "Invert light", `invert_light` on a `GlobalMapping`/`SceneMapping`, `None` = the
-    target's default, on for mutes, `RackTarget::inverts_light`) when it changes from elsewhere (`take_feedback`; `resync_feedback` sends
-    all), their own echo ignored. The thread sends those through `midir` output
+    A control with feedback (`ControlSetup::feedback`: the surface says it can show a
+    value) shows its **light's link**, `ControlSetup::light` — the first whose `Link::light`
+    (`Light`: `follows`, `invert`, `lit`, `colour`; the GUI's per-mapping light settings)
+    follows; with one it always jumps and is sent that target's state (turned around —
+    1 − p, lit ↔ unlit — when `invert`; a pad or button lit with the `lit` value, carried in
+    `Feedback` to `Surface::feedback`) when it changes from elsewhere (`take_feedback`;
+    `resync_feedback` sends all), its own echo ignored; with none following it's sent
+    nothing and takes its targets over like a control without feedback.
+    `Mappings::mapped` gives a driver each control's colour pair (the light's link's, else
+    the first's; `None` unmapped, `Some(None)` the driver's default). The thread sends those through `midir` output
     connections of its own (the device's port by name, opened on first use; at most every
     10 ms per control, no repeats; `Engine::resync_feedback`, which the GUI calls when the
     devices shown or present change, reopens them and sends everything) and reports them
@@ -950,8 +955,14 @@ behind format-agnostic cores:
   device-without-surface card's buttons. Saving reloads the library
   (`SurfacesUi::reload`) and `sync_surfaces`.
   `ui/learn.slint`: `LearnPane` (over the scenes pane while `AppState.learning`),
-  `TargetSettings` (mode, range, levels, momentary value, "Invert light" for a control with
-  feedback (`learn-set-invert-light`), kept with the scene or in every
+  `TargetSettings` (mode, range, levels, momentary value; for a control with feedback a
+  "Light" section — "Follows this target", "Invert light", and a `Select` of the control's
+  palette with swatches (`LearnControl.palette`/`palette-colours`, from
+  `driver::palette` while its driver runs) or else a "Lit value" `Stepper`, all through
+  `learn-set-light(row, what, value)` → `MappingsUi::set_light`; kept per mapping as
+  `LightSettings` — `light_follows`, `invert_light` (`None` = the target's default, on for
+  mutes, `RackTarget::inverts_light`), `light_colour`, `lit_value` — flattened into a
+  `GlobalMapping`/`SceneMapping`), kept with the scene or in every
   scene, this parameter or this panel position; a toggle's level sliders are in a `for`, so
   `MappingsUi::refresh_view` refills the rows' (and the popup's) levels models in place —
   a new model would rebuild the sliders mid-drag), and `LearnTarget`, laid over each target
@@ -1328,16 +1339,22 @@ behind format-agnostic cores:
     can't do; `driver::Driver` (pure, unit-tested) turns connect/disconnect, which controls
     are mapped, pick-up hints ("move it up/down") and a control's feedback into messages for
     the output port; `driver::open(id)`, `DRIVERS` (id and what the panel's switch says).
+    `Driver::palette(surface, control)` is a control's light colours (`Palette`: its
+    `ColourPair`s — code, unlit and lit `Colour` — and the default for a mapped control;
+    `driver::palette(id, ..)` without a running driver), chosen per mapping; `mapped` gets
+    each control's chosen pair.
     `NektarLxPlus`: DAW mode (USB port mode 2) and the pads as the host's (SAL) on connect,
-    everything back on disconnect, pad colours (mapped: orange, green when lit), the
+    everything back on disconnect, pad colours (the 16 pairs of Logic's `PAD_COLOR`; mapped
+    by default orange, green when lit; unmapped dark; only changed pads sent), the
     display's UP/dn, the Page button's two LEDs; Nektar's SysEx checksum (`checksum`).
   - `defaults`: mappings to install the first time a surface is shown (the GUI's
     `GlobalMapping` JSON with `control` a label; the LX88+ ships Mixer → slot volumes and
     mutes, Inst → the selected slot's panel and drawbars, Track/Patch, Play, Rewind/Forward →
     previous/next scene).
-  Controls with `"feedback": true` (bank or control; `lit` for pads/buttons) have a
-  `Feedback`, and `Surface::feedback(control, Shown)` is the message showing a position or
-  lit state on one. The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`/
+  Controls with `"feedback": true` (bank or control) can show a value sent back — that's
+  all a surface says about lights; what one shows is per mapping —, and
+  `Surface::feedback(control, Shown, lit)` is the message showing a position or lit state
+  on one (lit: a note-on with that velocity, a CC with that value; unlit: 0). The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`/
   `PageSpec`/`VariantSpec`, serde both ways; each `Surface` keeps its `spec`, its `options`
   and whether it's the user's); `Library::save` writes a spec as the user's `<id>.json`
   (replacing any file with that id), `Library::delete` removes it. Labels must be unique

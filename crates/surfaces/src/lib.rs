@@ -18,9 +18,9 @@
 //! `{ "pitch-bend": true }` or `{ "channel-pressure": true }`, optionally
 //! with its own `channel` and `label`. A bank (or a control, overriding it)
 //! with `"feedback": true` can show a value sent back as its own message —
-//! motor faders, LED rings, lit pads and buttons —, pads and buttons lit by
-//! `lit` (a note's velocity or a CC's value, default 127; some pads pick a
-//! colour by it).
+//! motor faders, LED rings, lit pads and buttons. That's all a surface says
+//! about lights: what one shows (which target, inverted, its lit value or
+//! colour) is each mapping's choice.
 //!
 //! **Several ports, pages, shift** (a controller like the Nektar Impact LX88+):
 //! - `ports`: one pattern per MIDI port of the device, in port order (a
@@ -203,8 +203,6 @@ pub struct BankSpec {
     pub pressure: Option<Pressure>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub feedback: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lit: Option<u8>,
     #[serde(default = "one_u8", skip_serializing_if = "is_one")]
     pub port: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,8 +238,6 @@ pub struct ControlSpec {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lit: Option<u8>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub shift: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,7 +319,7 @@ pub struct Control {
     /// Its page, as an index into [`Surface::pages`].
     pub page: Option<usize>,
     /// It shows a value sent back to it, as its own message.
-    pub feedback: Option<Feedback>,
+    pub feedback: bool,
     /// A button whose CC the hardware latches: every message is a press.
     pub toggle: bool,
     /// Its twin while shift is held.
@@ -331,13 +327,6 @@ pub struct Control {
     /// It's the shifted twin of that control (it has no message of its own,
     /// and is drawn in its place while shift is held).
     pub twin_of: Option<usize>,
-}
-
-/// How a control shows a value sent back to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Feedback {
-    /// A pad's or button's "on": a note's velocity, a CC's value.
-    pub lit: u8,
 }
 
 /// A value to show on a control.
@@ -508,9 +497,7 @@ impl Surface {
                     height: cell_height,
                     bank: bank_index,
                     page,
-                    feedback: first.feedback.unwrap_or(bank.feedback).then(|| Feedback {
-                        lit: first.lit.or(bank.lit).unwrap_or(127).min(127),
-                    }),
+                    feedback: first.feedback.unwrap_or(bank.feedback),
                     toggle: toggle && bank.kind == ControlKind::Button,
                     twin: None,
                     twin_of: None,
@@ -535,7 +522,7 @@ impl Surface {
                 short: label,
                 twin: None,
                 twin_of: Some(of),
-                feedback: None,
+                feedback: false,
                 ..original.clone()
             };
             let index = controls.len();
@@ -694,15 +681,20 @@ impl Surface {
     }
 
     /// The message showing `shown` on control `control`, if it takes feedback
-    /// (and its message can carry a value: not channel pressure).
-    pub fn feedback(&self, control: usize, shown: Shown) -> Option<[u8; 3]> {
+    /// (and its message can carry a value: not channel pressure). `lit` is
+    /// "on" for a note or a CC lit: the velocity or value (some devices pick
+    /// a colour by it).
+    pub fn feedback(&self, control: usize, shown: Shown, lit: u8) -> Option<[u8; 3]> {
         let control = self.controls.get(control)?;
-        let feedback = control.feedback?;
+        if !control.feedback {
+            return None;
+        }
+        let lit = lit.clamp(1, 127);
         let channel = control.channel & 0x0F;
         let seven = |position: f32| (position.clamp(0.0, 1.0) * 127.0).round() as u8;
         Some(match (control.message, shown) {
             (Message::Cc(number), Shown::Position(position)) => [0xB0 | channel, number, seven(position)],
-            (Message::Cc(number), Shown::Lit(on)) => [0xB0 | channel, number, if on { feedback.lit } else { 0 }],
+            (Message::Cc(number), Shown::Lit(on)) => [0xB0 | channel, number, if on { lit } else { 0 }],
             (Message::Note(number), shown) => {
                 let on = match shown {
                     Shown::Lit(on) => on,
@@ -710,7 +702,7 @@ impl Surface {
                 };
                 // Off as a note-on with velocity 0, MIDI's other note-off: the
                 // Nektar Impact LX+'s pads ignore a real note-off (tested).
-                [0x90 | channel, number, if on { feedback.lit.max(1) } else { 0 }]
+                [0x90 | channel, number, if on { lit } else { 0 }]
             }
             (Message::PitchBend, shown) => {
                 let position = match shown {
@@ -1109,13 +1101,15 @@ mod tests {
         let json = r#"{ "id": "x", "name": "x", "banks": [
             { "name": "k", "kind": "knob", "columns": 2, "channel": 2, "feedback": true,
               "controls": [{ "cc": 7 }, { "cc": 8, "feedback": false }] },
-            { "name": "p", "kind": "pad", "columns": 1, "prefix": "P", "feedback": true, "lit": 5, "controls": [{ "note": 36 }] }
+            { "name": "p", "kind": "pad", "columns": 1, "prefix": "P", "feedback": true, "controls": [{ "note": 36 }] }
         ] }"#;
         let surface = Surface::from_json(json).unwrap();
-        assert_eq!(surface.feedback(0, Shown::Position(1.0)), Some([0xB1, 7, 127]));
-        assert_eq!(surface.feedback(1, Shown::Position(1.0)), None);
-        assert_eq!(surface.feedback(2, Shown::Lit(true)), Some([0x90, 36, 5]));
-        assert_eq!(surface.feedback(2, Shown::Lit(false)), Some([0x90, 36, 0]));
+        assert_eq!(surface.feedback(0, Shown::Position(1.0), 127), Some([0xB1, 7, 127]));
+        assert_eq!(surface.feedback(1, Shown::Position(1.0), 127), None);
+        assert_eq!(surface.feedback(2, Shown::Lit(true), 5), Some([0x90, 36, 5]));
+        assert_eq!(surface.feedback(2, Shown::Lit(false), 5), Some([0x90, 36, 0]));
+        // A note-on with velocity 0 is "off": "on" is at least 1.
+        assert_eq!(surface.feedback(2, Shown::Lit(true), 0), Some([0x90, 36, 1]));
     }
 
     #[test]

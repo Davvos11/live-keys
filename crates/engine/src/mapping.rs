@@ -78,10 +78,32 @@ impl Mode {
 pub struct Link {
     pub target: TargetId,
     pub mode: Mode,
-    /// What a control with feedback shows of it is turned around: a
-    /// position p as 1 − p, lit as dark (a mute button lit while the slot
-    /// plays).
-    pub invert_feedback: bool,
+    /// What a control with feedback shows of it.
+    pub light: Light,
+}
+
+/// What a control with feedback (a lit button, a motor fader) shows of one
+/// of its targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Light {
+    /// The light shows this target. Of several, the first that does; none:
+    /// the control is sent nothing, and takes its targets over like a
+    /// control without feedback.
+    pub follows: bool,
+    /// Turned around: a position p as 1 − p, lit as dark (a mute button lit
+    /// while the slot plays).
+    pub invert: bool,
+    /// "On" for a note or CC lit: its velocity or value, 1..=127.
+    pub lit: u8,
+    /// The colour pair its driver gives the control (a code of the driver's
+    /// palette; `None`: the driver's default).
+    pub colour: Option<u8>,
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self { follows: true, invert: false, lit: 127, colour: None }
+    }
 }
 
 /// One surface control and its targets.
@@ -97,10 +119,18 @@ pub struct ControlSetup {
     pub pass_through: bool,
     /// A pad in [`Mode::Range`] goes back to 0 when let go.
     pub release_to_zero: bool,
-    /// It shows its first target's value sent back to it (motor faders, LED
-    /// rings, lit buttons): it never has to take a target over.
+    /// It can show a value sent back to it (motor faders, LED rings, lit
+    /// buttons): then it shows its light's link ([`ControlSetup::light`]),
+    /// and never has to take a target over.
     pub feedback: bool,
     pub links: Vec<Link>,
+}
+
+impl ControlSetup {
+    /// The link its light shows, if it has feedback: the first that follows.
+    pub fn light(&self) -> Option<&Link> {
+        self.links.iter().find(|link| link.light.follows).filter(|_| self.feedback)
+    }
 }
 
 /// A value to send back to a control that shows it.
@@ -109,6 +139,8 @@ pub struct Feedback {
     pub surface: usize,
     pub control: usize,
     pub shown: Shown,
+    /// "On" for a note or CC lit ([`Light::lit`]).
+    pub lit: u8,
     /// Send it even if it's what was sent last: the control may have
     /// changed its own light meanwhile.
     pub again: bool,
@@ -170,7 +202,7 @@ impl ControlState {
     fn jumps(&self) -> bool {
         matches!(self.kind, ControlKind::Pad | ControlKind::Button)
             || self.setup.takeover == Takeover::Jump
-            || self.setup.feedback
+            || self.setup.light().is_some()
     }
 }
 
@@ -315,7 +347,7 @@ impl Mappings {
                 // sent (a motor fader arriving) is its echo, not a move.
                 let control = &mut self.controls[index];
                 if let Some(Shown::Position(shown)) = control.shown
-                    && control.setup.feedback
+                    && control.setup.light().is_some()
                     && (shown * 127.0).round() == (value * 127.0).round()
                 {
                     control.hardware = Some(value);
@@ -382,27 +414,25 @@ impl Mappings {
 
     /// Sends a pad or button what it shows, whether or not that changed.
     fn show_again(&mut self, index: usize) {
-        if let Some(shown @ Shown::Lit(_)) = self.feedback_value(index) {
+        if let Some((shown @ Shown::Lit(_), lit)) = self.feedback_value(index) {
             let control = &mut self.controls[index];
             control.shown = Some(shown);
             self.feedback.push(Feedback {
                 surface: control.setup.surface,
                 control: control.setup.control,
                 shown,
+                lit,
                 again: true,
             });
         }
     }
 
-    /// What control `index` should show, if it shows anything: its first
-    /// target's base along its range, whether a toggle's target is on, or
-    /// whether a momentary button is held.
-    fn feedback_value(&self, index: usize) -> Option<Shown> {
+    /// What control `index` should show, if it shows anything (and its lit
+    /// value): its light's target's base along its range, whether a toggle's
+    /// target is on, or whether a momentary button is held.
+    fn feedback_value(&self, index: usize) -> Option<(Shown, u8)> {
         let control = &self.controls[index];
-        if !control.setup.feedback {
-            return None;
-        }
-        let link = control.setup.links.first()?;
+        let link = control.setup.light()?;
         let base = self.targets[link.target].base;
         let shown = match link.mode {
             Mode::Range { from, to } => (to != from).then(|| Shown::Position(((base - from) / (to - from)).clamp(0.0, 1.0))),
@@ -411,18 +441,19 @@ impl Mappings {
             // It's wherever it was turned to.
             Mode::Modulate { .. } => None,
         }?;
-        Some(match shown {
-            _ if !link.invert_feedback => shown,
+        let shown = match shown {
+            _ if !link.light.invert => shown,
             Shown::Position(position) => Shown::Position(1.0 - position),
             Shown::Lit(lit) => Shown::Lit(!lit),
-        })
+        };
+        Some((shown, link.light.lit))
     }
 
     /// Sends control `index` its value if that changed. `own`: after its own
     /// move, a position it's at already isn't sent back (motor faders fight
     /// that), only noted.
     fn show(&mut self, index: usize, own: bool) {
-        let Some(shown) = self.feedback_value(index) else { return };
+        let Some((shown, lit)) = self.feedback_value(index) else { return };
         let control = &mut self.controls[index];
         if control.shown == Some(shown) {
             return;
@@ -433,6 +464,7 @@ impl Mappings {
                 surface: control.setup.surface,
                 control: control.setup.control,
                 shown,
+                lit,
                 again: false,
             });
         }
@@ -441,7 +473,7 @@ impl Mappings {
     /// Sends the controls showing `target` (but `except`) its new value.
     fn show_target(&mut self, target: TargetId, except: Option<usize>) {
         for index in 0..self.controls.len() {
-            if Some(index) != except && self.controls[index].setup.links.first().is_some_and(|link| link.target == target) {
+            if Some(index) != except && self.controls[index].setup.light().is_some_and(|link| link.target == target) {
                 self.show(index, false);
             }
         }
@@ -635,13 +667,15 @@ impl Mappings {
     }
 
     /// Which of surface `surface`'s controls (as many as it has) drive
-    /// something.
-    pub fn mapped(&self, surface: usize) -> Vec<bool> {
+    /// something, and their colour pair, for its driver (`Driver::mapped`):
+    /// the light's link's, else the first link's.
+    pub fn mapped(&self, surface: usize) -> Vec<Option<Option<u8>>> {
         let count = self.surfaces.get(surface).map_or(0, |surface| surface.controls.len());
-        let mut mapped = vec![false; count];
+        let mut mapped = vec![None; count];
         for control in self.controls.iter().filter(|control| control.setup.surface == surface) {
             if let Some(slot) = mapped.get_mut(control.setup.control) {
-                *slot = true;
+                let link = control.setup.light().or(control.setup.links.first());
+                *slot = Some(link.and_then(|link| link.light.colour));
             }
         }
         mapped
@@ -710,7 +744,7 @@ mod tests {
             pass_through: false,
             release_to_zero: true,
             feedback: false,
-            links: vec![Link { target: 0, mode, invert_feedback: false }],
+            links: vec![Link { target: 0, mode, light: Light::default() }],
         }
     }
 
@@ -897,6 +931,49 @@ mod tests {
         // Let go, a button is sent its light again (it turned it off itself).
         note(&mut mappings, 36, 0);
         assert_eq!(shown(&mut mappings), [(1, Shown::Lit(true))]);
+    }
+
+    #[test]
+    fn the_light_shows_the_first_target_that_follows() {
+        let now = Instant::now();
+        let surface = Arc::new(
+            Surface::from_json(
+                r#"{ "id": "t", "name": "t", "banks": [
+                    { "name": "F", "kind": "fader", "columns": 1, "prefix": "F", "feedback": true, "controls": [{ "cc": 1 }] },
+                    { "name": "B", "kind": "button", "columns": 1, "prefix": "B", "feedback": true, "controls": [{ "note": 36 }] }
+                ] }"#,
+            )
+            .unwrap(),
+        );
+        let toggle = Mode::Toggle { levels: vec![0.0, 1.0] };
+        let mut button = setup(BUTTON, Takeover::Jump, toggle.clone());
+        button.feedback = true;
+        button.links[0].light.follows = false;
+        button.links[0].light.colour = Some(3);
+        let light = Light { follows: true, invert: true, lit: 5, colour: Some(6) };
+        button.links.push(Link { target: 1, mode: toggle, light });
+        // A fader with feedback whose one target doesn't follow: it's sent
+        // nothing, and picks its target up like a fader without.
+        let mut fader = setup(FADER, Takeover::PickUp, FULL);
+        fader.feedback = true;
+        fader.links[0].light.follows = false;
+        let mut mappings = Mappings::new(vec![surface], vec![fader, button], vec![0.0, 1.0]);
+        let shown = |mappings: &mut Mappings| -> Vec<(usize, Shown, u8)> {
+            mappings.take_feedback().iter().map(|f| (f.control, f.shown, f.lit)).collect()
+        };
+        // Target 1 is on, inverted: dark.
+        mappings.resync_feedback();
+        assert_eq!(shown(&mut mappings), [(1, Shown::Lit(false), 5)]);
+        // Target 0 moving shows nowhere; target 1 going off lights the button with its value.
+        mappings.set_position(0, 1.0);
+        assert!(shown(&mut mappings).is_empty());
+        mappings.set_position(1, 0.0);
+        assert_eq!(shown(&mut mappings), [(1, Shown::Lit(true), 5)]);
+        // The fader waits to pick target 0 (at 1.0) up.
+        assert!(cc(&mut mappings, 0, now).is_empty());
+        // The driver gets the light's link's colour.
+        let mapped = mappings.mapped(0);
+        assert_eq!(mapped, [Some(None), Some(Some(6))]);
     }
 
     #[test]
