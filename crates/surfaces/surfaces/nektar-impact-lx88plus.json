@@ -1397,6 +1397,24 @@
         0.0,
         1.0
       ]
+    },
+    {
+      "control": "Rewind",
+      "target": {
+        "kind": "scene-step",
+        "step": -1
+      },
+      "mode": "momentary",
+      "value": 1.0
+    },
+    {
+      "control": "Forward",
+      "target": {
+        "kind": "scene-step",
+        "step": 1
+      },
+      "mode": "momentary",
+      "value": 1.0
     }
   ]
 }

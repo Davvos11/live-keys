@@ -574,7 +574,14 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
 7. **Done (2026-11-22)**, for the Nektar Impact LX88+ (see §10 of `nektar-impact.md`):
    pages with variants, several ports per device, shift twins, whole-port claims, per-bank
    cell sizes, drivers, default mappings, and the selected slot with its targets.
-8. Later: relative/14-bit encoders, scene targets.
+8. **Done (2026-11-23).** Scene and panic targets: a button or pad recalls the previous/next
+   scene (the list's order, wrapping; with none current, the first or last), a scene by
+   name or by number (its place in the list; a number without a scene does nothing), or
+   sends MIDI panic — all actions on a press, picked in learn mode from the pane's
+   "+ Action…" menu (with the selected slot's actions) in two steps for a given scene:
+   "Scene by name…" or "Scene by number…", then the name or number. Shown as "On press".
+   The Penpot design's "MIDI learn 6" board draws both steps.
+9. Later: relative/14-bit encoders.
 
 ## Open questions
 

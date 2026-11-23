@@ -3,7 +3,7 @@
 // can be a target. See `docs/design/midi-learn.md`.
 import { CheckBox, ScrollView } from "std-widgets.slint";
 import { AppState, AppLogic, LearnTargetRow } from "globals.slint";
-import { Theme, Icons, KButton, Segmented } from "widgets.slint";
+import { Theme, Icons, KButton, ListItem, Segmented } from "widgets.slint";
 import { RangeSlider, SingleSlider } from "range_slider.slint";
 
 component Caption inherits Text {
@@ -235,6 +235,40 @@ component TargetRow inherits Rectangle {
 
 // The pane over the scenes while learning: the selected control and its
 // targets.
+// What a button or pad can do beyond the controls on screen: a list to pick
+// one from (`AppState.learn-actions`), added as a press.
+component ActionsPopup inherits PopupWindow {
+    close-policy: PopupClosePolicy.close-on-click-outside;
+    height: min(AppState.learn-actions.length * 30px + 8px, 420px);
+
+    Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        background: Theme.background;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000080;
+        clip: true;
+        Flickable {
+            content-height: AppState.learn-actions.length * 30px + 8px;
+            for action[index] in AppState.learn-actions : ListItem {
+                x: 4px;
+                y: 4px + index * 30px;
+                width: parent.width - 8px;
+                height: 28px;
+                text: action.text;
+                clicked => {
+                    AppLogic.learn-add-action(index);
+                    // A list stays open on its next one.
+                    if !action.opens {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component LearnPane inherits Rectangle {
     background: Theme.background;
 
@@ -334,13 +368,28 @@ export component LearnPane inherits Rectangle {
         }
         if !AppState.learn-control.selected : Rectangle { vertical-stretch: 1; }
         if AppState.learn-control.selected : HorizontalLayout {
-            alignment: start;
+            spacing: 8px;
             KButton {
                 text: "Remove all targets";
                 enabled: AppState.learn-rows.length > 0;
                 clicked => { AppLogic.learn-remove-all(); }
             }
+            Rectangle { horizontal-stretch: 1; }
+            // Buttons and pads: scenes, slots, presets, panic.
+            if AppState.learn-actions.length > 0 : KButton {
+                text: "+ Action…";
+                clicked => {
+                    AppLogic.learn-open-actions();
+                    actions-popup.show();
+                }
+            }
         }
+    }
+
+    actions-popup := ActionsPopup {
+        x: 10px;
+        width: root.width - 20px;
+        y: max(10px, root.height - self.height - 56px);
     }
 }
 

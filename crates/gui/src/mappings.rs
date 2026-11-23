@@ -228,6 +228,15 @@ pub enum RackTarget {
     /// Loads the selected slot's instrument's preset `step` presets on from
     /// the current one: a button's press.
     InstrumentPreset { step: i32 },
+    /// Recalls the scene `step` scenes on from the current one, in the list's
+    /// order (wrapping): a button's press.
+    SceneStep { step: i32 },
+    /// Recalls the scene called `name`: a button's press.
+    Scene { name: String },
+    /// Recalls the `number`th scene in the list (from 1): a button's press.
+    SceneNumber { number: usize },
+    /// MIDI panic: a button's press.
+    Panic,
 }
 
 /// A modulated target's base, as a plugin's slot preset keeps it: the
@@ -307,6 +316,10 @@ pub enum Concrete {
     /// Actions on a press (position 1), nothing on release.
     SelectSlot(i32),
     InstrumentPreset(i32),
+    SceneStep(i32),
+    Scene(String),
+    SceneNumber(usize),
+    Panic,
 }
 
 /// What the rest of the GUI knows that mappings need.
@@ -399,6 +412,10 @@ impl Ctx<'_> {
             }
             RackTarget::SelectSlot { step } => Concrete::SelectSlot(*step),
             RackTarget::InstrumentPreset { step } => Concrete::InstrumentPreset(*step),
+            RackTarget::SceneStep { step } => Concrete::SceneStep(*step),
+            RackTarget::Scene { name } => Concrete::Scene(name.clone()),
+            RackTarget::SceneNumber { number } => Concrete::SceneNumber(*number),
+            RackTarget::Panic => Concrete::Panic,
         })
     }
 }
@@ -411,6 +428,59 @@ fn plugin_target_of(meta: &live_keys_engine::LoadedPluginMeta, control: &profile
         }
         profiles::Target::Setbfree(function) => PluginTarget::Setbfree { function: function.clone() },
     })
+}
+
+/// Which list learn mode's actions menu shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActionMenu {
+    #[default]
+    Top,
+    SceneByName,
+    SceneByNumber,
+}
+
+/// One entry of the actions menu: an action, or a list of them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionItem {
+    Action(RackTarget),
+    Open(ActionMenu),
+}
+
+/// The fewest scene numbers the menu offers, so buttons can be mapped before
+/// the scenes are saved.
+const MIN_SCENE_NUMBERS: usize = 8;
+
+/// What a button can do beyond what's on screen (learn mode's actions menu):
+/// list `menu`'s labels and entries, with `scenes` the scenes' names in the
+/// list's order.
+pub fn actions(menu: ActionMenu, scenes: &[String]) -> Vec<(String, ActionItem)> {
+    let action = |label: &str, target| (label.to_string(), ActionItem::Action(target));
+    let back = ("‹ Back".to_string(), ActionItem::Open(ActionMenu::Top));
+    match menu {
+        ActionMenu::Top => vec![
+            action("Previous scene", RackTarget::SceneStep { step: -1 }),
+            action("Next scene", RackTarget::SceneStep { step: 1 }),
+            ("Scene by name…".to_string(), ActionItem::Open(ActionMenu::SceneByName)),
+            ("Scene by number…".to_string(), ActionItem::Open(ActionMenu::SceneByNumber)),
+            action("Previous slot", RackTarget::SelectSlot { step: -1 }),
+            action("Next slot", RackTarget::SelectSlot { step: 1 }),
+            action("Selected slot: previous preset", RackTarget::InstrumentPreset { step: -1 }),
+            action("Selected slot: next preset", RackTarget::InstrumentPreset { step: 1 }),
+            action("MIDI panic", RackTarget::Panic),
+        ],
+        ActionMenu::SceneByName => std::iter::once(back)
+            .chain(scenes.iter().map(|name| (name.clone(), ActionItem::Action(RackTarget::Scene { name: name.clone() }))))
+            .collect(),
+        ActionMenu::SceneByNumber => std::iter::once(back)
+            .chain((1..=scenes.len().max(MIN_SCENE_NUMBERS)).map(|number| {
+                let label = match scenes.get(number - 1) {
+                    Some(name) => format!("Scene {number} ({name})"),
+                    None => format!("Scene {number}"),
+                };
+                (label, ActionItem::Action(RackTarget::SceneNumber { number }))
+            }))
+            .collect(),
+    }
 }
 
 /// A slot's volume in dB at volume-knob `position`.
@@ -448,6 +518,19 @@ impl Resolved {
         Some(Self { concrete, control })
     }
 
+    /// It's something done on a press (a scene recall…), not a value.
+    fn is_action(&self) -> bool {
+        matches!(
+            self.concrete,
+            Concrete::SelectSlot(_)
+                | Concrete::InstrumentPreset(_)
+                | Concrete::SceneStep(_)
+                | Concrete::Scene(_)
+                | Concrete::SceneNumber(_)
+                | Concrete::Panic
+        )
+    }
+
     /// Where it is now, 0..1.
     pub fn position(&self, ctx: &Ctx) -> f32 {
         let config = ctx.config;
@@ -470,7 +553,12 @@ impl Resolved {
             Concrete::MetronomeVolume => config.metronome.volume,
             Concrete::MetronomePlay => f32::from(u8::from(ctx.metronome_playing)),
             Concrete::Tempo => (f32::from(config.metronome.bpm) - MIN_BPM) / (MAX_BPM - MIN_BPM),
-            Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => 0.0,
+            Concrete::SelectSlot(_)
+            | Concrete::InstrumentPreset(_)
+            | Concrete::SceneStep(_)
+            | Concrete::Scene(_)
+            | Concrete::SceneNumber(_)
+            | Concrete::Panic => 0.0,
         }
     }
 
@@ -497,9 +585,14 @@ impl Resolved {
     fn steps(&self) -> Vec<f32> {
         match &self.concrete {
             Concrete::Plugin { .. } => self.control.as_ref().map(profiles::Control::steps).unwrap_or_default(),
-            Concrete::Mute(_) | Concrete::MetronomePlay | Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => {
-                vec![0.0, 1.0]
-            }
+            Concrete::Mute(_)
+            | Concrete::MetronomePlay
+            | Concrete::SelectSlot(_)
+            | Concrete::InstrumentPreset(_)
+            | Concrete::SceneStep(_)
+            | Concrete::Scene(_)
+            | Concrete::SceneNumber(_)
+            | Concrete::Panic => vec![0.0, 1.0],
             _ => Vec::new(),
         }
     }
@@ -520,7 +613,12 @@ impl Resolved {
             Concrete::MetronomeVolume => format!("{} %", (position * 100.0).round()),
             Concrete::MetronomePlay => on_off(position >= 0.5),
             Concrete::Tempo => format!("{} BPM", tempo(position)),
-            Concrete::SelectSlot(_) | Concrete::InstrumentPreset(_) => String::new(),
+            Concrete::SelectSlot(_)
+            | Concrete::InstrumentPreset(_)
+            | Concrete::SceneStep(_)
+            | Concrete::Scene(_)
+            | Concrete::SceneNumber(_)
+            | Concrete::Panic => String::new(),
         }
     }
 
@@ -542,6 +640,10 @@ impl Resolved {
             Concrete::InstrumentPreset(step) => {
                 if *step < 0 { "Previous preset" } else { "Next preset" }.into()
             }
+            Concrete::SceneStep(step) => if *step < 0 { "Previous scene" } else { "Next scene" }.into(),
+            Concrete::Scene(name) => name.clone(),
+            Concrete::SceneNumber(number) => format!("Scene {number}"),
+            Concrete::Panic => "MIDI panic".into(),
         }
     }
 
@@ -553,7 +655,8 @@ impl Resolved {
             }
             Concrete::Volume(slot) | Concrete::Mute(slot) | Concrete::Transpose(slot) => slot_name(*slot),
             Concrete::MetronomeVolume | Concrete::MetronomePlay | Concrete::Tempo => "Metronome".into(),
-            Concrete::SelectSlot(_) => "Rack".into(),
+            Concrete::SelectSlot(_) | Concrete::Panic => "Rack".into(),
+            Concrete::SceneStep(_) | Concrete::Scene(_) | Concrete::SceneNumber(_) => "Scenes".into(),
             Concrete::InstrumentPreset(_) => format!("Selected slot ({})", ctx.config.selected_slot + 1),
         }
     }
@@ -733,35 +836,65 @@ impl MappingsUi {
 
     /// Writes the mappings kept in every scene and the controls' settings
     /// into `config`, for saving.
-    /// Installs `surface`'s default mappings as the user's (kept in every
-    /// scene) if they never were: once per surface, so deleting one is for
-    /// good. Returns whether it did.
-    pub fn install_defaults(&self, surface: &Surface, config: &mut AppConfig) -> bool {
-        if surface.spec.defaults.is_empty() || config.surfaces.defaults_installed.contains(&surface.id) {
+    /// Adds `target` (one of [`actions`]) to the selected control, kept in
+    /// every scene, as a press: buttons and pads only. Returns whether it did
+    /// (the config changed).
+    pub fn add_action(&self, target: RackTarget) -> bool {
+        let Some(selected) = self.selected.borrow().clone() else { return false };
+        if !matches!(selected.kind(), ControlKind::Button | ControlKind::Pad) {
             return false;
         }
+        let mapping =
+            GlobalMapping { control: selected.reference.clone(), target, mode: MappingMode::Momentary { value: 1.0, velocity: false } };
         {
             let mut global = self.global.borrow_mut();
-            for default in &surface.spec.defaults {
-                let mut value = default.clone();
-                if let Some(fields) = value.as_object_mut()
-                    && let Some(label) = fields.get("control").and_then(|control| control.as_str()).map(str::to_string)
-                {
-                    let control = ControlRef { surface: surface.id.clone(), control: label };
-                    fields.insert("control".into(), serde_json::to_value(control).unwrap_or_default());
-                }
-                match serde_json::from_value::<GlobalMapping>(value) {
-                    Ok(mapping) if !global.contains(&mapping) => global.push(mapping),
-                    Ok(_) => {}
-                    Err(err) => log::warn!("{}: a default mapping doesn't read: {err}", surface.id),
-                }
+            if global.iter().any(|known| known.control == mapping.control && known.target == mapping.target) {
+                return false;
             }
+            global.push(mapping);
         }
-        config.surfaces.defaults_installed.push(surface.id.clone());
-        self.store(config);
         self.setup_dirty.set(true);
         self.view_dirty.set(true);
         true
+    }
+
+    /// Installs `surface`'s default mappings as the user's (kept in every
+    /// scene), each once: one deleted stays deleted, one added in a later
+    /// version arrives then. Returns whether the config changed.
+    pub fn install_defaults(&self, surface: &Surface, config: &mut AppConfig) -> bool {
+        let mut added = false;
+        let mut changed = false;
+        for default in &surface.spec.defaults {
+            let key = format!("{}/{default}", surface.id);
+            if config.surfaces.defaults_installed.contains(&key) {
+                continue;
+            }
+            config.surfaces.defaults_installed.push(key);
+            changed = true;
+            let mut value = default.clone();
+            if let Some(fields) = value.as_object_mut()
+                && let Some(label) = fields.get("control").and_then(|control| control.as_str()).map(str::to_string)
+            {
+                let control = ControlRef { surface: surface.id.clone(), control: label };
+                fields.insert("control".into(), serde_json::to_value(control).unwrap_or_default());
+            }
+            match serde_json::from_value::<GlobalMapping>(value) {
+                Ok(mapping) => {
+                    let mut global = self.global.borrow_mut();
+                    if !global.contains(&mapping) {
+                        global.push(mapping);
+                        added = true;
+                    }
+                }
+                Err(err) => log::warn!("{}: a default mapping doesn't read: {err}", surface.id),
+            }
+        }
+        if added {
+            self.store(config);
+            self.setup_dirty.set(true);
+            self.view_dirty.set(true);
+        }
+        changed
     }
 
     pub fn store(&self, config: &mut AppConfig) {
@@ -1549,7 +1682,7 @@ impl MappingsUi {
         let mut row = LearnTargetRow {
             name: resolved.as_ref().map(|r| r.name()).unwrap_or_default().into(),
             place: resolved.as_ref().map(|r| r.place(ctx)).unwrap_or_default().into(),
-            chip: mode.chip().into(),
+            chip: if resolved.as_ref().is_some_and(Resolved::is_action) { "On press".into() } else { mode.chip().into() },
             greyed: resolved.is_none(),
             mode: mode.index(),
             ..Default::default()
@@ -1678,8 +1811,10 @@ mod tests {
                     mapping.control.control
                 );
             }
-            // Once only.
+            // Once only: a deleted default stays deleted.
+            mappings.global.borrow_mut().pop();
             assert!(!mappings.install_defaults(&surface, &mut config));
+            assert_eq!(mappings.global.borrow().len(), surface.spec.defaults.len().saturating_sub(1));
         }
     }
 

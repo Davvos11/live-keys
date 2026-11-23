@@ -60,8 +60,8 @@ pub struct SurfacesConfig {
     /// Per device, the variant of each page with variants that isn't on its
     /// first (a keyboard's preset), by page id.
     pub variants: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
-    /// Surfaces (by id) whose default mappings were installed once: they're
-    /// the user's from then on.
+    /// The surfaces' default mappings installed so far, each as
+    /// `<surface id>/<its JSON>`: they're the user's from then on.
     pub defaults_installed: Vec<String>,
     /// Devices whose surface's driver the user switched off (a keyboard left
     /// in its own mode rather than DAW mode).

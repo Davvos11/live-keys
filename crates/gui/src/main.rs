@@ -826,6 +826,29 @@ impl Rack {
     }
 
     /// The scene in row `index` of the list, or the current scene for -1.
+    /// The scene `step` scenes on from the current one, in the list's order
+    /// (all scenes, whatever the search shows), wrapping; with none current,
+    /// the first (or the last, going back).
+    fn scene_stepped(&self, step: i32) -> Option<scenes::Stored> {
+        let store = self.scene_store.borrow();
+        if store.is_empty() {
+            return None;
+        }
+        let count = store.len() as i32;
+        let current = self.current_scene.borrow().as_ref().and_then(|current| store.iter().position(|stored| stored.dir == current.dir));
+        let index = match current {
+            Some(index) => (index as i32 + step).rem_euclid(count),
+            None if step < 0 => count - 1,
+            None => 0,
+        };
+        store.get(index as usize).cloned()
+    }
+
+    /// Every scene's name, in the list's order.
+    pub fn scene_names(&self) -> Vec<String> {
+        self.scene_store.borrow().iter().map(|stored| stored.scene.name.clone()).collect()
+    }
+
     fn scene_at(&self, index: i32) -> Option<scenes::Stored> {
         if index < 0 {
             return self.current_scene_stored();
@@ -1443,6 +1466,8 @@ fn main() -> anyhow::Result<()> {
         editor: RefCell::default(),
         edit_banks: Rc::new(VecModel::default()),
         edit_controls: Rc::new(VecModel::default()),
+        action_menu: Cell::default(),
+        actions: RefCell::default(),
     });
     learn.connect(&logic);
     learn.connect_editor(&logic);
@@ -1620,6 +1645,41 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(app) = app_weak.upgrade() {
                 app.global::<AppState>().set_selected_slot(slot as i32);
+            }
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_step_scene(move |step| {
+            if let Some(stored) = rack.scene_stepped(step) {
+                load_scene(&engine, &config, &rack, &stored);
+            }
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_recall_scene_number(move |number| {
+            let stored = (number >= 1).then(|| rack.scene_store.borrow().get(number as usize - 1).cloned()).flatten();
+            if let Some(stored) = stored {
+                load_scene(&engine, &config, &rack, &stored);
+            }
+        });
+    }
+
+    {
+        let config = config.clone();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_recall_scene(move |name| {
+            let stored = rack.scene_store.borrow().iter().find(|stored| stored.scene.name == name.as_str()).cloned();
+            if let Some(stored) = stored {
+                load_scene(&engine, &config, &rack, &stored);
             }
         });
     }

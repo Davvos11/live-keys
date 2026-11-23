@@ -520,8 +520,8 @@ user's to edit or delete; nothing re-adds them). For the LX88+:
 - **Track −/+** move the **selected slot** — a new rack concept: one slot is selected
   (outlined in the GUI, clicked to select, kept in the config), the target of everything
   "selected slot".
-- Transport: Play = metronome play/stop, Shift + Play (Click) = the same; the rest unmapped
-  until there are targets for them (scene previous/next on Rewind/Forward is a candidate).
+- Transport: Play = metronome play/stop, Shift + Play (Click) = the same; Rewind / Forward =
+  previous / next scene (added 2026-11-23, with the scene targets); the rest unmapped.
 
 ### 10.7 Phases
 
@@ -553,14 +553,13 @@ user's to edit or delete; nothing re-adds them). For the LX88+:
   UP/dn for a fader set to pick up; fader-button LEDs showing a slot's mute; Track −/+
   moving the selected slot; Inst knobs and faders on the selected slot's panel and
   drawbars; Patch + loading the next preset; Play starting the metronome.
-- The defaults ship in the surface file's `defaults`, installed once
-  (`AppConfig.surfaces.defaults_installed`). Rewind/Forward, Loop, Stop, Record and their
-  Shift functions (Back, Set L/R, Undo, Mode) are left unmapped; scene targets would suit
-  them.
+- The defaults ship in the surface file's `defaults`, each installed once
+  (`AppConfig.surfaces.defaults_installed`). Loop, Stop, Record and their Shift functions
+  (Back, Set L/R, Undo, Mode) are left unmapped.
 - The Preset page's variants are the guide's factory presets. A keyboard whose presets were
   edited (the developer's preset 1, set up for Ardour) sends other messages there, which
   the page doesn't recognise. Factory-reset the presets, or edit the surface.
 - Not done: the Page button has no default mapping (its LEDs work as feedback when one is
-  added); "the selected slot" targets can't be picked in learn mode yet, only by defaults
-  or by editing the config.
+  added). The selected slot's actions and the scene targets are picked in learn mode from
+  a button's "+ Action…" menu.
 

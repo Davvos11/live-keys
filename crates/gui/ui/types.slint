@@ -321,6 +321,13 @@ export struct LearnTargetRow {
 
 // MIDI learn's selected control. `kind`: 0 fader, 1 knob, 2 pad, 3 button.
 // `takeover`: 0 jump, 1 glide, 2 pick up.
+// An entry of learn mode's actions menu: its text, and whether it opens a
+// list (scene by name or number) rather than being an action.
+export struct LearnAction {
+    text: string,
+    opens: bool,
+}
+
 export struct LearnControl {
     selected: bool,
     label: string,

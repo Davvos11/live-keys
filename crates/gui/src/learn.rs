@@ -32,6 +32,10 @@ pub struct Learn {
     /// being dragged mustn't be made anew.
     pub edit_banks: Rc<VecModel<EditBank>>,
     pub edit_controls: Rc<VecModel<crate::SurfaceControlView>>,
+    /// The actions menu's list, and its entries as `AppState.learn-actions`
+    /// lists them.
+    pub action_menu: Cell<mappings::ActionMenu>,
+    pub actions: RefCell<Vec<mappings::ActionItem>>,
 }
 
 /// A mapping moved a target: as reported, the latest per target.
@@ -225,6 +229,34 @@ impl Learn {
                     logic.invoke_step_instrument_preset(selected, step);
                 }
             }
+            Concrete::SceneStep(step) => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    logic.invoke_step_scene(step);
+                }
+            }
+            Concrete::Scene(name) => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    logic.invoke_recall_scene(name.as_str().into());
+                }
+            }
+            Concrete::SceneNumber(number) => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    logic.invoke_recall_scene_number(number as i32);
+                }
+            }
+            Concrete::Panic => {
+                if let Some(logic) = &logic
+                    && position >= 0.5
+                {
+                    logic.invoke_midi_panic();
+                }
+            }
         }
         self.with_ctx(|ctx| self.rack.mappings.saw(ctx, applied.target));
     }
@@ -282,7 +314,23 @@ impl Learn {
             (popup, expanded, mappings.flags(ctx))
         });
         state.set_learning(mappings.learning());
-        state.set_learn_control(mappings.control_view());
+        let control = mappings.control_view();
+        // Buttons and pads can do what isn't on screen (scenes, panic…).
+        let actions = if control.selected && control.kind >= 2 {
+            mappings::actions(self.action_menu.get(), &self.rack.scene_names())
+        } else {
+            Vec::new()
+        };
+        let rows: Vec<crate::LearnAction> = actions
+            .iter()
+            .map(|(label, item)| crate::LearnAction {
+                text: label.as_str().into(),
+                opens: matches!(item, mappings::ActionItem::Open(_)),
+            })
+            .collect();
+        *self.actions.borrow_mut() = actions.into_iter().map(|(_, item)| item).collect();
+        state.set_learn_actions(ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+        state.set_learn_control(control);
         state.set_learn_expanded(expanded);
         match popup {
             Some((row, assigned)) => {
@@ -390,6 +438,25 @@ impl Learn {
         logic.on_learn_click(move |kind, slot, index| {
             let changed = learn.with_ctx(|ctx| learn.rack.mappings.click(ctx, kind, slot as usize, index as usize));
             learn.changed(changed);
+            learn.refresh_view();
+        });
+        let learn = self.clone();
+        logic.on_learn_add_action(move |index| {
+            let item = learn.actions.borrow().get(index.max(0) as usize).cloned();
+            match item {
+                Some(mappings::ActionItem::Action(target)) => {
+                    let changed = learn.rack.mappings.add_action(target);
+                    learn.changed((changed, None));
+                    learn.action_menu.set(mappings::ActionMenu::Top);
+                }
+                Some(mappings::ActionItem::Open(menu)) => learn.action_menu.set(menu),
+                None => {}
+            }
+            learn.refresh_view();
+        });
+        let learn = self.clone();
+        logic.on_learn_open_actions(move || {
+            learn.action_menu.set(mappings::ActionMenu::Top);
             learn.refresh_view();
         });
         let learn = self.clone();

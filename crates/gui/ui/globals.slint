@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, EditBank, EditBankSettings } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, EditBank, EditBankSettings } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, SlotPresetRow, MidiDeviceRow, MidiInputRow, SceneRow, SceneSlotChoice, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, LearnAction, EditBank, EditBankSettings } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -32,6 +32,9 @@ export global AppState {
     in property <LearnControl> learn-control: Platform.uses-mock-data ? MockData.learn-control : { };
     in property <[LearnTargetRow]> learn-rows: Platform.uses-mock-data ? MockData.learn-rows : [];
     in property <int> learn-expanded: -1;
+    // What the selected control (a button or pad) can do beyond what's on
+    // screen: learn mode's actions menu (scenes, slots, presets, panic).
+    in property <[LearnAction]> learn-actions;
     in property <LearnTargetRow> learn-popup;
     in property <bool> learn-popup-assigned;
     in property <int> master-volume-learn;
@@ -170,6 +173,12 @@ export global AppLogic {
     callback surface-variant(/* device */ string, /* step */ int);
     // Selects a slot (what "the selected slot" mappings drive).
     callback select-slot(/* slot */ int);
+    // Recalls the scene `step` scenes on from the current one (the list's order, wrapping).
+    callback step-scene(/* step */ int);
+    // Recalls the scene called `name`.
+    callback recall-scene(/* name */ string);
+    // Recalls the `number`th scene in the list (from 1).
+    callback recall-scene-number(/* number */ int);
     // Loads the preset `step` presets on from the current one of a slot's instrument.
     callback step-instrument-preset(/* slot */ int, /* step */ int);
     // Switches a surface's driver (e.g. a keyboard's DAW mode) on or off.
@@ -180,6 +189,11 @@ export global AppLogic {
     callback learn-expand(/* row */ int);
     callback learn-remove(/* row */ int);
     callback learn-remove-all();
+    // Picks entry `index` of `learn-actions`: adds its action to the selected
+    // control, or opens its list.
+    callback learn-add-action(/* index */ int);
+    // The actions menu opens: on its first list.
+    callback learn-open-actions();
     callback learn-set-mode(/* row */ int, /* mode */ int);
     callback learn-set-range(/* row */ int, /* from */ float, /* to */ float);
     callback learn-set-level(/* row */ int, /* level */ int, /* position */ float);

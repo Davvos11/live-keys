@@ -896,19 +896,31 @@ behind format-agnostic cores:
   them again once the plugin reports its loaded state); in every scene:
   `GlobalMapping`s (`RackTarget`: a plugin by slot and id, a panel position, a slot's or the
   master's volume, mute or transposition, the metronome's volume, play or tempo, the
-  **selected slot**'s panel position or drawbar, and two actions on a press — select the
+  **selected slot**'s panel position or drawbar, and actions on a press — select the
   slot `step` on, load the selected slot's instrument's preset `step` on
-  (`step_instrument_preset` in `main`)) and
+  (`step_instrument_preset` in `main`), recall the scene `step` on in the list's order, one
+  by name or the list's `number`th (`step-scene`/`recall-scene`/`recall-scene-number`:
+  `Rack::scene_stepped`, `load_scene`), MIDI
+  panic; a row of one shows "On press") and
   `ControlSettings` per `surface/label`, in `AppConfig.surfaces` (`MappingsUi::store`
-  writes them back; a surface's `defaults` are added once, `MappingsUi::install_defaults`,
-  remembered in `AppConfig.surfaces.defaults_installed`) — resolves them against what's loaded (`Concrete`; a plugin target's
+  writes them back; each of a surface's `defaults` is added once,
+  `MappingsUi::install_defaults`, remembered as `<surface id>/<its JSON>` in
+  `AppConfig.surfaces.defaults_installed` — so one deleted stays deleted and one added later
+  arrives) — resolves them against what's loaded (`Concrete`; a plugin target's
   conversions go through its panel control, `profiles::Control::to_value`/`position`/
   `steps`/`text_at`, or a plain one) into the engine's setup (`build_setup`; not handed over
   if it does what the last did, so takeover state survives; rebuilt when `setup_dirty`, set
   by `refresh_slot`, panel rebuilds, surface changes and edits), and runs learn mode: the
   selected control (clicked in the panel — `learn-select` — or moved), the targets pane's
   rows (`LearnTargetRow`s), the right-click popup (a draft until "Assign"), and `LearnFlags`
-  — per on-screen target 0/1/2 (not a target, possible, the selected control's), in
+  — per on-screen target 0/1/2 (not a target, possible, the selected control's), and for a
+  selected button or pad the **actions menu** ("+ Action…" in the learn pane, `ActionsPopup`:
+  `mappings::actions(ActionMenu, scenes)` — previous/next scene, "Scene by name…" and
+  "Scene by number…" (each opening a second list, `ActionItem::Open`; numbers up to at least
+  8, so buttons can be mapped before the scenes exist), previous/next slot, the selected
+  slot's previous/next preset, MIDI panic — as `AppState.learn-actions` (`LearnAction`: text,
+  whether it opens a list), picked by `learn-add-action` → `MappingsUi::add_action`, a press
+  kept in every scene; `learn-open-actions` starts on the first list), in
   `SlotState`'s `cell-learn`/`drawbar-learn`/`volume-learn`/`mute-learn`/`transpose-learn`
   and `AppState`'s master and metronome fields. `src/learn.rs` (`Learn`) is the glue: each
   poll it applies the reports (`Applied`: shows a plugin value like a mouse edit would, sets
@@ -1306,7 +1318,8 @@ behind format-agnostic cores:
     display's UP/dn, the Page button's two LEDs; Nektar's SysEx checksum (`checksum`).
   - `defaults`: mappings to install the first time a surface is shown (the GUI's
     `GlobalMapping` JSON with `control` a label; the LX88+ ships Mixer → slot volumes and
-    mutes, Inst → the selected slot's panel and drawbars, Track/Patch, Play).
+    mutes, Inst → the selected slot's panel and drawbars, Track/Patch, Play, Rewind/Forward →
+    previous/next scene).
   Controls with `"feedback": true` (bank or control; `lit` for pads/buttons) have a
   `Feedback`, and `Surface::feedback(control, Shown)` is the message showing a position or
   lit state on one. The file format is public (`SurfaceSpec`/`BankSpec`/`ControlSpec`/
