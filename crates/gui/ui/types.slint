@@ -231,6 +231,8 @@ export struct SurfaceControlView {
     // Not drawn: on another page than the one shown, or a shifted twin while
     // shift isn't held (or the other way round).
     hidden: bool,
+    // The button of the page shown (a keyboard's Mixer/Inst/Preset): lit.
+    active: bool,
 }
 
 // A bank of the surface being edited: its frame, in surface pixels.

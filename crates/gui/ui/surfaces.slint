@@ -191,7 +191,7 @@ component SurfaceButton inherits Rectangle {
         border-radius: 3px;
         border-width: 1px;
         border-color: root.control.mapped ? Theme.accent : Theme.control-border;
-        background: root.control.pressed ? Theme.accent : Theme.control;
+        background: root.control.pressed || root.control.active ? Theme.accent : Theme.control;
     }
     ControlLabel {
         y: root.height - self.height - 2px;

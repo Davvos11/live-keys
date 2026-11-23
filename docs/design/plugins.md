@@ -311,8 +311,9 @@ spaced evenly, never scrolling vertically:
 2. **The controls**: up to **ten**, or **five** under drawbars. Each is a 56 px cell (a knob,
    switch, lever or stepped knob, with a caption line), so the kinds mix. Under drawbars, or
    with three or fewer, they're one row spaced evenly; otherwise **zigzag** over two rows —
-   the 1st, 3rd, 5th… on top, the 2nd, 4th… lower and between them — so ten fit the slot's
-   width. The user never arranges rows: it's one ordered list.
+   the first half on top, the rest lower and between them (changed 2026-11-23 from the 1st,
+   3rd, 5th… on top, so the panel reads in order, top row then bottom, as a keyboard's knobs
+   do) — so ten fit the slot's width. The user never arranges rows: it's one ordered list.
 3. **The audio effects** in one row of 80 px squares, three fitting the slot, **scrolling
    sideways** when there are more: drag, the mouse wheel, or a thin scrollbar under the row
    (its thumb draggable) that shows when they don't fit.

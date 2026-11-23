@@ -507,8 +507,9 @@ export component ParamSearchPopup inherits PopupWindow {
 
 // The panel's controls (and a trailing + while there's room). Under drawbars,
 // or when there are only a few, one row spaced evenly; otherwise zigzag over
-// two rows — the 1st, 3rd, 5th… on top, the 2nd, 4th… below between them — so
-// up to ten fit the slot's width without the user arranging rows.
+// two rows — the first half on top, the rest below between them, so they read
+// in order (top row left to right, then the bottom row) — and up to ten fit the
+// slot's width without the user arranging rows.
 export component PanelControls inherits Rectangle {
     in property <[PanelCell]> cells;
     in property <[PanelPoolRow]> pool;
@@ -533,6 +534,8 @@ export component PanelControls inherits Rectangle {
     property <length> row-step: 75px - 8px * root.squeeze;
     property <int> count: root.cells.length;
     property <bool> zigzag: !root.single-row && root.count > 3;
+    // Zigzag: how many cells the top row has.
+    property <int> top-count: Math.ceil(root.count / 2);
     // Single row: the same gap between the cells and at either end.
     property <length> gap: (root.width - root.count * root.cell-width) / (root.count + 1);
     // Zigzag: cell centres from `margin` to `width - margin`, evenly.
@@ -542,9 +545,11 @@ export component PanelControls inherits Rectangle {
     height: root.zigzag ? root.row-step + root.cell-height : root.cell-height;
 
     for cell[index] in root.cells : PanelCellView {
-        x: root.zigzag ? root.margin + index * root.pitch - root.cell-width / 2
+        // Zigzag: top-row cells on the even places, the others on the odd ones.
+        property <int> place: index < root.top-count ? 2 * index : 2 * (index - root.top-count) + 1;
+        x: root.zigzag ? root.margin + self.place * root.pitch - root.cell-width / 2
             : root.gap + index * (root.cell-width + root.gap);
-        y: root.zigzag && Math.mod(index, 2) == 1 ? root.row-step : 0px;
+        y: root.zigzag && index >= root.top-count ? root.row-step : 0px;
         cell: cell;
         cell-index: index;
         pool: root.pool;

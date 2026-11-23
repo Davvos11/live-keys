@@ -120,7 +120,7 @@ slint_struct!(EffectRow {
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
-    kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target, hidden,
+    kind, label, x, y, width, height, value, pressed, moving, mapped, selected, waiting, target, hidden, active,
 });
 slint_struct!(LearnControl { selected, label, detail, kind, takeover, pass_through, feedback });
 slint_struct!(LearnLevel { position, text });

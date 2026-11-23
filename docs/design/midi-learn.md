@@ -533,7 +533,8 @@ GUI thread ──(mappings, surfaces, base edits)──► mapping thread
    format. As built:
    - A bank (or a control, overriding it) with `"feedback": true` shows values sent back
      as its own message; pads and buttons are lit with `lit` (velocity or CC value, default
-     127) and unlit with 0 / a note-off. Shipped: the LPD8's pads (checked on the hardware);
+     127) and unlit with 0 / a note-on with velocity 0 (not a real note-off, which the
+     Nektar Impact LX+'s pads ignore — tested 2026-11-23). Shipped: the LPD8's pads (checked on the hardware);
      the LX88+ has none yet (unknown which of its controls light up from outside).
    - A control with feedback always jumps (the learn pane doesn't offer takeover for it). It's sent its first target's base along its range, a toggle's on/off, a
      momentary button's held state; a modulating control shows nothing (it's where it was

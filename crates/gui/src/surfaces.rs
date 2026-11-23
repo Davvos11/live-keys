@@ -522,18 +522,25 @@ impl SurfacesUi {
 }
 
 /// Hides the controls of `item` that aren't on its page (or are shift twins
-/// in the wrong state), and shows the others.
+/// in the wrong state), shows the others, and lights the page's button.
 fn show_page(item: &Shown) {
     let Some((_, surface)) = &item.surface else { return };
     for control in 0..item.controls.row_count() {
         let hidden = !surface.visible(control, item.reader.page(), item.reader.shift());
+        let active = page_button_lit(surface, control, item.reader.page());
         if let Some(mut row) = item.controls.row_data(control)
-            && row.hidden != hidden
+            && (row.hidden != hidden || row.active != active)
         {
             row.hidden = hidden;
+            row.active = active;
             item.controls.set_row_data(control, row);
         }
     }
+}
+
+/// Whether `control` is the button of `page`, the page shown.
+fn page_button_lit(surface: &Surface, control: usize, page: Option<usize>) -> bool {
+    page.and_then(|page| surface.pages.get(page)).is_some_and(|page| page.button == Some(control))
 }
 
 /// `surface`'s controls as the panel draws them, at rest, on page `page`
@@ -566,6 +573,7 @@ pub fn control_views(surface: &Surface, page: Option<usize>, shift: bool) -> Vec
                 waiting: false,
                 target: 0.0,
                 hidden: !surface.visible(index, page, shift),
+                active: page_button_lit(surface, index, page),
             }
         })
         .collect()

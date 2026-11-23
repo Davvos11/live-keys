@@ -1099,7 +1099,8 @@ behind format-agnostic cores:
   (`DrawbarSection`; `SlotState.drawbars: [DrawbarCell]`, level 0..=8, dragged vertically or
   scrolled) and the controls, 56 px `PanelCellView`s in a `PanelControls` (`SlotState.cells:
   [PanelCell]`) — one row spaced evenly under drawbars or when there are 3 or fewer, else
-  zigzag over two rows (1st, 3rd, 5th… on top, the others below between them), so up to ten
+  zigzag over two rows (the first half on top, the rest below between them, so they read in
+  order — and a keyboard's knobs mapped to positions 1–8 go row by row), so up to ten
   fit; each: a `LabelledKnob` (position 0..1; `steps` for stepped parameters), a stepped
   knob (a control with choices: snaps to them, shows the option's label), a `Toggle` (the
   design's switch) or a `Lever` (2–3 options: click a part, drag sideways or up/down, scroll).

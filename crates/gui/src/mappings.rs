@@ -88,8 +88,7 @@ impl MappingMode {
     fn default_for(kind: ControlKind, steps: &[f32]) -> Self {
         match kind {
             ControlKind::Fader | ControlKind::Knob => Self::Direct { from: 0.0, to: 1.0 },
-            ControlKind::Button => Self::Toggle { levels: default_levels(steps) },
-            ControlKind::Pad => Self::Momentary { value: 1.0, velocity: false },
+            ControlKind::Button | ControlKind::Pad => Self::Toggle { levels: default_levels(steps) },
         }
     }
 
@@ -219,7 +218,8 @@ pub enum RackTarget {
     MetronomeVolume,
     MetronomePlay,
     Tempo,
-    /// Whatever the selected slot's panel shows at row position `index`.
+    /// Whatever the selected slot's panel shows at row position `index` (its
+    /// reading order: top row left to right, then the bottom row).
     SelectedPanel { index: usize },
     /// The selected slot's panel's drawbar `index`, if it has drawbars.
     SelectedDrawbar { index: usize },
@@ -419,6 +419,8 @@ impl Ctx<'_> {
             RackTarget::MetronomeVolume => Concrete::MetronomeVolume,
             RackTarget::MetronomePlay => Concrete::MetronomePlay,
             RackTarget::Tempo => Concrete::Tempo,
+            // The panel reads in its row's order (top row, then the bottom
+            // one): a keyboard's knobs map row by row.
             RackTarget::SelectedPanel { index } => {
                 return self.resolve(&RackTarget::Panel { slot: self.config.selected_slot, index: *index });
             }

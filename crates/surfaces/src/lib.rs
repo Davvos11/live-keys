@@ -708,7 +708,9 @@ impl Surface {
                     Shown::Lit(on) => on,
                     Shown::Position(position) => position > 0.0,
                 };
-                if on { [0x90 | channel, number, feedback.lit.max(1)] } else { [0x80 | channel, number, 0] }
+                // Off as a note-on with velocity 0, MIDI's other note-off: the
+                // Nektar Impact LX+'s pads ignore a real note-off (tested).
+                [0x90 | channel, number, if on { feedback.lit.max(1) } else { 0 }]
             }
             (Message::PitchBend, shown) => {
                 let position = match shown {
@@ -1113,7 +1115,7 @@ mod tests {
         assert_eq!(surface.feedback(0, Shown::Position(1.0)), Some([0xB1, 7, 127]));
         assert_eq!(surface.feedback(1, Shown::Position(1.0)), None);
         assert_eq!(surface.feedback(2, Shown::Lit(true)), Some([0x90, 36, 5]));
-        assert_eq!(surface.feedback(2, Shown::Lit(false)), Some([0x80, 36, 0]));
+        assert_eq!(surface.feedback(2, Shown::Lit(false)), Some([0x90, 36, 0]));
     }
 
     #[test]
