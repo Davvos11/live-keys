@@ -48,6 +48,38 @@ export struct PresetRow {
     current: bool,
 }
 
+// One of an effect's controls, a small slider at the bottom of its FX square
+// (`EffectRow.controls`).
+export struct EffectControl {
+    // Shown inside the bar.
+    label: string,
+    // 0..1 along the bar (the filled part); for a modulated one, its base.
+    position: float,
+    // Where a double-click puts it back: the parameter's default.
+    default-position: float,
+    // The value as text, shown while hovered or dragged.
+    text: string,
+    // How many steps it snaps to (a switch 1, a choice its options − 1);
+    // 0: continuous.
+    steps: int,
+    // MIDI learn: 0 not a target, 1 a possible one, 2 the selected control's
+    // (`AppLogic.learn-click` with kind 8).
+    learn: int,
+    // MIDI learn's modulation: where it can take it, 0..1, and where it has
+    // it now.
+    modulated: bool,
+    mod-low: float,
+    mod-high: float,
+    mod-value: float,
+}
+
+// A parameter "+ Parameter" offers in learn mode: its name, and where it is
+// ("Slot 1 · Sledge Distortion").
+export struct LearnParamRow {
+    name: string,
+    place: string,
+}
+
 // One plugin (an instrument or a MIDI or audio effect) in a slot's chain.
 export struct EffectRow {
     // The engine's `PluginKey` of this instance, or -1 for no plugin.
@@ -67,15 +99,20 @@ export struct EffectRow {
     // name; a placeholder until plugins can be asked).
     graph: int,
     // Its inline display (Ardour's LV2 extension), rendered from the plugin,
-    // which its FX square shows instead of the name and curve.
-    display: image,
-    has-display: bool,
+    // which its FX square shows instead of the name and curve: 1 + its index
+    // in `AppState.inline-displays`, 0 for none. The pictures are kept apart so
+    // redrawing one (up to 30 times a second) doesn't change this row, which
+    // would rebuild the square's open context menu and empty its submenu.
+    display: int,
     // The preset last loaded or saved; empty if none.
     preset-name: string,
     // Whether that preset was saved by the user (and so can be deleted).
     preset-user: bool,
     // Whether a parameter changed since that preset was loaded or saved.
     preset-changed: bool,
+    // An effect's controls (at most `AppState.max-effect-controls`), chosen per plugin; empty for an
+    // instrument (its panel is the slot's first tab).
+    controls: [EffectControl],
 }
 
 // A MIDI device as offered for one MIDI input.

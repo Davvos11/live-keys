@@ -343,7 +343,12 @@ What a control can drive (all addressed so they survive the chain being reordere
 
 - **A plugin parameter** — any plugin in any slot or the master chain, by its `PluginKey` at
   runtime; on disk by its position in the chain and its `ParamInfo::symbol`. Clicking a panel
-  knob makes this kind for whatever parameter the knob shows.
+  knob makes this kind for whatever parameter the knob shows, and so does clicking one of an
+  effect's sliders (up to 4 along the bottom of its FX square, chosen per plugin from the
+  square's menu, "Sliders"). The learn pane's "+ Parameter" (any control; beside "+ Action"
+  for buttons and pads) searches every
+  parameter of every loaded plugin — instrument, MIDI and audio effects, the master chain —
+  and maps the one picked the same way, kept with the scene.
 - **A panel position** — "slot 2, panel control 3": whatever that slot's panel shows there,
   whichever instrument is loaded. Chosen in the target's settings ("This parameter" / "This
   panel position") for targets added from the panel; default this parameter.

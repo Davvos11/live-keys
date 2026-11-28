@@ -437,6 +437,7 @@ export component FxSlot inherits Rectangle {
     // Where it was pressed, in its own coordinates.
     out property <length> pressed-x: area.pressed-x;
     out property <length> pressed-y: area.pressed-y;
+    out property <bool> hovered: area.has-hover;
     callback clicked();
     callback drag-moved(/* x */ length, /* y */ length);
     callback dropped();

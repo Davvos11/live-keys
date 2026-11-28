@@ -1,5 +1,5 @@
 {
-  "plugin": "clap:org.surge-synth-team.surge-xt",
+  "plugins": ["clap:org.surge-synth-team.surge-xt"],
   "controls": [
     { "id": "m1", "name": "Macro 1", "label": "M1", "target": { "param": "825615485" } },
     { "id": "m2", "name": "Macro 2", "label": "M2", "target": { "param": "825615486" } },

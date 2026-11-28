@@ -221,6 +221,22 @@ pub fn note_name(note: i32) -> String {
 }
 
 /// About three significant digits, without trailing zeros.
+/// A plugin's own value text with an over-long number at its start shortened
+/// like [`ParamInfo::format_value`]'s ("94.4444656" → "94.4", "0.0012345 s" →
+/// "0.001 s"); anything else is left as it is.
+pub fn tidy_value_text(text: &str) -> String {
+    let end = text
+        .char_indices()
+        .find(|&(index, c)| !(c.is_ascii_digit() || c == '.' || (index == 0 && (c == '-' || c == '+'))))
+        .map_or(text.len(), |(index, _)| index);
+    let (number, rest) = text.split_at(end);
+    let decimals = number.split_once('.').map_or(0, |(_, decimals)| decimals.len());
+    match number.parse::<f32>() {
+        Ok(value) if decimals > 3 => format!("{}{rest}", format_number(value)),
+        _ => text.to_string(),
+    }
+}
+
 fn format_number(value: f32) -> String {
     let magnitude = value.abs();
     let decimals = if magnitude >= 100.0 {
@@ -325,5 +341,15 @@ mod tests {
         assert_eq!(param(ParamKind::Note, 0.0, 127.0, 127).format_value(61.0), "C#4");
         assert_eq!(note_name(0), "C-1");
         assert_eq!(param(ParamKind::Stepped, 1.0, 16.0, 15).format_value(3.0), "3");
+    }
+
+    #[test]
+    fn tidy_value_text_shortens_long_numbers_only() {
+        assert_eq!(tidy_value_text("94.4444656"), "94.4");
+        assert_eq!(tidy_value_text("-0.0012345 s"), "-0.001 s");
+        assert_eq!(tidy_value_text("12.50 dB"), "12.50 dB");
+        assert_eq!(tidy_value_text("Soft"), "Soft");
+        assert_eq!(tidy_value_text("1.2.3456"), "1.2.3456");
+        assert_eq!(tidy_value_text(""), "");
     }
 }

@@ -1,5 +1,5 @@
 {
-  "plugin": "http://gareus.org/oss/lv2/b_synth",
+  "plugins": ["http://gareus.org/oss/lv2/b_synth"],
   "fixed": "drawbars",
   "drawbars": [
     { "id": "db16", "label": "16'", "colour": "brown", "target": { "setbfree": "upper.drawbar16" } },

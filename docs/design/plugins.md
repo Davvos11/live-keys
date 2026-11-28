@@ -95,7 +95,7 @@ A profile is roughly:
 
 ```jsonc
 {
-  "plugin": "urn:live-keys:organ",          // PluginInfo::id it applies to
+  "plugins": ["urn:live-keys:organ"],      // the PluginInfo::ids it applies to
   "panel": "drawbars",                        // or "knobs", "switches", …
   "controls": [
     { "param": "drawbar-16", "label": "16'", "widget": "drawbar", "colour": "brown" },
@@ -347,7 +347,7 @@ parameters as the default. So the context menu is also the first version of Part
 
 ```jsonc
 {
-  "plugin": "http://gareus.org/oss/lv2/b_synth",
+  "plugins": ["http://gareus.org/oss/lv2/b_synth"],
   "fixed": "drawbars",                       // the fixed section's layout, if any
   "drawbars": [
     { "id": "db16", "label": "16'", "colour": "brown", "target": { "setbfree": "upper.drawbar16" } },

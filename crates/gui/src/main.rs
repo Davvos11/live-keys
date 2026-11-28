@@ -418,11 +418,27 @@ struct SlotPanel {
     panel: profiles::Panel,
 }
 
-/// "More parameters…" of a cell's context menu: a search over every parameter
-/// of the slot's instrument, to show one in the cell.
+/// An effect's square's sliders: its panel and the model its chain row
+/// shows (kept and refilled in place, so a slider being dragged survives).
+struct EffectPanel {
+    plugin_id: String,
+    panel: profiles::Panel,
+    controls: Rc<VecModel<EffectControl>>,
+}
+
+/// What "More parameters…" picks a parameter for.
+#[derive(Clone, Copy)]
+enum SearchFor {
+    /// Slot `slot`'s instrument's panel cell `cell`.
+    Cell { slot: usize, cell: usize },
+    /// An effect's square's sliders.
+    Effect { key: PluginKey },
+}
+
+/// "More parameters…" of a cell's or an effect square's context menu: a
+/// search over every parameter of the plugin, to show one.
 struct ParamSearch {
-    slot: usize,
-    cell: usize,
+    target: SearchFor,
     plugin_id: String,
     /// Every parameter's name and control id, in the plugin's order.
     params: Vec<(String, String)>,
@@ -463,6 +479,13 @@ struct Rack {
     cells: Vec<Rc<VecModel<PanelCell>>>,
     drawbars: Vec<Rc<VecModel<DrawbarCell>>>,
     pool_rows: Vec<Rc<VecModel<PanelPoolRow>>>,
+    /// Effects' squares' sliders, by key, built when a row first shows.
+    effect_panels: RefCell<HashMap<PluginKey, EffectPanel>>,
+    /// Learn mode's flags for them (`EffectControl.learn`), as last shown.
+    effect_learn: RefCell<HashMap<PluginKey, Vec<i32>>>,
+    /// The pool of the effect whose square's menu is open
+    /// (`AppState.effect-control-pool`).
+    effect_pool_rows: Rc<VecModel<PanelPoolRow>>,
     /// "More parameters…", while its popup is open; its rows back
     /// `AppState.param-search-rows`.
     param_search: RefCell<Option<ParamSearch>>,
@@ -536,6 +559,9 @@ impl Rack {
             cells,
             drawbars,
             pool_rows,
+            effect_panels: RefCell::default(),
+            effect_learn: RefCell::default(),
+            effect_pool_rows: Rc::new(VecModel::default()),
             param_search: RefCell::default(),
             param_search_rows: Rc::new(VecModel::default()),
             closed: RefCell::new((0..SLOT_COUNT).map(|_| None).collect()),
@@ -565,7 +591,7 @@ impl Rack {
     fn refresh_master(&self, engine: &Engine, error: Option<String>) {
         let rows = engine
             .slot(MASTER_SLOT)
-            .map(|chain| chain.effects(Section::Audio).iter().map(|meta| self.plugin_row(meta)).collect())
+            .map(|chain| chain.effects(Section::Audio).iter().map(|meta| self.effect_row(engine, meta)).collect())
             .unwrap_or_default();
         sync_model(&self.master_effects, rows);
         if let Some(app) = self.app.get().and_then(slint::Weak::upgrade) {
@@ -587,7 +613,7 @@ impl Rack {
         let chain = engine.slot(slot).unwrap_or(&empty);
 
         let effect_rows = |section: Section| -> Vec<EffectRow> {
-            chain.effects(section).iter().map(|meta| self.plugin_row(meta)).collect()
+            chain.effects(section).iter().map(|meta| self.effect_row(engine, meta)).collect()
         };
         sync_model(&self.midi_effects[slot], effect_rows(Section::Midi));
         sync_model(&self.audio_effects[slot], effect_rows(Section::Audio));
@@ -764,11 +790,89 @@ impl Rack {
         slot_presets::PluginExtras { preset, preset_changed, mappings, values }
     }
 
-    /// The chain row of a loaded plugin.
+    /// The chain row of a loaded effect: [`Rack::plugin_row`] with its sliders.
+    fn effect_row(&self, engine: &Engine, meta: &LoadedPluginMeta) -> EffectRow {
+        EffectRow { controls: self.effect_controls(engine, meta, false), ..self.plugin_row(meta) }
+    }
+
+    /// Effect `meta`'s sliders at current values, building its panel first
+    /// if there's none yet (or `rebuild`: its row changed).
+    fn effect_controls(&self, engine: &Engine, meta: &LoadedPluginMeta, rebuild: bool) -> ModelRc<EffectControl> {
+        let mut panels = self.effect_panels.borrow_mut();
+        let entry = panels.entry(meta.key).or_insert_with(|| EffectPanel {
+            plugin_id: meta.id.clone(),
+            panel: self.profiles.borrow().effect_panel(&meta.id, &meta.params),
+            controls: Rc::new(VecModel::default()),
+        });
+        if rebuild {
+            entry.panel = self.profiles.borrow().effect_panel(&meta.id, &meta.params);
+            // Learn targets go by the sliders.
+            self.mappings.setup_dirty.set(true);
+            self.mappings.view_dirty.set(true);
+        }
+        let mut controls = slot_view::effect_controls(engine, meta.key, &entry.panel);
+        self.mappings.decorate_effect(engine, meta.key, &entry.panel, &mut controls);
+        if let Some(learn) = self.effect_learn.borrow().get(&meta.key) {
+            for (control, &learn) in controls.iter_mut().zip(learn) {
+                control.learn = learn;
+            }
+        }
+        sync_model(&entry.controls, controls);
+        ModelRc::from(entry.controls.clone())
+    }
+
+    /// Shows effect `key`'s sliders at current values, if it has a square.
+    fn refresh_effect_controls(&self, engine: &Engine, key: PluginKey) {
+        if !self.effect_panels.borrow().contains_key(&key) {
+            return;
+        }
+        if let Some(meta) = engine.plugin(key) {
+            self.effect_controls(engine, meta, false);
+        }
+    }
+
+    /// Rebuilds the sliders of every effect `plugin_id` after its row changed
+    /// (rows are per plugin).
+    fn rebuild_effect_panels(&self, engine: &Engine, plugin_id: &str) {
+        let keys: Vec<PluginKey> = self
+            .effect_panels
+            .borrow()
+            .iter()
+            .filter(|(_, panel)| panel.plugin_id == plugin_id)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            if let Some(meta) = engine.plugin(key) {
+                self.effect_controls(engine, meta, true);
+            }
+        }
+    }
+
+    /// Effect `key`'s slider `index`'s control.
+    fn effect_control(&self, key: PluginKey, index: usize) -> Option<profiles::Control> {
+        let panels = self.effect_panels.borrow();
+        let panel = &panels.get(&key)?.panel;
+        panel.pool.get(*panel.row.get(index)?).cloned()
+    }
+
+    /// Shows learn mode's flags on the effects' sliders, where they changed.
+    fn show_effect_learn(&self, engine: &Engine, flags: &HashMap<PluginKey, Vec<i32>>) {
+        let changed: Vec<PluginKey> = {
+            let shown = self.effect_learn.borrow();
+            let keys = flags.keys().chain(shown.keys());
+            keys.filter(|key| flags.get(key) != shown.get(key)).copied().collect()
+        };
+        *self.effect_learn.borrow_mut() = flags.clone();
+        for key in changed {
+            self.refresh_effect_controls(engine, key);
+        }
+    }
+
+    /// The chain row of a loaded plugin (an effect's sliders left out: see
+    /// [`Rack::effect_row`]).
     fn plugin_row(&self, meta: &LoadedPluginMeta) -> EffectRow {
         let current_presets = self.current_presets.borrow();
         let current = current_presets.get(&meta.key);
-        let display = self.inline.borrow().image(meta.key);
         EffectRow {
             key: meta.key as i32,
             name: meta.name.as_str().into(),
@@ -776,11 +880,11 @@ impl Rack {
             gui_open: self.open_uis.borrow().contains_key(&meta.key),
             params_open: self.param_windows.borrow().contains_key(&meta.key),
             graph: slot_view::graph(&meta.name),
-            display: display.clone().unwrap_or_default(),
-            has_display: display.is_some(),
+            display: self.inline.borrow().display(meta.key),
             preset_name: current.map(|c| c.preset.name.as_str()).unwrap_or_default().into(),
             preset_user: current.is_some_and(|c| c.preset.user),
             preset_changed: current.is_some_and(|c| c.changed),
+            controls: ModelRc::default(),
         }
     }
 
@@ -1043,6 +1147,7 @@ impl Rack {
     /// Shows the values of `key`'s panel, if it's an instrument (after a
     /// parameter or setBfree value changed).
     fn refresh_panel_of(&self, engine: &Engine, key: PluginKey) {
+        self.refresh_effect_controls(engine, key);
         let slot = self.panels.borrow().iter().position(|panel| panel.as_ref().is_some_and(|panel| panel.key == key));
         if let Some(slot) = slot {
             self.refresh_panel(engine, slot, false);
@@ -1123,6 +1228,7 @@ impl Rack {
     /// current preset.
     fn forget(&self, key: PluginKey) {
         self.inline.borrow_mut().forget(key);
+        self.effect_panels.borrow_mut().remove(&key);
         self.close_ui(key);
         self.close_params(key);
         self.set_current_preset(key, None);
@@ -1148,6 +1254,7 @@ impl Rack {
         self.current_presets.borrow_mut().clear();
         *self.browser.borrow_mut() = None;
         self.inline.borrow_mut().clear();
+        self.effect_panels.borrow_mut().clear();
         // The plugins come back at their defaults, if at all.
         for slot in 0..SLOT_COUNT {
             self.mark_slot_changed(slot);
@@ -1169,10 +1276,10 @@ impl Rack {
             for index in 0..model.row_count() {
                 let Some(mut row) = model.row_data(index) else { continue };
                 let key = row.key as PluginKey;
+                // Only when it gets a picture or loses it: the picture itself
+                // is in a model of its own.
                 if inline.update(engine, key, scale, now) {
-                    let display = inline.image(key);
-                    row.has_display = display.is_some();
-                    row.display = display.unwrap_or_default();
+                    row.display = inline.display(key);
                     model.set_row_data(index, row);
                 }
             }
@@ -1302,6 +1409,9 @@ fn main() -> anyhow::Result<()> {
     state.set_picker_rows(ModelRc::from(picker.rows.clone()));
     state.set_preset_rows(ModelRc::from(rack.preset_rows.clone()));
     state.set_param_search_rows(ModelRc::from(rack.param_search_rows.clone()));
+    state.set_effect_control_pool(ModelRc::from(rack.effect_pool_rows.clone()));
+    state.set_max_effect_controls(profiles::MAX_EFFECT_CONTROLS as i32);
+    state.set_inline_displays(rack.inline.borrow().model());
     refresh_plugin_folders(&settings, &config.borrow());
     refresh_plugin_list(&settings, &engine.borrow(), &picker);
     rack.refresh_all(&engine.borrow());
@@ -1324,6 +1434,8 @@ fn main() -> anyhow::Result<()> {
         edit_controls: Rc::new(VecModel::default()),
         action_menu: Cell::default(),
         actions: RefCell::default(),
+        params: RefCell::default(),
+        param_rows: Rc::new(VecModel::default()),
     });
     learn.connect(&logic);
     learn.connect_editor(&logic);
@@ -2140,9 +2252,9 @@ fn main() -> anyhow::Result<()> {
             });
             let mut profiles = rack.profiles.borrow_mut();
             let result = if shown && toggle {
-                profiles.remove_control(&meta.id, &meta.params, control_id)
+                profiles.remove_control(profiles::PanelKind::Instrument, &meta.id, &meta.params, control_id)
             } else {
-                profiles.add_control(&meta.id, &meta.params, control_id, cell)
+                profiles.add_control(profiles::PanelKind::Instrument, &meta.id, &meta.params, control_id, cell)
             };
             drop(profiles);
             match result {
@@ -2151,6 +2263,37 @@ fn main() -> anyhow::Result<()> {
                     log::error!("failed to change the panel of {}: {err:#}", meta.name);
                     rack.refresh_slot(&engine, slot, Some(format!("failed to change the panel: {err}")));
                 }
+            }
+        })
+    };
+    // Shows a parameter as one of an effect's square's sliders (from its
+    // menu, or "More parameters…"), kept for this plugin; a shown one is taken
+    // off when `toggle`. Full: instead of the last.
+    let set_effect_control = {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        Rc::new(move |key: PluginKey, control_id: &str, toggle: bool| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.plugin(key) else { return };
+            let shown = rack.effect_panels.borrow().get(&key).is_some_and(|panel| {
+                let panel = &panel.panel;
+                panel.row.iter().any(|&index| panel.pool[index].id == control_id)
+            });
+            let kind = profiles::PanelKind::Effect;
+            let mut profiles = rack.profiles.borrow_mut();
+            let result = if shown && toggle {
+                profiles.remove_control(kind, &meta.id, &meta.params, control_id)
+            } else {
+                profiles.add_control(kind, &meta.id, &meta.params, control_id, profiles::MAX_EFFECT_CONTROLS - 1)
+            };
+            drop(profiles);
+            match result {
+                Ok(()) => rack.rebuild_effect_panels(&engine, &meta.id),
+                Err(err) => log::error!("failed to change the sliders of {}: {err:#}", meta.name),
+            }
+            // The menu, if open, shows the change.
+            if let Some(panel) = rack.effect_panels.borrow().get(&key) {
+                rack.effect_pool_rows.set_vec(slot_view::panel_pool(&panel.panel));
             }
         })
     };
@@ -2196,8 +2339,7 @@ fn main() -> anyhow::Result<()> {
                 return;
             };
             let mut search = ParamSearch {
-                slot: slot as usize,
-                cell: cell as usize,
+                target: SearchFor::Cell { slot: slot as usize, cell: cell as usize },
                 plugin_id: meta.id.clone(),
                 params: meta
                     .params
@@ -2224,19 +2366,110 @@ fn main() -> anyhow::Result<()> {
     {
         let engine = engine.clone();
         let rack = rack.clone();
+        let set_effect_control = set_effect_control.clone();
         logic.on_pick_param_search(move |index| {
             let Some(search) = rack.param_search.borrow_mut().take() else {
                 return;
             };
-            // The instrument may have changed meanwhile.
-            let same = engine
+            let Some(control_id) = search.shown.get(index as usize).map(|&shown| &search.params[shown].1) else {
+                return;
+            };
+            match search.target {
+                SearchFor::Cell { slot, cell } => {
+                    // The instrument may have changed meanwhile.
+                    let same = engine
+                        .borrow()
+                        .slot(slot)
+                        .and_then(|chain| chain.instrument.as_ref())
+                        .is_some_and(|meta| meta.id == search.plugin_id);
+                    if same {
+                        set_panel_cell(slot, cell, control_id, false);
+                    }
+                }
+                SearchFor::Effect { key } => set_effect_control(key, control_id, false),
+            }
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_open_effect_param_search(move |key| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.plugin(key as PluginKey) else { return };
+            let mut search = ParamSearch {
+                target: SearchFor::Effect { key: meta.key },
+                plugin_id: meta.id.clone(),
+                params: meta
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), profiles::param_control(param).id))
+                    .collect(),
+                shown: Vec::new(),
+            };
+            search.filter("", &rack.param_search_rows);
+            if let Some(app) = app_weak.upgrade() {
+                app.global::<AppState>().set_param_search_count(search.params.len() as i32);
+            }
+            *rack.param_search.borrow_mut() = Some(search);
+        });
+    }
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_set_effect_control(move |key, index, position| {
+            let key = key as PluginKey;
+            if let Some(control) = rack.effect_control(key, index.max(0) as usize) {
+                rack.write_control(&engine, key, &control, control.cell_at(position));
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_open_effect_controls(move |key| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.plugin(key as PluginKey) else { return };
+            // Built if its square hasn't shown yet.
+            rack.effect_controls(&engine, meta, false);
+            let pool = rack
+                .effect_panels
                 .borrow()
-                .slot(search.slot)
-                .and_then(|chain| chain.instrument.as_ref())
-                .is_some_and(|meta| meta.id == search.plugin_id);
-            let control_id = search.shown.get(index as usize).map(|&shown| &search.params[shown].1);
-            if let (true, Some(control_id)) = (same, control_id) {
-                set_panel_cell(search.slot, search.cell, control_id, false);
+                .get(&meta.key)
+                .map(|panel| slot_view::panel_pool(&panel.panel))
+                .unwrap_or_default();
+            rack.effect_pool_rows.set_vec(pool);
+        });
+    }
+    {
+        let rack = rack.clone();
+        let set_effect_control = set_effect_control.clone();
+        logic.on_toggle_effect_control(move |key, pool| {
+            let key = key as PluginKey;
+            let control_id = rack
+                .effect_panels
+                .borrow()
+                .get(&key)
+                .and_then(|panel| panel.panel.pool.get(pool.max(0) as usize))
+                .map(|control| control.id.clone());
+            if let Some(control_id) = control_id {
+                set_effect_control(key, &control_id, true);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let rack = rack.clone();
+        logic.on_reset_effect_controls(move |key| {
+            let engine = engine.borrow();
+            let Some(meta) = engine.plugin(key as PluginKey) else { return };
+            let result = rack.profiles.borrow_mut().reset_row(&meta.id);
+            match result {
+                Ok(()) => rack.rebuild_effect_panels(&engine, &meta.id),
+                Err(err) => log::error!("failed to reset the sliders of {}: {err:#}", meta.name),
+            }
+            if let Some(panel) = rack.effect_panels.borrow().get(&meta.key) {
+                rack.effect_pool_rows.set_vec(slot_view::panel_pool(&panel.panel));
             }
         });
     }

@@ -1,4 +1,4 @@
-import { AppState, AppLogic, Category, EffectRow, SlotState } from "globals.slint";
+import { AppState, AppLogic, Category, EffectRow, EffectControl, SlotState } from "globals.slint";
 import { Theme, Icons, Icon, KButton, DropdownButton, ListItem, Select, TabBar, Stepper, FxSlot, ScrollIndicator } from "widgets.slint";
 import { Artwork } from "theme.slint";
 import { Knob } from "knob.slint";
@@ -17,9 +17,133 @@ export component PopupFrame inherits Rectangle {
     drop-shadow-color: #00000060;
 }
 
+// One of an effect's sliders (`EffectControl`), along the bottom of its FX
+// square: the label inside the bar, the filled part the value (a modulated
+// one also shows its range, lighter, and where it is now). Drag sideways
+// (Shift: finer) or scroll to change it; a double-click or Ctrl+click puts it
+// back to its default. One with steps (an on/off switch, a choice) also
+// changes by a click: on ↔ off, or the next option (after the last, the
+// first). Hovered or dragged, it shows its value at its right end ("On", the
+// option's name).
+component EffectSlider inherits Rectangle {
+    in property <EffectControl> control;
+    in property <int> key;
+    in property <int> index;
+    callback hovered();
+
+    // While dragging: where the pointer has taken it, not yet snapped.
+    property <float> raw;
+    property <length> last-x;
+    // Whether the press moved it (else, releasing it is a click).
+    property <bool> moved;
+    property <float> shown: area.pressed ? root.snapped(root.raw) : root.control.position;
+    property <bool> show-value: (area.has-hover || area.pressed) && root.control.text != "";
+
+    function snapped(position: float) -> float {
+        let clamped = max(0, min(1, position));
+        return root.control.steps > 0 ? Math.round(clamped * root.control.steps) / root.control.steps : clamped;
+    }
+    function send(position: float) {
+        let value = root.snapped(position);
+        if value != root.control.position {
+            AppLogic.set-effect-control(root.key, root.index, value);
+        }
+    }
+
+    height: 14px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: Theme.control-border;
+    background: Theme.dark ? #0e0e0ed9 : #ffffffd9;
+    clip: true;
+
+    changed show-value => {
+        if self.show-value {
+            root.hovered();
+        }
+    }
+
+    if root.control.modulated : Rectangle {
+        x: root.width * min(root.control.mod-low, root.control.mod-high);
+        width: root.width * Math.abs(root.control.mod-high - root.control.mod-low);
+        background: Theme.accent.with-alpha(0.3);
+    }
+    Rectangle {
+        x: 0;
+        width: root.width * root.shown;
+        border-radius: 3px;
+        background: Theme.accent.with-alpha(area.pressed ? 1 : 0.8);
+    }
+    if root.control.modulated : Rectangle {
+        x: root.width * root.control.mod-value - 1px;
+        width: 2px;
+        background: Theme.text;
+    }
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 4px;
+        Text {
+            text: root.control.label;
+            color: Theme.text;
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.show-value : Text {
+            text: root.control.text;
+            color: Theme.text;
+            font-size: 10px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            // The label keeps at least half.
+            max-width: root.width / 2;
+            overflow: elide;
+        }
+    }
+    area := TouchArea {
+        mouse-cursor: ew-resize;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.raw = root.control.position;
+                root.last-x = self.mouse-x;
+                root.moved = false;
+                if event.modifiers.control {
+                    root.send(root.control.default-position);
+                }
+            } else if event.kind == PointerEventKind.move && self.pressed {
+                root.moved = root.moved || Math.abs(self.mouse-x - self.pressed-x) > 3px;
+                let factor = event.modifiers.shift ? 0.2 : 1;
+                root.raw = max(0, min(1, root.raw + (self.mouse-x - root.last-x) / root.width * factor));
+                root.last-x = self.mouse-x;
+                root.send(root.raw);
+            } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up
+                && !root.moved && !event.modifiers.control && root.control.steps > 0 {
+                let next = Math.round(root.control.position * root.control.steps) + 1;
+                root.send(next > root.control.steps ? 0 : next / root.control.steps);
+            }
+        }
+        double-clicked => { root.send(root.control.default-position); }
+        scroll-event(event) => {
+            // Some platforms turn Shift+wheel into horizontal scrolling.
+            let delta = event.delta-y != 0 ? event.delta-y : event.delta-x;
+            if delta == 0 {
+                return reject;
+            }
+            // A notch is a step, or 1/50 of the way.
+            let step = root.control.steps > 0 ? 1 / root.control.steps : 0.02;
+            root.send(root.control.position + (delta > 0 ? step : -step));
+            accept
+        }
+    }
+}
+
 // One effect's FX square. Clicking opens its own GUI, or its parameter window
 // if it has no GUI (or it fails to open); clicking while either is open closes it. Right-clicking
-// offers the rest: GUI, parameters, presets, moving and removing it.
+// offers the rest: GUI, parameters, presets, which sliders it shows, moving
+// and removing it. Its sliders (`EffectRow.controls`) sit along its bottom.
 export component EffectSquare inherits FxSlot {
     in property <EffectRow> effect;
     in property <int> slot-index;
@@ -31,9 +155,26 @@ export component EffectSquare inherits FxSlot {
 
     name: root.effect.name;
     graph: root.effect.graph;
-    display: root.effect.display;
-    has-display: root.effect.has-display;
+    display: AppState.inline-displays[root.effect.display - 1];
+    has-display: root.effect.display > 0;
     selected: root.effect.gui-open || root.effect.params-open;
+
+    // The square's menu lists the parameters it can show; there's one list,
+    // filled for the square the pointer is on.
+    changed hovered => {
+        if self.hovered {
+            AppLogic.open-effect-controls(root.effect.key);
+        }
+    }
+    // The sliders bottom up, the first on top.
+    function slider-y(index: int) -> length {
+        return root.height - 18px - (root.effect.controls.length - 1 - index) * 16px;
+    }
+    // MIDI learn's index for slider `index` (see `AppLogic.learn-click`).
+    function learn-index(index: int) -> int {
+        return (root.section * max(AppState.max-effects, AppState.max-midi-effects) + root.index)
+            * AppState.max-effect-controls + index;
+    }
 
     clicked => {
         if root.effect.gui-open || root.effect.params-open {
@@ -47,6 +188,16 @@ export component EffectSquare inherits FxSlot {
         } else {
             AppLogic.open-effect(root.effect.key);
         }
+    }
+
+    for control[index] in root.effect.controls : EffectSlider {
+        x: 4px;
+        y: root.slider-y(index);
+        width: root.width - 8px;
+        control: control;
+        key: root.effect.key;
+        index: index;
+        hovered => { AppLogic.open-effect-controls(root.effect.key); }
     }
 
     // On top of the square's touch area, which would otherwise take the
@@ -74,6 +225,28 @@ export component EffectSquare inherits FxSlot {
                 title: root.effect.preset-name == "" ? "Presets…" : root.effect.preset-changed ? "Presets (\{root.effect.preset-name}, changed)…" : "Presets (\{root.effect.preset-name})…";
                 activated => { root.presets(); }
             }
+            Menu {
+                title: "Sliders";
+                // Shown ones are ticked: choosing one takes it off, choosing
+                // another adds it (instead of the last when all are taken).
+                for entry in AppState.effect-control-pool : MenuItem {
+                    title: entry.name;
+                    checked: entry.cell >= 0;
+                    activated => { AppLogic.toggle-effect-control(root.effect.key, entry.index); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: "More parameters…";
+                    activated => {
+                        AppLogic.open-effect-param-search(root.effect.key);
+                        param-search.show();
+                    }
+                }
+                MenuItem {
+                    title: "Reset sliders";
+                    activated => { AppLogic.reset-effect-controls(root.effect.key); }
+                }
+            }
             MenuSeparator { }
             MenuItem {
                 title: "Move left";
@@ -91,6 +264,31 @@ export component EffectSquare inherits FxSlot {
                 activated => { AppLogic.remove-effect(root.slot-index, root.section, root.index); }
             }
         }
+    }
+
+    // MIDI learn: each slider is a target.
+    for control[index] in root.effect.controls : Rectangle {
+        x: 4px;
+        y: root.slider-y(index);
+        width: root.width - 8px;
+        height: 14px;
+        if AppState.learning && control.learn > 0 : LearnTarget {
+            width: 100%;
+            height: 100%;
+            state: control.learn;
+            kind: 8;
+            slot: root.slot-index;
+            index: root.learn-index(index);
+        }
+    }
+
+    param-search := ParamSearchPopup {
+        x: 0;
+        y: root.height + 4px;
+        width: 280px;
+        height: 320px;
+        filter(query) => { AppLogic.filter-param-search(query); }
+        pick(index) => { AppLogic.pick-param-search(index); }
     }
 }
 
@@ -206,8 +404,8 @@ component FxGrid inherits Rectangle {
         y: max(0px, min(root.height - root.cell, root.pointer-y - root.grab-y));
         name: root.effects[root.drag-from].name;
         graph: root.effects[root.drag-from].graph;
-        display: root.effects[root.drag-from].display;
-        has-display: root.effects[root.drag-from].has-display;
+        display: AppState.inline-displays[root.effects[root.drag-from].display - 1];
+        has-display: root.effects[root.drag-from].display > 0;
         selected: true;
         // Opaque, so the squares it passes over don't show through.
         background: Theme.background;
@@ -332,8 +530,8 @@ export component FxStrip inherits Rectangle {
         y: 0;
         name: root.effects[root.drag-from].name;
         graph: root.effects[root.drag-from].graph;
-        display: root.effects[root.drag-from].display;
-        has-display: root.effects[root.drag-from].has-display;
+        display: AppState.inline-displays[root.effects[root.drag-from].display - 1];
+        has-display: root.effects[root.drag-from].display > 0;
         selected: true;
         // Opaque, so the squares it passes over don't show through.
         background: Theme.background;

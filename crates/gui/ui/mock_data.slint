@@ -2,7 +2,7 @@
 // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall
 // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.
 
-import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow, PanelPoolRow, LearnParamRow } from "types.slint";
 
 export global MockData {
     out property <[string]> audio-devices: [
@@ -1386,7 +1386,23 @@ export global MockData {
                     preset-changed: false,
                 },
             ],
-            audio-effects: [],
+            audio-effects: [
+                {
+                    key: 3, name: "Sledge Distortion", gui-supported: true, gui-open: false, params-open: false, graph: 0,
+                    preset-name: "", preset-user: false, preset-changed: false,
+                    controls: [
+                        { label: "Amount", position: 0.4, text: "40 %", steps: 0, learn: 0 },
+                        { label: "Waveshaper", position: 0.25, text: "Soft", steps: 3, learn: 0 },
+                    ],
+                },
+                {
+                    key: 4, name: "x42 Compressor", gui-supported: true, gui-open: false, params-open: false, graph: 1,
+                    preset-name: "", preset-user: false, preset-changed: false,
+                    controls: [
+                        { label: "Ratio", position: 0.3, text: "4.0", steps: 0, learn: 0, modulated: true, mod-low: 0.2, mod-high: 0.6, mod-value: 0.45 },
+                    ],
+                },
+            ],
             midi-inputs: [
                 true,
             ],
@@ -1787,4 +1803,15 @@ export global MockData {
     out property <float> master-volume-db: 0;
     out property <int> master-transpose: 0;
     out property <int> metronome-bpm: 120;
+    out property <[LearnParamRow]> learn-param-rows: [
+        { name: "Decay", place: "Slot 1 · mda EPiano" },
+        { name: "Amount", place: "Slot 1 · Sledge Distortion" },
+        { name: "Ratio", place: "Master · x42 Compressor" },
+    ];
+    out property <int> learn-param-count: 3;
+    out property <[PanelPoolRow]> effect-control-pool: [
+        { index: 0, name: "Amount", cell: 0 },
+        { index: 1, name: "Waveshaper", cell: 1 },
+        { index: 2, name: "Tone", cell: -1 },
+    ];
 }

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use slint::{ComponentHandle, Model, ModelRc, SharedString};
 
 use crate::{
-    AppState, AppWindow, SettingsWindow, EffectRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
+    AppState, AppWindow, SettingsWindow, EffectRow, EffectControl, LearnParamRow, MidiDeviceRow, MidiInputRow, SurfaceControlView, SurfaceView, ParamRow, PickerRow, PresetRow,
     SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, LearnControl, LearnLevel, ColourPair,
     LearnTargetRow,
 };
@@ -121,8 +121,10 @@ slint_struct!(ParamRow {
 });
 slint_struct!(PresetRow { name, user, pinned, after_pinned, current });
 slint_struct!(EffectRow {
-    key, name, gui_supported, gui_open, params_open, graph, preset_name, preset_user, preset_changed,
+    key, name, gui_supported, gui_open, params_open, graph, display, preset_name, preset_user, preset_changed, controls,
 });
+slint_struct!(EffectControl { label, position, default_position, text, steps, learn, modulated, mod_low, mod_high, mod_value });
+slint_struct!(LearnParamRow { name, place });
 slint_struct!(MidiDeviceRow { name, checked, available });
 slint_struct!(MidiInputRow { summary, devices });
 slint_struct!(SurfaceControlView {
@@ -166,7 +168,7 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
          // (see `src/mock_data.rs`), for the editor's preview: `AppState` and `ParamsWindow` fall\n\
          // back to these when `Platform.uses-mock-data`. Regenerate rather than edit by hand.\n\n\
          import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, \
-         SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow } \
+         SceneRow, SlotState, SurfaceView, SurfaceControlView, LearnControl, LearnTargetRow, PanelPoolRow, LearnParamRow } \
          from \"types.slint\";\n\n\
          export global MockData {\n",
     );
@@ -180,6 +182,8 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "bool", "learning", &state.get_learning());
     property(&mut out, "LearnControl", "learn-control", &state.get_learn_control());
     property(&mut out, "[LearnTargetRow]", "learn-rows", &state.get_learn_rows());
+    property(&mut out, "[LearnParamRow]", "learn-param-rows", &state.get_learn_param_rows());
+    property(&mut out, "int", "learn-param-count", &state.get_learn_param_count());
     property(&mut out, "[SceneRow]", "scene-rows", &state.get_scene_rows());
     property(&mut out, "int", "scene-count", &state.get_scene_count());
     property(&mut out, "string", "current-scene", &state.get_current_scene());
@@ -196,6 +200,7 @@ pub fn generate(app: &AppWindow, settings: &SettingsWindow, params_window: (Shar
     property(&mut out, "string", "preset-query", &state.get_preset_query());
     property(&mut out, "[string]", "param-search-rows", &state.get_param_search_rows());
     property(&mut out, "int", "param-search-count", &state.get_param_search_count());
+    property(&mut out, "[PanelPoolRow]", "effect-control-pool", &state.get_effect_control_pool());
     property(&mut out, "[EffectRow]", "master-effects", &state.get_master_effects());
     property(&mut out, "float", "master-volume-db", &state.get_master_volume_db());
     property(&mut out, "int", "master-transpose", &state.get_master_transpose());

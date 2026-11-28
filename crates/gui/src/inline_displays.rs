@@ -3,10 +3,11 @@
 //! redrawn, throttled, and only while their square's tab shows.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use live_keys_engine::{Engine, InlinePicture, PluginKey, SLOT_COUNT};
-use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 /// The shortest time between two renders of one plugin's display (~30 fps).
 const MIN_INTERVAL: Duration = Duration::from_millis(33);
@@ -18,17 +19,25 @@ const TAB_PANEL: i32 = 0;
 const TAB_MIDI: i32 = 1;
 
 struct Rendered {
-    /// `None` when the plugin had nothing to show.
-    image: Option<Image>,
+    /// Its row in [`InlineDisplays::pictures`]; `None` when the plugin had
+    /// nothing to show.
+    row: Option<usize>,
     at: Instant,
     /// The window's scale factor it was rendered for.
     scale: f32,
 }
 
-/// The last picture per plugin and which tab each slot shows.
+/// The last picture per plugin and which tab each slot shows. The pictures
+/// are a model of their own (`AppState.inline-displays`), which a chain row
+/// points into (`EffectRow.display`): redrawing one changes only its picture,
+/// not the row, so the square's open context menu isn't rebuilt (which empties
+/// its submenu).
 pub struct InlineDisplays {
     rendered: HashMap<PluginKey, Rendered>,
     tabs: [i32; SLOT_COUNT],
+    pictures: Rc<VecModel<Image>>,
+    /// Rows of `pictures` no plugin uses.
+    free: Vec<usize>,
 }
 
 impl InlineDisplays {
@@ -36,7 +45,14 @@ impl InlineDisplays {
         Self {
             rendered: HashMap::new(),
             tabs: [TAB_PANEL; SLOT_COUNT],
+            pictures: Rc::new(VecModel::default()),
+            free: Vec::new(),
         }
+    }
+
+    /// The pictures, for `AppState.inline-displays`.
+    pub fn model(&self) -> ModelRc<Image> {
+        ModelRc::from(self.pictures.clone())
     }
 
     pub fn set_tab(&mut self, slot: usize, tab: i32) {
@@ -51,22 +67,34 @@ impl InlineDisplays {
         self.tabs.get(slot).is_none_or(|&tab| tab == if midi { TAB_MIDI } else { TAB_PANEL })
     }
 
-    /// `key`'s last picture, for its chain row.
-    pub fn image(&self, key: PluginKey) -> Option<Image> {
-        self.rendered.get(&key).and_then(|rendered| rendered.image.clone())
+    /// `key`'s picture for its chain row (`EffectRow.display`): 1 + its row in
+    /// the model, 0 for none.
+    pub fn display(&self, key: PluginKey) -> i32 {
+        self.rendered.get(&key).and_then(|rendered| rendered.row).map_or(0, |row| row as i32 + 1)
     }
 
     pub fn forget(&mut self, key: PluginKey) {
-        self.rendered.remove(&key);
+        if let Some(Rendered { row: Some(row), .. }) = self.rendered.remove(&key) {
+            self.release(row);
+        }
     }
 
     pub fn clear(&mut self) {
-        self.rendered.clear();
+        let rows: Vec<usize> = self.rendered.drain().filter_map(|(_, rendered)| rendered.row).collect();
+        for row in rows {
+            self.release(row);
+        }
+    }
+
+    fn release(&mut self, row: usize) {
+        self.pictures.set_row_data(row, Image::default());
+        self.free.push(row);
     }
 
     /// Renders `key`'s display if it asked to be redrawn (or the scale factor
-    /// changed since) and the last render is long enough ago. Returns whether
-    /// its picture changed.
+    /// changed since) and the last render is long enough ago, into its
+    /// picture. Returns whether its chain row's `display` changed (it got one,
+    /// or has none any more), so the row needs updating.
     pub fn update(&mut self, engine: &Engine, key: PluginKey, scale: f32, now: Instant) -> bool {
         let previous = self.rendered.get(&key);
         let rescaled = previous.is_some_and(|rendered| rendered.scale != scale);
@@ -75,11 +103,31 @@ impl InlineDisplays {
         {
             return false;
         }
+        let old_row = previous.and_then(|rendered| rendered.row);
         let size = (DISPLAY_SIZE * scale).round() as u32;
-        let image = engine.render_inline_display(key, size, size).map(to_image);
-        let changed = image.is_some() || previous.is_some_and(|rendered| rendered.image.is_some());
-        self.rendered.insert(key, Rendered { image, at: now, scale });
-        changed
+        let row = match (engine.render_inline_display(key, size, size).map(to_image), old_row) {
+            (Some(image), Some(row)) => {
+                self.pictures.set_row_data(row, image);
+                Some(row)
+            }
+            (Some(image), None) => Some(match self.free.pop() {
+                Some(row) => {
+                    self.pictures.set_row_data(row, image);
+                    row
+                }
+                None => {
+                    self.pictures.push(image);
+                    self.pictures.row_count() - 1
+                }
+            }),
+            (None, Some(row)) => {
+                self.release(row);
+                None
+            }
+            (None, None) => None,
+        };
+        self.rendered.insert(key, Rendered { row, at: now, scale });
+        row != old_row
     }
 }
 

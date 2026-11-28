@@ -36,6 +36,10 @@ pub struct Learn {
     /// lists them.
     pub action_menu: Cell<mappings::ActionMenu>,
     pub actions: RefCell<Vec<mappings::ActionItem>>,
+    /// "+ Parameter": the parameters `param_rows` (`AppState.learn-param-rows`)
+    /// lists, in its order.
+    pub params: RefCell<Vec<(PluginKey, mappings::PluginTarget)>>,
+    pub param_rows: Rc<VecModel<crate::LearnParamRow>>,
 }
 
 /// A mapping moved a target: as reported, the latest per target.
@@ -55,10 +59,12 @@ impl Learn {
         let engine = self.engine.borrow();
         let config = self.config.borrow();
         let panels = self.rack.panels.borrow();
+        let effects = self.rack.effect_panels.borrow();
         let ctx = Ctx {
             engine: &engine,
             config: &config,
             panels: panels.iter().map(|panel| panel.as_ref().map(|panel| (panel.key, &panel.panel))).collect(),
+            effects: effects.iter().map(|(key, effect)| (*key, &effect.panel)).collect(),
             metronome_playing: self.metronome_playing.get(),
         };
         work(&ctx)
@@ -300,6 +306,10 @@ impl Learn {
         for slot in 0..SLOT_COUNT {
             self.rack.refresh_panel(&self.engine.borrow(), slot, false);
         }
+        let effects: Vec<PluginKey> = self.rack.effect_panels.borrow().keys().copied().collect();
+        for key in effects {
+            self.rack.refresh_effect_controls(&self.engine.borrow(), key);
+        }
         self.rack.mappings.view_dirty.set(true);
     }
 
@@ -371,6 +381,7 @@ impl Learn {
         state.set_master_volume_learn(flags.volume[MASTER_SLOT]);
         state.set_master_mute_learn(flags.mute[MASTER_SLOT]);
         state.set_master_transpose_learn(flags.transpose[MASTER_SLOT]);
+        self.rack.show_effect_learn(&self.engine.borrow(), &flags.effects);
         state.set_metronome_volume_learn(flags.metronome_volume);
         state.set_metronome_play_learn(flags.metronome_play);
         state.set_tempo_learn(flags.tempo);
@@ -395,6 +406,36 @@ impl Learn {
         let changed = self.with_ctx(|ctx| self.rack.mappings.edit_mode(ctx, row, change));
         self.changed(changed);
         self.refresh_view();
+    }
+
+    /// Lists every parameter of every loaded plugin whose "<slot> · <plugin>
+    /// · <parameter>" has every word of `query`, for "+ Parameter".
+    fn filter_params(&self, query: &str) {
+        let engine = self.engine.borrow();
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut params = Vec::new();
+        let mut rows = Vec::new();
+        let mut count = 0;
+        for slot in 0..=MASTER_SLOT {
+            let Some(chain) = engine.slot(slot) else { continue };
+            let slot_name = if slot == MASTER_SLOT { "Master".to_string() } else { format!("Slot {}", slot + 1) };
+            for meta in chain.plugins() {
+                for param in &meta.params {
+                    count += 1;
+                    let place = format!("{slot_name} · {}", meta.name);
+                    let lower = format!("{place} · {}", param.name).to_lowercase();
+                    if words.iter().all(|word| lower.contains(word.as_str())) {
+                        params.push((meta.key, mappings::PluginTarget::Param { symbol: param.symbol.clone() }));
+                        rows.push(crate::LearnParamRow { name: param.name.as_str().into(), place: place.into() });
+                    }
+                }
+            }
+        }
+        *self.params.borrow_mut() = params;
+        self.param_rows.set_vec(rows);
+        if let Some(app) = self.app.upgrade() {
+            app.global::<AppState>().set_learn_param_count(count);
+        }
     }
 
     /// Hands learn mode's callbacks to the window.
@@ -459,6 +500,20 @@ impl Learn {
             }
             learn.refresh_view();
         });
+        let learn = self.clone();
+        logic.on_learn_filter_params(move |query| learn.filter_params(&query));
+        let learn = self.clone();
+        logic.on_learn_pick_param(move |index| {
+            let picked = learn.params.borrow().get(index.max(0) as usize).cloned();
+            if let Some((key, target)) = picked {
+                let changed = learn.with_ctx(|ctx| learn.rack.mappings.add_param(ctx, key, target));
+                learn.changed(changed);
+            }
+            learn.refresh_view();
+        });
+        if let Some(app) = self.app.upgrade() {
+            app.global::<AppState>().set_learn_param_rows(ModelRc::from(self.param_rows.clone()));
+        }
         let learn = self.clone();
         logic.on_learn_open_actions(move || {
             learn.action_menu.set(mappings::ActionMenu::Top);

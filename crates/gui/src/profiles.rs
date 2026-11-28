@@ -12,15 +12,21 @@
 //!
 //! **Files.** Shipped profiles are `crates/gui/profiles/*.json`, compiled in
 //! ([`SHIPPED`]). The user's live in `<data dir>/live-keys/profiles/`: any
-//! `*.json` there is a profile (same format, the plugin id inside), replacing
-//! the shipped one for that plugin wholesale — except `rows.json`, which holds
+//! `*.json` there is a profile (same format, the plugin ids inside), replacing
+//! the shipped one for those plugins wholesale — except `rows.json`, which holds
 //! the user's row per plugin ([`UserRow`]: the shown controls' ids, plus
 //! parameters added through "More parameters…"), written by
 //! [`Profiles::add_control`], [`Profiles::remove_control`] and
 //! [`Profiles::reset_row`].
 //!
-//! **Profile format** (JSON, unknown fields rejected): `plugin` (its
-//! `PluginInfo::id`), `fixed` (`"drawbars"` to show `drawbars`), `drawbars` and
+//! **Effects** get a panel too ([`PanelKind::Effect`]): at most
+//! [`MAX_EFFECT_CONTROLS`] controls, shown as small sliders on the effect's
+//! square — its profile's row if it has one (no drawbars), else its first
+//! [`DEFAULT_EFFECT_CONTROLS`] continuous parameters. Kept in the same `rows.json`, by plugin id.
+//!
+//! **Profile format** (JSON, unknown fields rejected): `plugins` (the
+//! `PluginInfo::id`s it applies to — one, or variants sharing parameter
+//! symbols, like LSP's mono and stereo builds), `fixed` (`"drawbars"` to show `drawbars`), `drawbars` and
 //! `controls` (the pool, in menu order) as [`ControlSpec`]s, and `row` (the
 //! default row's control ids). A control's `target` is `{ "param": "<symbol>" }`
 //! (`ParamInfo::symbol`: an LV2 port symbol, a VST3/CLAP id in decimal) or
@@ -31,6 +37,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey, PortEvent, ToValue};
@@ -41,10 +48,24 @@ use serde::{Deserialize, Serialize};
 pub const MAX_CONTROLS: usize = 10;
 /// How many under drawbars (one row).
 pub const MAX_CONTROLS_WITH_DRAWBARS: usize = 5;
+/// How many an effect's square shows at most (sliders from its bottom up,
+/// over its name or inline display).
+pub const MAX_EFFECT_CONTROLS: usize = 4;
+/// How many it shows by default without a profile.
+pub const DEFAULT_EFFECT_CONTROLS: usize = 2;
+
+/// Whose panel: an instrument's (the slot's first tab) or an effect's (its
+/// square's sliders).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelKind {
+    Instrument,
+    Effect,
+}
 
 /// The shipped profiles, compiled in.
 const SHIPPED: &[(&str, &str)] = &[
     ("setbfree.json", include_str!("../profiles/setbfree.json")),
+    ("lsp-compressor.json", include_str!("../profiles/lsp-compressor.json")),
     ("mda-epiano.json", include_str!("../profiles/mda-epiano.json")),
     ("helm.json", include_str!("../profiles/helm.json")),
     ("surge-xt.json", include_str!("../profiles/surge-xt.json")),
@@ -230,7 +251,26 @@ impl Control {
     /// The control's position, 0..1 along it, for its current value: what
     /// MIDI learn moves (a switch is 0 or 1, a lever or drawbar steps evenly).
     pub fn position(&self, engine: &Engine, key: PluginKey) -> f32 {
-        match self.read(engine, key) {
+        self.position_of(self.read(engine, key))
+    }
+
+    /// The position of the target's default value (what a double-click resets
+    /// an effect's slider to).
+    pub fn default_position(&self, engine: &Engine, key: PluginKey) -> f32 {
+        let cell = match &self.target {
+            Target::Param(id) => match self.param(engine, key, *id) {
+                Some(param) => self.param_cell(&param, param.default_value),
+                None => self.unknown_cell(),
+            },
+            Target::Setbfree(_) => {
+                self.setbfree_cell(self.overrides.default.unwrap_or(0.0).clamp(0.0, SETBFREE_MAX) as u8)
+            }
+        };
+        self.position_of(cell)
+    }
+
+    fn position_of(&self, cell: CellValue) -> f32 {
+        match cell {
             CellValue::Position(position) => position,
             CellValue::On(on) => if on { 1.0 } else { 0.0 },
             CellValue::Index(index) => index as f32 / self.last_index().max(1) as f32,
@@ -238,7 +278,7 @@ impl Control {
     }
 
     /// The cell a position stands for.
-    fn cell_at(&self, position: f32) -> CellValue {
+    pub fn cell_at(&self, position: f32) -> CellValue {
         let position = position.clamp(0.0, 1.0);
         match self.widget {
             Widget::Switch => CellValue::On(position >= 0.5),
@@ -447,8 +487,8 @@ fn drawbar_value(level: usize) -> u8 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
-    /// The plugin's `PluginInfo::id`.
-    plugin: String,
+    /// The `PluginInfo::id`s it applies to.
+    plugins: Vec<String>,
     #[serde(default)]
     fixed: Option<Fixed>,
     #[serde(default)]
@@ -621,7 +661,7 @@ pub struct UserRow {
 #[derive(Default)]
 pub struct Profiles {
     /// By plugin id; a user profile has replaced a shipped one.
-    profiles: HashMap<String, ProfileFile>,
+    profiles: HashMap<String, Rc<ProfileFile>>,
     /// The user's rows, by plugin id.
     rows: BTreeMap<String, UserRow>,
     /// The user's profile folder; `None` if there's no data dir (nothing is
@@ -640,9 +680,7 @@ impl Profiles {
         let mut profiles = HashMap::new();
         for (name, json) in SHIPPED {
             match serde_json::from_str::<ProfileFile>(json) {
-                Ok(profile) => {
-                    profiles.insert(profile.plugin.clone(), profile);
-                }
+                Ok(profile) => insert(&mut profiles, profile),
                 // A test catches this; never fatal.
                 Err(err) => log::error!("shipped profile {name}: {err}"),
             }
@@ -650,8 +688,8 @@ impl Profiles {
         let mut rows = BTreeMap::new();
         if let Some(dir) = &dir {
             for (path, profile) in read_user_profiles(dir) {
-                log::info!("Panel profile for {} from {}", profile.plugin, path.display());
-                profiles.insert(profile.plugin.clone(), profile);
+                log::info!("Panel profile for {} from {}", profile.plugins.join(", "), path.display());
+                insert(&mut profiles, profile);
             }
             match std::fs::read_to_string(dir.join(ROWS_FILE)) {
                 Ok(json) => match serde_json::from_str(&json) {
@@ -667,14 +705,28 @@ impl Profiles {
 
     /// The panel for an instrument with this plugin id and these parameters.
     pub fn panel(&self, plugin_id: &str, params: &[ParamInfo]) -> Panel {
+        self.panel_of(PanelKind::Instrument, plugin_id, params)
+    }
+
+    /// The panel for an effect: its square's sliders.
+    pub fn effect_panel(&self, plugin_id: &str, params: &[ParamInfo]) -> Panel {
+        self.panel_of(PanelKind::Effect, plugin_id, params)
+    }
+
+    /// The panel of `kind` for a plugin with this id and these parameters.
+    pub fn panel_of(&self, kind: PanelKind, plugin_id: &str, params: &[ParamInfo]) -> Panel {
         let user = self.rows.get(plugin_id);
+        let (most, fallback) = match kind {
+            PanelKind::Instrument => (MAX_CONTROLS, MAX_CONTROLS),
+            PanelKind::Effect => (MAX_EFFECT_CONTROLS, DEFAULT_EFFECT_CONTROLS),
+        };
         let (drawbars, mut pool, default_row) = match self.profiles.get(plugin_id) {
             Some(profile) => {
                 let drawbars = match profile.fixed {
-                    Some(Fixed::Drawbars) => {
+                    Some(Fixed::Drawbars) if kind == PanelKind::Instrument => {
                         profile.drawbars.iter().filter_map(|spec| spec.resolve(params, Widget::Drawbar)).collect()
                     }
-                    None => Vec::new(),
+                    _ => Vec::new(),
                 };
                 let pool: Vec<Control> =
                     profile.controls.iter().filter_map(|spec| spec.resolve(params, Widget::Knob)).collect();
@@ -684,7 +736,7 @@ impl Profiles {
                 let default_row = params
                     .iter()
                     .filter(|p| p.kind == ParamKind::Continuous)
-                    .take(MAX_CONTROLS)
+                    .take(fallback)
                     .map(|p| format!("param:{}", p.id))
                     .collect();
                 (Vec::new(), params.iter().map(param_control).collect(), default_row)
@@ -701,7 +753,7 @@ impl Profiles {
             }
         }
         let ids: Vec<&str> = pool.iter().map(|control| control.id.as_str()).collect();
-        let max = if drawbars.is_empty() { MAX_CONTROLS } else { MAX_CONTROLS_WITH_DRAWBARS };
+        let max = if drawbars.is_empty() { most } else { MAX_CONTROLS_WITH_DRAWBARS };
         let row = resolve_row(&ids, user.map(|user| user.row.as_slice()), &default_row, max);
         Panel { drawbars, pool, row, max }
     }
@@ -713,8 +765,15 @@ impl Profiles {
     /// parameter's [`param_control`] id that isn't in the pool ("More
     /// parameters…"): it's added to this plugin's pool for good (until
     /// [`Profiles::reset_row`]).
-    pub fn add_control(&mut self, plugin_id: &str, params: &[ParamInfo], control_id: &str, replace: usize) -> Result<()> {
-        let panel = self.panel(plugin_id, params);
+    pub fn add_control(
+        &mut self,
+        kind: PanelKind,
+        plugin_id: &str,
+        params: &[ParamInfo],
+        control_id: &str,
+        replace: usize,
+    ) -> Result<()> {
+        let panel = self.panel_of(kind, plugin_id, params);
         let in_pool = panel.pool.iter().any(|control| control.id == control_id);
         if !in_pool && param_by_control_id(params, control_id).is_none() {
             bail!("no control '{control_id}' for {plugin_id}");
@@ -731,8 +790,8 @@ impl Profiles {
 
     /// Takes control `control_id` off this plugin's panel (the ones after it
     /// move up), and saves that as the user's choice.
-    pub fn remove_control(&mut self, plugin_id: &str, params: &[ParamInfo], control_id: &str) -> Result<()> {
-        let mut row = row_ids(&self.panel(plugin_id, params));
+    pub fn remove_control(&mut self, kind: PanelKind, plugin_id: &str, params: &[ParamInfo], control_id: &str) -> Result<()> {
+        let mut row = row_ids(&self.panel_of(kind, plugin_id, params));
         row.retain(|id| id != control_id);
         self.rows.entry(plugin_id.to_string()).or_default().row = row;
         self.save_rows()
@@ -760,6 +819,14 @@ impl Profiles {
 /// Every user profile in `dir` (all `*.json` but [`ROWS_FILE`]); unreadable
 /// ones are logged and skipped. Sorted by file name, so if two name the same
 /// plugin the last one wins, predictably.
+/// Adds `profile` under each plugin id it names.
+fn insert(profiles: &mut HashMap<String, Rc<ProfileFile>>, profile: ProfileFile) {
+    let profile = Rc::new(profile);
+    for plugin in &profile.plugins {
+        profiles.insert(plugin.clone(), profile.clone());
+    }
+}
+
 fn read_user_profiles(dir: &Path) -> Vec<(PathBuf, ProfileFile)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut paths: Vec<PathBuf> = entries
@@ -982,29 +1049,57 @@ mod tests {
         let plugin = "http://example.org/plugin";
         let mut profiles = Profiles::load_from(None);
         let profile: ProfileFile = serde_json::from_str(&format!(
-            r#"{{ "plugin": "{plugin}", "row": ["a", "b"], "controls": [
+            r#"{{ "plugins": ["{plugin}"], "row": ["a", "b"], "controls": [
                 {{ "id": "a", "target": {{ "param": "0" }} }}, {{ "id": "b", "target": {{ "param": "1" }} }},
                 {{ "id": "gone", "target": {{ "param": "missing" }} }} ] }}"#
         ))
         .unwrap();
-        profiles.profiles.insert(plugin.into(), profile);
+        insert(&mut profiles.profiles, profile);
         let row = |profiles: &Profiles| {
             let panel = profiles.panel(plugin, &params);
             panel.row.iter().map(|&index| panel.pool[index].id.clone()).collect::<Vec<_>>()
         };
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 2);
 
-        profiles.add_control(plugin, &params, "param:7", 0).unwrap();
+        profiles.add_control(PanelKind::Instrument, plugin, &params, "param:7", 0).unwrap();
         assert_eq!(row(&profiles), ["a", "b", "param:7"]);
         // Taken off again, it stays in the pool.
-        profiles.remove_control(plugin, &params, "param:7").unwrap();
-        profiles.remove_control(plugin, &params, "a").unwrap();
+        profiles.remove_control(PanelKind::Instrument, plugin, &params, "param:7").unwrap();
+        profiles.remove_control(PanelKind::Instrument, plugin, &params, "a").unwrap();
         assert_eq!(row(&profiles), ["b"]);
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 3);
 
-        assert!(profiles.add_control(plugin, &params, "param:99", 0).is_err());
+        assert!(profiles.add_control(PanelKind::Instrument, plugin, &params, "param:99", 0).is_err());
         profiles.reset_row(plugin).unwrap();
         assert_eq!(row(&profiles), ["a", "b"]);
         assert_eq!(profiles.panel(plugin, &params).pool.len(), 2);
+    }
+
+    #[test]
+    fn effect_panels_default_to_two_without_drawbars() {
+        let mut params: Vec<ParamInfo> =
+            (0..5).map(|id| ParamInfo::continuous(id, format!("P{id}"), 0.0, 0.0, 1.0)).collect();
+        params[0].kind = ParamKind::Toggle;
+        let mut profiles = Profiles::load_from(None);
+        let row = |panel: &Panel| panel.row.iter().map(|&index| panel.pool[index].id.clone()).collect::<Vec<_>>();
+        // No profile: the first two continuous parameters.
+        let panel = profiles.effect_panel("x", &params);
+        assert_eq!((row(&panel), panel.max), (vec!["param:1".to_string(), "param:2".to_string()], MAX_EFFECT_CONTROLS));
+        // A profile's row; its drawbars left out.
+        let profile: ProfileFile = serde_json::from_str(
+            r#"{ "plugins": ["p"], "fixed": "drawbars", "row": ["c", "a", "b"],
+                "drawbars": [{ "id": "d", "target": { "param": "4" } }],
+                "controls": [{ "id": "a", "target": { "param": "0" } }, { "id": "b", "target": { "param": "1" } },
+                    { "id": "c", "target": { "param": "2" } }] }"#,
+        )
+        .unwrap();
+        insert(&mut profiles.profiles, profile);
+        let panel = profiles.effect_panel("p", &params);
+        assert!(panel.drawbars.is_empty());
+        assert_eq!(row(&panel), ["c", "a", "b"]);
+        // Added after them, up to the most; then instead of the one given.
+        profiles.add_control(PanelKind::Effect, "p", &params, "param:3", 0).unwrap();
+        profiles.add_control(PanelKind::Effect, "p", &params, "param:4", 1).unwrap();
+        assert_eq!(row(&profiles.effect_panel("p", &params)), ["c", "param:4", "b", "param:3"]);
     }
 }

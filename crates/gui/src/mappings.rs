@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use live_keys_engine::{
-    ControlSetup, Engine, Light, Link, MASTER_SLOT, MAX_BPM, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
-    SurfaceSetup, Takeover, TargetSpec, ToValue,
+    ControlSetup, Engine, Light, Link, MASTER_SLOT, MAX_BPM, MAX_EFFECTS, MAX_MIDI_EFFECTS, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
+    Section, SurfaceSetup, Takeover, TargetSpec, ToValue,
 };
 use live_keys_surfaces::driver::{self, Colour, Palette};
 use live_keys_surfaces::{ControlKind, Message, Surface};
@@ -387,12 +387,23 @@ pub struct Ctx<'a> {
     pub config: &'a AppConfig,
     /// Per slot: its instrument's key and panel, if it has one.
     pub panels: Vec<Option<(PluginKey, &'a profiles::Panel)>>,
+    /// Effects' panels (their squares' sliders), by key.
+    pub effects: HashMap<PluginKey, &'a profiles::Panel>,
     pub metronome_playing: bool,
 }
 
 impl Ctx<'_> {
     fn slot_of(&self, key: PluginKey) -> Option<usize> {
         (0..=MASTER_SLOT).find(|&slot| self.engine.slot(slot).is_some_and(|chain| chain.plugins().any(|m| m.key == key)))
+    }
+
+    /// The effect and slider behind learn target `index` of slot `slot`'s
+    /// chain (see [`effect_control_index`]).
+    fn effect_control(&self, slot: usize, index: usize) -> Option<(PluginKey, &profiles::Control)> {
+        let (section, effect, control) = effect_control_of(index)?;
+        let key = self.engine.slot(slot)?.effects(section).get(effect)?.key;
+        let panel = self.effects.get(&key)?;
+        Some((key, panel.pool.get(*panel.row.get(control)?)?))
     }
 
     /// The panel control behind `slot`'s row position `index`.
@@ -422,7 +433,13 @@ impl Ctx<'_> {
             }
             PluginTarget::Setbfree { function } => profiles::Target::Setbfree(function.clone()),
         };
-        let panel = self.panels.iter().flatten().find(|(panel_key, _)| *panel_key == key).map(|(_, panel)| *panel);
+        let panel = self
+            .panels
+            .iter()
+            .flatten()
+            .find(|(panel_key, _)| *panel_key == key)
+            .map(|(_, panel)| *panel)
+            .or_else(|| self.effects.get(&key).copied());
         if let Some(control) =
             panel.and_then(|panel| panel.drawbars.iter().chain(&panel.pool).find(|control| control.target == wanted))
         {
@@ -801,6 +818,33 @@ pub mod kinds {
     pub const METRONOME_VOLUME: i32 = 5;
     pub const METRONOME_PLAY: i32 = 6;
     pub const TEMPO: i32 = 7;
+    /// An effect's slider: `index` by [`super::effect_control_index`].
+    pub const EFFECT_CONTROL: i32 = 8;
+}
+
+/// How many effects a section's slider indices leave room for.
+const EFFECT_STRIDE: usize = if MAX_EFFECTS > MAX_MIDI_EFFECTS { MAX_EFFECTS } else { MAX_MIDI_EFFECTS };
+
+/// An effect's slider as a learn target's `index`: `section`'s `effect`th
+/// effect's `control`th slider (the UI computes the same, see `learn-click`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn effect_control_index(section: Section, effect: usize, control: usize) -> usize {
+    let section = match section {
+        Section::Midi => 0,
+        Section::Audio => 1,
+    };
+    (section * EFFECT_STRIDE + effect) * profiles::MAX_EFFECT_CONTROLS + control
+}
+
+/// The inverse of [`effect_control_index`].
+fn effect_control_of(index: usize) -> Option<(Section, usize, usize)> {
+    let (effect, control) = (index / profiles::MAX_EFFECT_CONTROLS, index % profiles::MAX_EFFECT_CONTROLS);
+    let section = match effect / EFFECT_STRIDE {
+        0 => Section::Midi,
+        1 => Section::Audio,
+        _ => return None,
+    };
+    Some((section, effect % EFFECT_STRIDE, control))
 }
 
 /// Learn-mode states of the on-screen targets: 0 not a target, 1 a possible
@@ -810,6 +854,8 @@ pub struct LearnFlags {
     /// Per slot, per row cell and per drawbar.
     pub cells: Vec<Vec<i32>>,
     pub drawbars: Vec<Vec<i32>>,
+    /// Per effect (by key), per slider of its square.
+    pub effects: HashMap<PluginKey, Vec<i32>>,
     /// Per slot and the master (`MASTER_SLOT`).
     pub volume: Vec<i32>,
     pub mute: Vec<i32>,
@@ -1190,6 +1236,26 @@ impl MappingsUi {
         }
     }
 
+    /// As [`MappingsUi::decorate`], for an effect's square's sliders.
+    pub fn decorate_effect(&self, engine: &Engine, key: PluginKey, panel: &profiles::Panel, sliders: &mut [crate::EffectControl]) {
+        let Some(meta) = engine.plugin(key) else { return };
+        for (slider, &pool) in sliders.iter_mut().zip(&panel.row) {
+            let Some(control) = panel.pool.get(pool) else { continue };
+            if control.widget != profiles::Widget::Knob || !control.choices.is_empty() {
+                continue;
+            }
+            let Some(target) = plugin_target_of(meta, control) else { continue };
+            let Some((base, low, high)) = self.modulation_of(key, &target) else { continue };
+            let effective = slider.position;
+            let base = base.unwrap_or(effective);
+            slider.position = base;
+            slider.modulated = true;
+            slider.mod_low = (base + low).clamp(0.0, 1.0);
+            slider.mod_high = (base + high).clamp(0.0, 1.0);
+            slider.mod_value = effective;
+        }
+    }
+
     /// Plugin `key`'s panel control `control` was set on screen to `position`:
     /// if its target is modulated, that's its base (the mapping thread hears
     /// of it on the next tick; until then, the knob mustn't jump back).
@@ -1259,6 +1325,10 @@ impl MappingsUi {
             kinds::DRAWBAR => {
                 let (key, panel) = ctx.panels.get(slot).copied().flatten()?;
                 let control = panel.drawbars.get(index)?;
+                Some(Candidate::Plugin { key, target: ctx.plugin_target(key, control)?, panel: None })
+            }
+            kinds::EFFECT_CONTROL => {
+                let (key, control) = ctx.effect_control(slot, index)?;
                 Some(Candidate::Plugin { key, target: ctx.plugin_target(key, control)?, panel: None })
             }
             kinds::VOLUME => rack(RackTarget::Volume { slot }),
@@ -1374,6 +1444,29 @@ impl MappingsUi {
                 (true, None)
             }
         }
+    }
+
+    /// Maps parameter `target` of plugin `key` to the selected control, kept
+    /// with the scene, as clicking it on screen would (learn pane's "+
+    /// Parameter"); if it's mapped already, only shows its row expanded.
+    pub fn add_param(&self, ctx: &Ctx, key: PluginKey, target: PluginTarget) -> (bool, Option<usize>) {
+        let Some(selected) = self.selected.borrow().clone() else { return (false, None) };
+        let candidate = Candidate::Plugin { key, target, panel: None };
+        let changed = match self.entry_of(ctx, &candidate) {
+            Some(_) => (false, None),
+            None => {
+                let steps = Self::candidate_concrete(ctx, &candidate)
+                    .and_then(|concrete| Resolved::new(ctx, concrete))
+                    .map(|resolved| resolved.steps())
+                    .unwrap_or_default();
+                let mode = MappingMode::default_for(selected.kind(), &steps);
+                self.add(ctx, &selected.reference, candidate.clone(), mode, Keep::Scene)
+            }
+        };
+        self.expand_next.set(self.entry_of(ctx, &candidate));
+        self.setup_dirty.set(true);
+        self.view_dirty.set(true);
+        changed
     }
 
     /// Opens the right-click popup for learn target `(kind, slot, index)`.
@@ -2013,6 +2106,14 @@ impl MappingsUi {
                 flags.drawbars[slot] = panel.drawbars.iter().map(|control| state(plugin(control))).collect();
             }
         }
+        for (&key, panel) in &ctx.effects {
+            let shown = panel
+                .row
+                .iter()
+                .map(|&pool| state(panel.pool.get(pool).and_then(|c| ctx.plugin_target(key, c)).map(|target| Concrete::Plugin { key, target })))
+                .collect();
+            flags.effects.insert(key, shown);
+        }
         for slot in 0..=MASTER_SLOT {
             flags.volume[slot] = state(Some(Concrete::Volume(slot)));
             flags.mute[slot] = state(Some(Concrete::Mute(slot)));
@@ -2033,6 +2134,20 @@ impl PluginTarget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn effect_control_indices_round_trip() {
+        use super::*;
+        for section in [Section::Midi, Section::Audio] {
+            for effect in [0, 3, EFFECT_STRIDE - 1] {
+                for control in 0..profiles::MAX_EFFECT_CONTROLS {
+                    let index = effect_control_index(section, effect, control);
+                    assert_eq!(effect_control_of(index), Some((section, effect, control)));
+                }
+            }
+        }
+        assert_eq!(effect_control_of(2 * EFFECT_STRIDE * profiles::MAX_EFFECT_CONTROLS), None);
+    }
+
     use super::*;
 
     #[test]

@@ -1,5 +1,5 @@
 {
-  "plugin": "http://drobilla.net/plugins/mda/EPiano",
+  "plugins": ["http://drobilla.net/plugins/mda/EPiano"],
   "controls": [
     { "id": "decay", "label": "Decay", "target": { "param": "env_decay" } },
     { "id": "release", "label": "Release", "target": { "param": "env_release" } },

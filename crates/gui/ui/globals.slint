@@ -1,7 +1,7 @@
-import { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
+import { PickerRow, ParamRow, PresetRow, EffectRow, EffectControl, LearnParamRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
 import { MockData } from "mock_data.slint";
 
-export { PickerRow, ParamRow, PresetRow, EffectRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
+export { PickerRow, ParamRow, PresetRow, EffectRow, EffectControl, LearnParamRow, MidiDeviceRow, MidiInputRow, SceneRow, SlotState, PanelCell, DrawbarCell, PanelPoolRow, SurfaceControlView, SurfaceView, LearnLevel, LearnTargetRow, LearnControl, ColourPair, LearnAction, EditBank, EditBankSettings } from "types.slint";
 
 // State the host (Rust) pushes into the UI.
 export global AppState {
@@ -35,6 +35,10 @@ export global AppState {
     // What the selected control (a button or pad) can do beyond what's on
     // screen: learn mode's actions menu (scenes, slots, presets, panic).
     in property <[LearnAction]> learn-actions;
+    // "+ Parameter": every parameter of every loaded plugin matching the
+    // search (`learn-filter-params`), and how many there are in all.
+    in property <[LearnParamRow]> learn-param-rows: Platform.uses-mock-data ? MockData.learn-param-rows : [];
+    in property <int> learn-param-count: Platform.uses-mock-data ? MockData.learn-param-count : 0;
     in property <LearnTargetRow> learn-popup;
     in property <bool> learn-popup-assigned;
     in property <int> master-volume-learn;
@@ -90,6 +94,10 @@ export global AppState {
     in property <[PickerRow]> picker-rows: Platform.uses-mock-data ? MockData.picker-rows : [];
     in property <int> max-midi-effects: 8;
     in property <int> max-effects: 8;
+    // How many sliders an effect's square shows at most (`EffectRow.controls`).
+    in property <int> max-effect-controls: 4;
+    // Effects' inline displays, by `EffectRow.display` (1-based).
+    in property <[image]> inline-displays;
     in property <[SlotState]> slots: Platform.uses-mock-data ? MockData.slots : [];
     // Volume fader range; the minimum means muted.
     in property <float> min-volume-db: -60;
@@ -108,6 +116,9 @@ export global AppState {
     // has in all. Filled by `AppLogic.open-param-search`/`filter-param-search`.
     in property <[string]> param-search-rows: Platform.uses-mock-data ? MockData.param-search-rows : [];
     in property <int> param-search-count: Platform.uses-mock-data ? MockData.param-search-count : 0;
+    // An effect's square's context menu (one at a time, `AppLogic.open-effect-controls`):
+    // the parameters it can show as sliders; `cell` is the slider showing one, or -1.
+    in property <[PanelPoolRow]> effect-control-pool: Platform.uses-mock-data ? MockData.effect-control-pool : [];
     // The master chain's index wherever a slot index goes (`pick-plugin`,
     // `remove-effect`, `move-effect`): audio effects only.
     in property <int> master-slot: 6;
@@ -156,9 +167,11 @@ export global AppLogic {
     // MIDI learn: starts or stops it; selects a surface control (starting
     // it); clicks or right-clicks a learn target (`kind`: 0 a panel cell, 1 a
     // drawbar, 2 a volume, 3 a mute, 4 a transposition — `slot` the master's
-    // for the sidebar's —, 5 the metronome's volume, 6 its play, 7 its tempo;
-    // `index` the cell or drawbar). `row` arguments are the targets pane's
-    // rows, -1 the popup's target.
+    // for the sidebar's —, 5 the metronome's volume, 6 its play, 7 its tempo,
+    // 8 an effect's slider; `index` the cell or drawbar, or for a slider
+    // (section × max-effects + effect) × max-effect-controls + slider, section 0 the MIDI
+    // effects and 1 the audio effects, `slot` the master's for its chain).
+    // `row` arguments are the targets pane's rows, -1 the popup's target.
     callback set-learning(/* on */ bool);
     callback learn-select(/* device */ string, /* control */ int);
     // Shows a page of a surface (for learning; the hardware switches pages itself).
@@ -188,6 +201,12 @@ export global AppLogic {
     callback learn-add-action(/* index */ int);
     // The actions menu opens: on its first list.
     callback learn-open-actions();
+    // "+ Parameter" (any selected control): narrows `learn-param-rows` (every
+    // word must appear; "" lists them all, and is what opening it calls), and
+    // maps the row at `index` to the selected control, kept with the scene,
+    // like clicking it on screen.
+    callback learn-filter-params(/* query */ string);
+    callback learn-pick-param(/* index */ int);
     callback learn-set-mode(/* row */ int, /* mode */ int);
     callback learn-set-range(/* row */ int, /* from */ float, /* to */ float);
     callback learn-set-level(/* row */ int, /* level */ int, /* position */ float);
@@ -300,6 +319,19 @@ export global AppLogic {
     callback open-param-search(/* slot */ int, /* cell */ int);
     callback filter-param-search(/* query */ string);
     callback pick-param-search(/* index */ int);
+    // An effect's square's sliders (`EffectRow.controls`), by the plugin's key:
+    // moves slider `index` to `position` (0..1); fills `effect-control-pool`
+    // for its context menu; shows or hides pool row `pool` (`PanelPoolRow.index`;
+    // when all `max-effect-controls` are taken, instead of the last); back to the default.
+    // The choice is per plugin, so every instance follows.
+    callback set-effect-control(/* key */ int, /* index */ int, /* position */ float);
+    callback open-effect-controls(/* key */ int);
+    callback toggle-effect-control(/* key */ int, /* pool */ int);
+    callback reset-effect-controls(/* key */ int);
+    // "More parameters…" for an effect: like `open-param-search`, then
+    // `filter-param-search`/`pick-param-search` as for a cell; the picked
+    // parameter becomes a slider (instead of the last when all are taken).
+    callback open-effect-param-search(/* key */ int);
     // Scenes. `index` is into `AppState.scene-rows`; -1 means the current scene.
     callback filter-scenes(/* query */ string);
     // Recalls the scene: its unsaved changes (its draft) if it has any. The

@@ -1,5 +1,5 @@
 {
-  "plugin": "builtin:piano",
+  "plugins": ["builtin:piano"],
   "controls": [
     { "id": "dynamics", "label": "Touch", "name": "Dynamics", "target": { "param": "dynamics" } },
     { "id": "brightness", "label": "Bright", "name": "Brightness", "target": { "param": "brightness" } },

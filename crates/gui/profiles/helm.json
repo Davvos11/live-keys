@@ -1,5 +1,5 @@
 {
-  "plugin": "http://tytel.org/helm",
+  "plugins": ["http://tytel.org/helm"],
   "controls": [
     { "id": "cutoff", "label": "Cutoff", "target": { "param": "cutoff" } },
     { "id": "resonance", "label": "Resonance", "target": { "param": "resonance" } },

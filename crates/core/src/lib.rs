@@ -9,7 +9,7 @@ pub use midi::MidiEvent;
 pub use param::ParamChange;
 pub use plugin::{
     HostedPlugin, ParamChoice, ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo,
-    note_name,
+    note_name, tidy_value_text,
 };
 pub use ring::{
     Consumer, MidiConsumer, MidiProducer, Producer, PushError, ParamConsumer, ParamProducer, midi_ring_buffer,

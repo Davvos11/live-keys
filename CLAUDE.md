@@ -949,9 +949,20 @@ behind format-agnostic cores:
   8, so buttons can be mapped before the scenes exist), previous/next slot, the selected
   slot's previous/next preset, MIDI panic — as `AppState.learn-actions` (`LearnAction`: text,
   whether it opens a list), picked by `learn-add-action` → `MappingsUi::add_action`, a press
-  kept in every scene; `learn-open-actions` starts on the first list), in
+  kept in every scene; `learn-open-actions` starts on the first list) — and, for any
+  selected control, "+ Parameter": a search over every parameter of every loaded plugin
+  (`learn-filter-params` fills `AppState.learn-param-rows`, "<slot> · <plugin> ·
+  <parameter>", and `learn-param-count`; `Learn::filter_params`), `learn-pick-param` mapping
+  one like a click on screen (`MappingsUi::add_param`: kept with the scene, expanded next;
+  the row ending the pane's targets, `AddRow`, opens `ParamPickPopup`: a search field
+  over `LearnParamRow`s — the name, then its slot and plugin in grey), in
   `SlotState`'s `cell-learn`/`drawbar-learn`/`volume-learn`/`mute-learn`/`transpose-learn`
-  and `AppState`'s master and metronome fields. `src/learn.rs` (`Learn`) is the glue: each
+  and `AppState`'s master and metronome fields, and each effect slider's
+  `EffectControl.learn` (`LearnFlags.effects` by key, shown by `Rack::show_effect_learn`;
+  learn kind `kinds::EFFECT_CONTROL`, index `effect_control_index` — (section ×
+  max(`MAX_EFFECTS`, `MAX_MIDI_EFFECTS`) + effect) × `MAX_EFFECT_CONTROLS` + slider, slot
+  `MASTER_SLOT` for the master chain; `Ctx.effects` the effects' panels, which
+  `Ctx::control_for` also looks in). `src/learn.rs` (`Learn`) is the glue: each
   poll it applies the reports (`Applied`: shows a plugin value like a mouse edit would, sets
   a volume in the config without sending it again, and does mute/transpose/metronome
   through their `AppLogic` handlers; `Waiting`: the panel's ghost), rebuilds the setup if
@@ -995,8 +1006,8 @@ behind format-agnostic cores:
   components: `KButton` (icon and/or label; `active` = the primary colour; `tooltip`, shown
   by Slint's `Tooltip` on hover and its accessible label; `icon-size`), `TextField`,
   `DropdownButton`, `Select` (a ComboBox look-alike on a `PopupWindow`), `ListItem`, `TabBar`,
-  `Stepper`, `FxSlot` (an 80px square: the effect's inline display, `EffectRow.display`/
-  `has-display`, fitted, with the name only on hover; else the name over a compressor/filter
+  `Stepper`, `FxSlot` (an 80px square: the effect's inline display — `display`/`has-display`, from
+  `AppState.inline-displays` at `EffectRow.display` − 1 —, fitted, with the name only on hover; else the name over a compressor/filter
   curve — `EffectRow.graph`, guessed from the name by `slot_view::graph` — or a faint +; it
   reports a click, or a drag once the pointer moves 4 px: `drag-moved`/`dropped`/
   `drag-cancelled`, `pressed-x/y`) and `ScrollIndicator`; `Knob`/
@@ -1023,13 +1034,19 @@ behind format-agnostic cores:
   through `slot_view::position`/`knob_value` —, `On`, or `Index`: the nearest choice, or a
   drawbar's level 0..=8; setBfree's drawbars are inverted, `level = rint((127 − v)·8/127)`), and
   `value_text` shows it. Shipped profiles are `crates/gui/profiles/*.json` (setBfree, mda
-  EPiano, Helm, Surge XT and Vital — the CLAP builds — and our piano, `builtin:piano`), compiled in (`SHIPPED`; add new ones
-  there); a control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
+  EPiano, Helm, Surge XT and Vital — the CLAP builds — and our piano, `builtin:piano`; for
+  effects the LSP compressors' LV2 builds, mono, stereo and sidechain), compiled in (`SHIPPED`; add new ones
+  there). A profile's `plugins` lists the ids it applies to (variants sharing parameter
+  symbols share one file); a profile's pool is its controls only (more through "More
+  parameters…"), so a plugin with many technical parameters gets a short menu. A control's `{ "param": "<symbol>" }` target matches `ParamInfo::symbol`, and is left
   out if the plugin lacks it. User profiles are `<data dir>/live-keys/profiles/*.json` (same
   format, replacing a shipped one wholesale), and `rows.json` there is the user's row per
   plugin (`UserRow`: the shown controls' ids, plus `param:<id>` controls added via "More
   parameters…", which stay in the pool), written by `add_control` (appends; replaces the
-  control at a given index when full) and `remove_control`, and removed by `reset_row`. A plugin without a profile gets every parameter
+  control at a given index when full) and `remove_control`, and removed by `reset_row`
+  (both take a `PanelKind`: an instrument's panel, or an **effect's** — `effect_panel`: no
+  drawbars, at most `MAX_EFFECT_CONTROLS` (4), its profile's row or else its first
+  `DEFAULT_EFFECT_CONTROLS` (2) continuous parameters; same `rows.json`, by plugin id). A plugin without a profile gets every parameter
   (`param_control`) as its pool and its first ten continuous ones shown; a default
   whose controls went missing is filled from the pool, up to its own length; a user's choice
   just loses the missing ones. Unit-tested (value mappings, row resolution and adding, the
@@ -1164,12 +1181,38 @@ behind format-agnostic cores:
   (`FxStrip`/`FxGrid`: the original fades, an opaque copy follows the pointer, a `DropLine`
   marks the gap it lands in — before the square under its centre when moving back, after it
   when moving forward — and dropping calls `move-effect`; in a strip, holding it within 24 px
-  of either end scrolls the row). **Inline displays** (`src/inline_displays.rs`): the poll
+  of either end scrolls the row). **An effect's sliders** (the Penpot board "Effect controls 1"):
+  `EffectSlider`s in `slot_panel.slint`, up to four stacked along the bottom of its square
+  (the first on top, over the name or display), each the label inside the bar, the filled
+  part the value, a modulated one's range lighter with a tick where it is now, the value at
+  its right end while hovered or dragged (at most half the bar); dragged sideways (Shift:
+  finer, relative, so a click doesn't jump), scrolled (a step, or 1/50), double-click or
+  Ctrl+click for the default; one with steps — an on/off switch, a choice — also by a click
+  (on ↔ off, or the next option, wrapping), its value text "On"/the option's name; snapping to `steps` is UI-side; while learning each gets a
+  `LearnTarget` (kind 8). The square's menu has "Sliders ›": the pool ticked, "More
+  parameters…" (a `ParamSearchPopup` of the square's own) and "Reset sliders"; the pool is
+  one list, filled when the pointer enters a square (`FxSlot.hovered`, or a slider's hover).
+  `EffectRow.controls: [EffectControl]` (label, position 0..1, `default-position`, value
+  text, steps, learn flag, modulation like a `PanelCell`'s), filled by `Rack::effect_row`
+  from the effect's `EffectPanel` (`Rack::effect_panels`, by key: its panel and a model
+  refilled in place; built on first show, dropped by `forget`, rebuilt for every instance
+  by `rebuild_effect_panels`; values re-read wherever `refresh_panel_of` runs, modulation by
+  `MappingsUi::decorate_effect`); `set-effect-control(key, index, position)` writes through
+  `Control::cell_at`/`write_control`; `open-effect-controls(key)` fills
+  `AppState.effect-control-pool` for the square's menu, `toggle-effect-control(key, pool)`
+  shows or hides one (full: instead of the last), `reset-effect-controls(key)`, and
+  `open-effect-param-search(key)` starts "More parameters…" for it (`ParamSearch.target`:
+  `SearchFor::Cell` or `Effect`); `AppState.max-effect-controls` is the constant.
+  **Inline displays** (`src/inline_displays.rs`): the poll
   timer's `Rack::render_inline_displays` renders, for every row of a section whose tab shows
   (a slot's audio effects on tab 1, MIDI effects on tab 2 — `set-slot-tab` reports the
   slot's tab — the master chain always), the displays that asked (`Engine::
   inline_display_dirty`), at most every 33 ms each, at 78 px × the window's scale factor
-  (redrawn when that changes), into `EffectRow.display`; `plugin_row` takes the last one. **Clear with undo:** `clear-slot` first saves the chain as a slot
+  (redrawn when that changes), into `AppState.inline-displays` (`InlineDisplays::pictures`,
+  one row per plugin with a picture, reused), which a chain row points into
+  (`EffectRow.display`, 1-based; 0 none): a redraw changes only the picture, and the row
+  only when the plugin gets a picture or loses it — rewriting the row ~30 times a second
+  rebuilt the square's open context menu, which emptied its "Sliders" submenu. **Clear with undo:** `clear-slot` first saves the chain as a slot
   preset in `<data dir>/live-keys/undo/slot-<n>/` (`slot_view::snapshot`) and keeps it with the
   routing in `Rack::closed`; `undo-clear` loads it back through
   `load_slot_preset` and restores the routing; `dismiss-closed`, or anything loading into the slot

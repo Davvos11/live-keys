@@ -9,7 +9,7 @@ use live_keys_engine::{Engine, ParamInfo, ParamKind, PluginKey};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::profiles::{CellValue, Control, DrawbarColour, Panel, Target, Widget};
-use crate::{DrawbarCell, PanelCell, PanelPoolRow, config, slot_presets};
+use crate::{DrawbarCell, EffectControl, PanelCell, PanelPoolRow, config, slot_presets};
 
 /// How many pool controls a cell's context menu lists at most (besides those in
 /// the row); the rest are under "More parameters…".
@@ -158,6 +158,39 @@ fn panel_cell(engine: &Engine, key: PluginKey, control: &Control) -> PanelCell {
         // Filled by `MappingsUi::decorate`.
         ..Default::default()
     }
+}
+
+/// The sliders of an effect's square: `panel`'s shown controls for the
+/// plugin with `key`, at current values (MIDI learn's flags and modulation
+/// are the caller's to add).
+pub fn effect_controls(engine: &Engine, key: PluginKey, panel: &Panel) -> Vec<EffectControl> {
+    panel
+        .row
+        .iter()
+        .filter_map(|&index| panel.pool.get(index))
+        .map(|control| {
+            let param = param_of(engine, key, control);
+            let steps = match control.widget {
+                Widget::Switch => 1,
+                _ if !control.choices.is_empty() => control.choices.len().saturating_sub(1) as i32,
+                Widget::Drawbar => 8,
+                _ => match param {
+                    Some(param) if matches!(param.kind, ParamKind::Stepped | ParamKind::Note) && !param.logarithmic => {
+                        param.steps as i32
+                    }
+                    _ => 0,
+                },
+            };
+            EffectControl {
+                label: control.label.as_str().into(),
+                position: control.position(engine, key),
+                default_position: control.default_position(engine, key),
+                text: control.value_text(engine, key).into(),
+                steps,
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 /// The parameter `control` drives, if it drives one.

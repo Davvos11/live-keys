@@ -3,7 +3,7 @@
 // can be a target. See `docs/design/midi-learn.md`.
 import { CheckBox, ScrollView, Switch } from "std-widgets.slint";
 import { AppState, AppLogic, LearnTargetRow } from "globals.slint";
-import { Theme, Icons, KButton, ListItem, Segmented, Select, Stepper } from "widgets.slint";
+import { Theme, Icons, KButton, ListItem, Segmented, Select, Stepper, TextField } from "widgets.slint";
 import { RangeSlider, SingleSlider } from "range_slider.slint";
 
 component Caption inherits Text {
@@ -301,9 +301,10 @@ component TargetRow inherits Rectangle {
     }
 }
 
-// The last row of the targets list for a button or pad: opens the actions
-// menu.
-component AddActionRow inherits Rectangle {
+// A row ending the targets list: "+ Parameter" (any control) opens the
+// parameter search, "+ Action" (a button or pad) the actions menu.
+component AddRow inherits Rectangle {
+    in property <string> text;
     callback clicked();
 
     height: 26px;
@@ -319,7 +320,7 @@ component AddActionRow inherits Rectangle {
     HorizontalLayout {
         padding-left: 10px;
         Text {
-            text: "+ Action";
+            text: root.text;
             color: Theme.text-faint;
             font-size: Theme.small-font-size;
             vertical-alignment: center;
@@ -353,6 +354,62 @@ component ActionsPopup inherits PopupWindow {
                     AppLogic.learn-add-action(index);
                     // A list stays open on its next one.
                     if !action.opens {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// "+ Parameter": a search over every parameter of every loaded plugin
+// (`AppState.learn-param-rows`, filtered in Rust): the parameter's name, then
+// its slot and plugin. Choosing one maps it to the selected control, as
+// clicking it on screen would; Enter picks the first.
+component ParamPickPopup inherits PopupWindow {
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.control-border;
+        background: Theme.background;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000080;
+        clip: true;
+        VerticalLayout {
+            padding: 4px;
+            spacing: 4px;
+            search := TextField {
+                placeholder: "Search parameters";
+                icon: Icons.search;
+                init => { self.grab-focus(); }
+                edited(text) => { AppLogic.learn-filter-params(text); }
+                accepted => {
+                    if AppState.learn-param-rows.length > 0 {
+                        AppLogic.learn-pick-param(0);
+                        root.close();
+                    }
+                }
+            }
+            if AppState.learn-param-rows.length == 0 : Text {
+                text: AppState.learn-param-count == 0 ? "No plugins are loaded." : "No parameters match \"\{search.text}\".";
+                color: Theme.text-faint;
+                font-size: Theme.small-font-size;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+            if AppState.learn-param-rows.length > 0 : Flickable {
+                vertical-stretch: 1;
+                content-height: AppState.learn-param-rows.length * 30px;
+                for row[index] in AppState.learn-param-rows : ListItem {
+                    y: index * 30px;
+                    width: parent.width;
+                    height: 28px;
+                    text: row.name;
+                    note: row.place;
+                    clicked => {
+                        AppLogic.learn-pick-param(index);
                         root.close();
                     }
                 }
@@ -453,11 +510,25 @@ export component LearnPane inherits Rectangle {
                     index: index;
                     expanded: index == AppState.learn-expanded;
                 }
-                // Buttons and pads: scenes, slots, presets, panic.
-                if AppState.learn-actions.length > 0 : AddActionRow {
-                    clicked => {
-                        AppLogic.learn-open-actions();
-                        actions-popup.show();
+                HorizontalLayout {
+                    spacing: 6px;
+                    // Any plugin's parameter, on screen or not.
+                    AddRow {
+                        text: "+ Parameter";
+                        horizontal-stretch: 1;
+                        clicked => {
+                            AppLogic.learn-filter-params("");
+                            params-popup.show();
+                        }
+                    }
+                    // Buttons and pads: scenes, slots, presets, panic.
+                    if AppState.learn-actions.length > 0 : AddRow {
+                        text: "+ Action";
+                        horizontal-stretch: 1;
+                        clicked => {
+                            AppLogic.learn-open-actions();
+                            actions-popup.show();
+                        }
                     }
                 }
             }
@@ -474,6 +545,12 @@ export component LearnPane inherits Rectangle {
         }
     }
 
+    params-popup := ParamPickPopup {
+        x: 10px;
+        width: root.width - 20px;
+        height: min(420px, root.height - 120px);
+        y: max(10px, root.height - self.height - 56px);
+    }
     actions-popup := ActionsPopup {
         x: 10px;
         width: root.width - 20px;

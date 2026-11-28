@@ -1,0 +1,20 @@
+{
+  "plugins": [
+    "http://lsp-plug.in/plugins/lv2/compressor_mono",
+    "http://lsp-plug.in/plugins/lv2/compressor_stereo",
+    "http://lsp-plug.in/plugins/lv2/sc_compressor_mono",
+    "http://lsp-plug.in/plugins/lv2/sc_compressor_stereo"
+  ],
+  "controls": [
+    { "id": "threshold", "name": "Threshold", "label": "Threshold", "target": { "param": "al" } },
+    { "id": "ratio", "label": "Ratio", "target": { "param": "cr" } },
+    { "id": "attack", "name": "Attack time", "label": "Attack", "target": { "param": "at" } },
+    { "id": "release", "name": "Release time", "label": "Release", "target": { "param": "rt" } },
+    { "id": "knee", "label": "Knee", "target": { "param": "kn" } },
+    { "id": "makeup", "name": "Makeup gain", "label": "Makeup", "target": { "param": "mk" } },
+    { "id": "mix", "name": "Dry/wet", "label": "Mix", "target": { "param": "cdw" } },
+    { "id": "input", "name": "Input gain", "label": "Input", "target": { "param": "g_in" } },
+    { "id": "output", "name": "Output gain", "label": "Output", "target": { "param": "g_out" } }
+  ],
+  "row": ["ratio", "threshold"]
+}

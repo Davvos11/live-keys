@@ -1,5 +1,5 @@
 {
-  "plugin": "clap:audio.vital.synth",
+  "plugins": ["clap:audio.vital.synth"],
   "controls": [
     { "id": "macro1", "name": "Macro 1", "label": "Macro 1", "target": { "param": "49618" } },
     { "id": "macro2", "name": "Macro 2", "label": "Macro 2", "target": { "param": "49619" } },

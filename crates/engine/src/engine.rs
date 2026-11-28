@@ -1029,12 +1029,13 @@ impl Engine {
             && info.kind != ParamKind::Choice
             && let Some(text) = controller.value_text(param_id, value)
         {
-            return text;
+            return live_keys_core::tidy_value_text(&text);
         }
         if let PluginEditor::Vst3(controller) = &meta.editor
             && info.kind != ParamKind::Choice
             && let Some(text) = controller.value_text(param_id, value)
         {
+            let text = live_keys_core::tidy_value_text(&text);
             return if info.unit.is_empty() || text.ends_with(info.unit.as_str()) {
                 text
             } else {
