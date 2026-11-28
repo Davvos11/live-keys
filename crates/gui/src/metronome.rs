@@ -47,6 +47,7 @@ impl MetronomeConfig {
             playing,
             bpm: f32::from(self.bpm),
             beats_per_bar: self.beats_per_bar(),
+            beat_unit: SIGNATURES.get(self.signature).unwrap_or(&SIGNATURES[DEFAULT_SIGNATURE]).1,
             subdivision: Subdivision::ALL.get(self.subdivision).copied().unwrap_or_default(),
             level: if master_muted { 0.0 } else { self.volume * self.volume },
         }

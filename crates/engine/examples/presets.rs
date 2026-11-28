@@ -3,9 +3,9 @@
 //! into slot 0 of a live stream, applies its first preset, saves a user preset,
 //! reloads it and deletes it again, then does the same with a state file in a
 //! temporary folder (as slot presets store plugins).
-//! For a VST3 plugin that applies a loaded state asynchronously (Surge XT), the
-//! "reloaded" values print stale even though the state was restored — see
-//! CLAUDE.md's "Known simplifications".
+//! For a plugin that applies a loaded state asynchronously (Surge XT), the
+//! "reloaded" values can print stale; "after idling" shows them once the plugin
+//! has said its values changed (VST3 `restartComponent`, CLAP settling).
 //! `cargo run -p live-keys-engine --example presets --release -- [plugin id]...`
 
 use live_keys_engine::Engine;
@@ -47,6 +47,8 @@ fn main() -> anyhow::Result<()> {
             engine.set_param(key, param, 0.75);
             engine.load_preset(key, &saved.id)?;
             println!("  reloaded: first param now {:?}", engine.param_value(key, param));
+            idle(&mut engine);
+            println!("  after idling: {:?}", engine.param_value(key, param));
             println!("  listed: {}", engine.presets(key).iter().any(|p| p.id == saved.id));
             engine.delete_preset(key, &saved.id)?;
             println!("  deleted, still listed: {}", engine.presets(key).iter().any(|p| p.id == saved.id));
@@ -68,9 +70,24 @@ fn main() -> anyhow::Result<()> {
                 engine.param_value(key, param),
                 engine.presets(key).iter().any(|p| p.id.contains("live-keys-state-smoke"))
             );
+            idle(&mut engine);
+            println!("  after idling: {:?}", engine.param_value(key, param));
             std::fs::remove_dir_all(&dir)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
     Ok(())
+}
+
+/// Runs the main thread's plugin work for half a second, as the GUI's poll timer
+/// does: a plugin that applies a loaded state late (Surge XT) has its values read
+/// again once it says so (CLAP: after it settles; VST3: `restartComponent`).
+fn idle(engine: &mut live_keys_engine::Engine) {
+    for _ in 0..30 {
+        let reread = engine.idle_plugins(|_, _, _| {});
+        if !reread.is_empty() {
+            println!("  (values read again: the plugin asked)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
 }

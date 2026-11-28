@@ -257,6 +257,53 @@ fn format_number(value: f32) -> String {
     if text == "-0" { "0".to_string() } else { text }
 }
 
+/// The musical time plugins are told about (tempo-synced delays, LFOs,
+/// arpeggiators): the metronome's tempo and time signature, and while it plays,
+/// where it is. Positions are at the first frame of the block about to be
+/// processed. Beats are the time signature's beat unit (an eighth in 6/8);
+/// formats that count quarter notes convert with [`Transport::quarters`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transport {
+    /// Beats per minute.
+    pub tempo: f64,
+    pub playing: bool,
+    pub beats_per_bar: u32,
+    /// The note value of a beat: 4 a quarter, 8 an eighth.
+    pub beat_unit: u32,
+    /// Beats since the transport started.
+    pub beats: f64,
+    /// Where the bar it's in started, in beats since the transport started.
+    pub bar_start: f64,
+    /// The bar it's in, counting from 0.
+    pub bar: i64,
+    /// Frames since the transport started.
+    pub frame: i64,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self { tempo: 120.0, playing: false, beats_per_bar: 4, beat_unit: 4, beats: 0.0, bar_start: 0.0, bar: 0, frame: 0 }
+    }
+}
+
+impl Transport {
+    /// `beats` (in this transport's beat unit) as quarter notes.
+    pub fn quarters(&self, beats: f64) -> f64 {
+        beats * 4.0 / f64::from(self.beat_unit.max(1))
+    }
+
+    /// The tempo in quarter notes per minute.
+    pub fn quarter_tempo(&self) -> f64 {
+        self.quarters(self.tempo)
+    }
+
+    /// Seconds since the transport started (the tempo has been constant as far
+    /// as plugins know).
+    pub fn seconds(&self) -> f64 {
+        self.beats * 60.0 / self.tempo.max(1.0)
+    }
+}
+
 /// A plugin instance that can be driven from the real-time audio thread.
 ///
 /// Implementations must not allocate, lock, or perform blocking syscalls inside
@@ -299,6 +346,10 @@ pub trait HostedPlugin: Send {
     /// `id` and `value` are as described on [`ParamInfo`]; an unknown `id` is a
     /// no-op.
     fn set_param(&mut self, id: u32, value: f32);
+
+    /// The musical time for the next `process` call; called before every
+    /// block. Plugins that don't follow tempo ignore it (the default).
+    fn set_transport(&mut self, _transport: &Transport) {}
 }
 
 #[cfg(test)]

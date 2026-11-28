@@ -6,12 +6,13 @@ use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use vst3::Steinberg::Vst::IAttributeList_::AttrID;
 use vst3::Steinberg::Vst::{
     Event, IAttributeList, IAttributeListTrait, IComponentHandler, IMessage, IMessageTrait, IComponentHandlerTrait, IEventList, IEventListTrait,
     IHostApplication, IHostApplicationTrait, IParamValueQueue, IParamValueQueueTrait,
-    IParameterChanges, IParameterChangesTrait, ParamID, ParamValue, String128, TChar,
+    IParameterChanges, IParameterChangesTrait, ParamID, ParamValue, RestartFlags_, String128, TChar,
 };
 use vst3::Steinberg::{
     FIDString, IBStream, IBStreamTrait, TUID, int32, int64, kInvalidArgument, kNoInterface,
@@ -257,9 +258,14 @@ impl IAttributeListTrait for AttributeList {
     }
 }
 
-/// Receives parameter edits from the plugin's own editor.
+/// Receives parameter edits from the plugin's own editor, and its requests to
+/// re-read its parameter values.
 pub(crate) struct ComponentHandler {
     pub on_edit: Mutex<Option<EditCallback>>,
+    /// Set by `restartComponent(kParamValuesChanged)` (or `kReloadComponent`):
+    /// the host should read every parameter's value again (Surge XT asks after
+    /// a state load). Taken by `Vst3Controller::take_values_changed`.
+    pub values_changed: AtomicBool,
 }
 
 impl Class for ComponentHandler {
@@ -283,10 +289,18 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn restartComponent(&self, flags: int32) -> tresult {
+        // A flag only: plugins may call this from any thread, the audio thread
+        // included, and the values are read on the main thread.
+        let reread = (RestartFlags_::kParamValuesChanged | RestartFlags_::kReloadComponent) as int32;
+        if flags & reread != 0 {
+            self.values_changed.store(true, Ordering::Release);
+        }
         // Latency/IO/param-title changes would need a re-setup or a refreshed
         // parameter list; neither is supported yet, so the plugin keeps running
         // with what it reported at load time.
-        log::info!("VST3 plugin requested restartComponent (flags {flags:#x}), ignored");
+        if flags & !reread != 0 {
+            log::info!("VST3 plugin requested restartComponent (flags {flags:#x}), other than values ignored");
+        }
         kResultOk
     }
 }

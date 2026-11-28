@@ -51,6 +51,22 @@ fn main() {
         if let Some(preset) = presets.first() {
             println!("  load {:?}: {:?}", preset.name, host.load_preset(&controller, &info.id, &preset.id));
         }
+        // Remote controls: the parameters it suggests for hardware knobs.
+        for page in controller.remote_controls() {
+            let names: Vec<&str> = page
+                .params
+                .iter()
+                .map(|id| controller.params().iter().find(|p| p.id == *id).map_or("?", |p| p.name.as_str()))
+                .collect();
+            println!("  remote controls {:?} / {:?}: {names:?}", page.section, page.name);
+        }
+        // Parameter indication: map its first parameter to a made-up control, then clear it.
+        if let Some(param) = controller.params().first() {
+            let mapping = live_keys_clap_host::ParamIndication { label: "K1".into(), description: "Smoke K1".into() };
+            controller.set_indications([(param.id, mapping)].into());
+            controller.set_indications(Default::default());
+            println!("  indicated and cleared {:?}", param.name);
+        }
         drop(plugin);
         drop(controller);
         live_keys_clap_host::destroy_pending();

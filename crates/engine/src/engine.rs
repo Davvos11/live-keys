@@ -9,9 +9,9 @@ use live_keys_lv2_host::{
 };
 use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
 use live_keys_builtin::BuiltinHost;
-use live_keys_clap_host::{ClapController, ClapHost, ClapScan};
+use live_keys_clap_host::{ClapController, ClapHost, ClapScan, ParamIndication};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -879,12 +879,24 @@ impl Engine {
     /// and fds, which their GUIs run on), and hands `on_edit` the parameter
     /// changes they made themselves — in their own GUIs — for
     /// [`Engine::send_param_change`]. Returns the plugins whose values changed
-    /// otherwise (a loaded state that took effect late), re-read into
+    /// otherwise (a loaded state that took effect late; a VST3 plugin's
+    /// `restartComponent(kParamValuesChanged)`), re-read into
     /// [`Engine::param_value`] already. Call regularly (every ~16 ms) from the
     /// main thread.
     pub fn idle_plugins(&mut self, mut on_edit: impl FnMut(PluginKey, u32, f32)) -> Vec<PluginKey> {
         let mut changed = Vec::new();
         for meta in self.slots.iter_mut().flat_map(SlotChain::plugins_mut) {
+            // A VST3 plugin that asked for its values to be read again
+            // (`restartComponent(kParamValuesChanged)`, e.g. after a state load).
+            if let PluginEditor::Vst3(controller) = &meta.editor {
+                if controller.take_values_changed() {
+                    for param in &meta.params {
+                        meta.values.insert(param.id, controller.param_normalized(param.id));
+                    }
+                    changed.push(meta.key);
+                }
+                continue;
+            }
             let PluginEditor::Clap(controller) = &meta.editor else { continue };
             if controller.idle(|param_id, value| on_edit(meta.key, param_id, value)) {
                 for param in &meta.params {
@@ -896,6 +908,40 @@ impl Engine {
             }
         }
         changed
+    }
+
+    /// The parameters plugin `key` suggests for hardware knobs, as pages (a
+    /// CLAP plugin's remote controls); empty for other formats or none. Main
+    /// thread only.
+    pub fn suggested_params(&self, key: PluginKey) -> Vec<Vec<u32>> {
+        match self.plugin(key).map(|meta| &meta.editor) {
+            Some(PluginEditor::Clap(controller)) => {
+                controller.remote_controls().into_iter().map(|page| page.params).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The plugins whose suggested parameters ([`Engine::suggested_params`])
+    /// changed since the last call. Main thread only.
+    pub fn take_suggestions_changed(&self) -> Vec<PluginKey> {
+        self.slots
+            .iter()
+            .flat_map(SlotChain::plugins)
+            .filter(|meta| matches!(&meta.editor, PluginEditor::Clap(c) if c.take_remote_controls_changed()))
+            .map(|meta| meta.key)
+            .collect()
+    }
+
+    /// Tells every plugin that can show it (CLAP's parameter indication) which
+    /// of its parameters a controller drives now: `mapped`, by plugin; a plugin
+    /// left out has none. Main thread only.
+    pub fn set_param_indications(&self, mapped: &HashMap<PluginKey, BTreeMap<u32, ParamIndication>>) {
+        for meta in self.slots.iter().flat_map(SlotChain::plugins) {
+            if let PluginEditor::Clap(controller) = &meta.editor {
+                controller.set_indications(mapped.get(&meta.key).cloned().unwrap_or_default());
+            }
+        }
     }
 
     /// Passes an atom its GUI wrote (`LV2_Atom` header, then body) to atom input

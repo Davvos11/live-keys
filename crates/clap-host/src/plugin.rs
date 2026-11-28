@@ -2,7 +2,8 @@
 //! ([`ClapPlugin`]) and the half the main thread owns ([`ClapController`]).
 
 use std::ffi::{CStr, CString, c_char};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,13 @@ use clap_sys::ext::posix_fd_support::{
     CLAP_EXT_POSIX_FD_SUPPORT, CLAP_POSIX_FD_ERROR, CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE,
     clap_plugin_posix_fd_support,
 };
+use clap_sys::ext::param_indication::{
+    CLAP_EXT_PARAM_INDICATION, CLAP_EXT_PARAM_INDICATION_COMPAT, clap_plugin_param_indication,
+};
 use clap_sys::ext::preset_load::{CLAP_EXT_PRESET_LOAD, CLAP_EXT_PRESET_LOAD_COMPAT, clap_plugin_preset_load};
+use clap_sys::ext::remote_controls::{
+    CLAP_EXT_REMOTE_CONTROLS, CLAP_EXT_REMOTE_CONTROLS_COMPAT, clap_plugin_remote_controls,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_plugin_timer_support};
 use clap_sys::plugin::clap_plugin;
@@ -35,6 +42,7 @@ use live_keys_core::{
 use crate::events::{InputEvents, OutputEvents};
 use crate::host::{HostShared, as_audio_thread};
 use crate::module::{Module, char_array};
+use crate::remote::{self, ParamIndication, RemoteControlsPage};
 use crate::state;
 
 /// Most events one block can carry (MIDI and parameter changes); extra ones in a
@@ -287,6 +295,11 @@ pub(crate) fn instantiate(
         timer_ext: unsafe { extension(plugin, &[CLAP_EXT_TIMER_SUPPORT]) },
         fd_ext: unsafe { extension(plugin, &[CLAP_EXT_POSIX_FD_SUPPORT]) },
         preset_load_ext: unsafe { extension(plugin, &[CLAP_EXT_PRESET_LOAD, CLAP_EXT_PRESET_LOAD_COMPAT]) },
+        remote_ext: unsafe { extension(plugin, &[CLAP_EXT_REMOTE_CONTROLS, CLAP_EXT_REMOTE_CONTROLS_COMPAT]) },
+        indication_ext: unsafe {
+            extension(plugin, &[CLAP_EXT_PARAM_INDICATION, CLAP_EXT_PARAM_INDICATION_COMPAT])
+        },
+        indicated: RefCell::new(BTreeMap::new()),
         edit_rx: Mutex::new(edit_rx),
         reread_at: Cell::new(None),
         instance,
@@ -324,6 +337,9 @@ pub struct ClapPlugin {
     /// The plugin's own parameter changes, for the main thread.
     edit_tx: Producer<ParamChange>,
     steady_time: i64,
+    /// The musical time for the next block (`set_transport`); `None` until the
+    /// host sets one (the plugin then runs free).
+    transport: Option<clap_sys::events::clap_event_transport>,
     frames_rendered: usize,
     /// `start_processing` has been called (lazily, on the audio thread).
     started: bool,
@@ -393,6 +409,7 @@ impl ClapPlugin {
             out_events: OutputEvents::new(EVENT_CAPACITY),
             edit_tx,
             steady_time: 0,
+            transport: None,
             frames_rendered: 0,
             started: false,
             failed: false,
@@ -461,7 +478,7 @@ impl HostedPlugin for ClapPlugin {
             let data = clap_process {
                 steady_time: self.steady_time,
                 frames_count: frames as u32,
-                transport: std::ptr::null(),
+                transport: self.transport.as_ref().map_or(std::ptr::null(), |transport| transport as *const _),
                 audio_inputs: self.input_ports.as_ptr(),
                 audio_outputs: self.output_ports.as_mut_ptr(),
                 audio_inputs_count: self.input_ports.len() as u32,
@@ -504,6 +521,47 @@ impl HostedPlugin for ClapPlugin {
     fn set_param(&mut self, id: u32, value: f32) {
         self.in_events.push_param(id, f64::from(value));
     }
+
+    fn set_transport(&mut self, transport: &live_keys_core::Transport) {
+        self.transport = Some(clap_transport(transport));
+    }
+}
+
+/// `transport` as CLAP's transport event: beats are quarter notes, beat and
+/// second positions in CLAP's fixed point.
+fn clap_transport(transport: &live_keys_core::Transport) -> clap_sys::events::clap_event_transport {
+    use clap_sys::events::*;
+    use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
+    let beattime = |beats: f64| (beats * CLAP_BEATTIME_FACTOR as f64).round() as i64;
+    let mut flags = CLAP_TRANSPORT_HAS_TEMPO
+        | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+        | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+        | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if transport.playing {
+        flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    clap_event_transport {
+        header: clap_event_header {
+            size: std::mem::size_of::<clap_event_transport>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        },
+        flags,
+        song_pos_beats: beattime(transport.quarters(transport.beats)),
+        song_pos_seconds: (transport.seconds() * CLAP_SECTIME_FACTOR as f64).round() as i64,
+        tempo: transport.quarter_tempo(),
+        tempo_inc: 0.0,
+        loop_start_beats: 0,
+        loop_end_beats: 0,
+        loop_start_seconds: 0,
+        loop_end_seconds: 0,
+        bar_start: beattime(transport.quarters(transport.bar_start)),
+        bar_number: transport.bar as i32,
+        tsig_num: transport.beats_per_bar as u16,
+        tsig_denom: transport.beat_unit as u16,
+    }
 }
 
 /// Where a preset found by preset discovery is (see `preset.rs`).
@@ -526,6 +584,10 @@ pub struct ClapController {
     timer_ext: Option<&'static clap_plugin_timer_support>,
     fd_ext: Option<&'static clap_plugin_posix_fd_support>,
     preset_load_ext: Option<&'static clap_plugin_preset_load>,
+    remote_ext: Option<&'static clap_plugin_remote_controls>,
+    indication_ext: Option<&'static clap_plugin_param_indication>,
+    /// What the plugin was last told its parameters are mapped to.
+    indicated: RefCell<BTreeMap<u32, ParamIndication>>,
     edit_rx: Mutex<Consumer<ParamChange>>,
     /// When to read every value back after a state load (see [`STATE_SETTLE`]).
     reread_at: Cell<Option<Instant>>,
@@ -541,6 +603,29 @@ impl ClapController {
     /// The plugin's own text for parameter `id` at `value`, unit included.
     pub fn value_text(&self, id: u32, value: f32) -> Option<String> {
         value_text(self.plugin, self.params_ext?, id, f64::from(value))
+    }
+
+    /// The plugin's remote-control pages: the parameters it suggests for
+    /// hardware knobs, up to 8 a page; empty if it has none.
+    pub fn remote_controls(&self) -> Vec<RemoteControlsPage> {
+        self.remote_ext.map(|ext| remote::read_pages(self.plugin, ext)).unwrap_or_default()
+    }
+
+    /// Whether the plugin said its remote-control pages changed since the last
+    /// call (read them again with [`ClapController::remote_controls`]).
+    pub fn take_remote_controls_changed(&self) -> bool {
+        self.instance.host().remote_controls_changed.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Tells the plugin which of its parameters are mapped to a controller now
+    /// (`clap.param-indication`, which its GUI may show): the ones in `mapped`,
+    /// with what to show; every other one it was told about before is cleared.
+    /// Nothing if the plugin lacks the extension.
+    pub fn set_indications(&self, mapped: BTreeMap<u32, ParamIndication>) {
+        let Some(ext) = self.indication_ext else { return };
+        let mut indicated = self.indicated.borrow_mut();
+        remote::indicate(self.plugin, ext, &indicated, &mapped);
+        *indicated = mapped;
     }
 
     /// The plugin's current value of parameter `id`.

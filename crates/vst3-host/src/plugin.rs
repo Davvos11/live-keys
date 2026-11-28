@@ -17,7 +17,7 @@ use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{
     kIsBypass, kIsHidden, kIsList, kIsReadOnly,
 };
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
-    kContTimeValid, kTempoValid, kTimeSigValid,
+    kBarPositionValid, kContTimeValid, kPlaying, kProjectTimeMusicValid, kTempoValid, kTimeSigValid,
 };
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusInfo, Event, Event__type0, IAudioProcessor,
@@ -156,6 +156,7 @@ pub(crate) fn instantiate(
 
     let handler = ComWrapper::new(ComponentHandler {
         on_edit: Mutex::new(None),
+        values_changed: std::sync::atomic::AtomicBool::new(false),
     });
     unsafe {
         controller.setComponentHandler(handler.to_com_ptr::<IComponentHandler>().unwrap().as_ptr())
@@ -665,6 +666,21 @@ impl HostedPlugin for Vst3Plugin {
     fn set_param(&mut self, id: u32, value: f32) {
         self.param_changes.set(id, f64::from(value));
     }
+
+    fn set_transport(&mut self, transport: &live_keys_core::Transport) {
+        // VST3 counts in quarter notes.
+        let context = &mut self.context;
+        context.state = kContTimeValid | kTempoValid | kTimeSigValid | kProjectTimeMusicValid | kBarPositionValid;
+        if transport.playing {
+            context.state |= kPlaying;
+        }
+        context.tempo = transport.quarter_tempo();
+        context.timeSigNumerator = transport.beats_per_bar as i32;
+        context.timeSigDenominator = transport.beat_unit as i32;
+        context.projectTimeMusic = transport.quarters(transport.beats);
+        context.barPositionMusic = transport.quarters(transport.bar_start);
+        context.projectTimeSamples = transport.frame;
+    }
 }
 
 /// The MIDI message a plugin's output event stands for, if it's one MIDI has.
@@ -745,6 +761,15 @@ impl Vst3Controller {
     /// callback should forward the change to the audio processor.
     pub fn set_edit_callback(&self, callback: Option<EditCallback>) {
         *self.handler.on_edit.lock().unwrap() = callback;
+    }
+
+    /// Whether the plugin asked for its parameter values to be read again
+    /// (`restartComponent(kParamValuesChanged)`) since the last call. Surge XT
+    /// asks once it has applied a loaded state, which its controller only
+    /// catches up with then; reading the values right after the load gives
+    /// stale ones.
+    pub fn take_values_changed(&self) -> bool {
+        self.handler.values_changed.swap(false, std::sync::atomic::Ordering::Acquire)
     }
 
     /// The controller's current value of parameter `id`, normalized.

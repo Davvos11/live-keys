@@ -299,6 +299,8 @@ impl Learn {
         if self.rack.mappings.unchanged(&installed) {
             return self.rack.mappings.keep_setup();
         }
+        // Plugins that can show which parameters a controller drives are told.
+        self.engine.borrow().set_param_indications(installed.indications());
         let generation = self.engine.borrow_mut().set_mappings(setup);
         self.rack.mappings.install(installed, generation);
         self.surfaces.clear_waiting();

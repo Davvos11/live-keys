@@ -333,7 +333,10 @@ user profiles (see Storage), so a slot preset or a scene doesn't change it. The 
 as the menu lists it.
 
 A plugin without a profile gets a pool of all its parameters, with its first ten continuous
-parameters as the default. So the context menu is also the first version of Part B's
+parameters as the default — unless it suggests some itself: a CLAP plugin's **remote
+controls** (pages of up to 8 parameters it picks for hardware knobs; Surge XT Effects has
+them) lead the pool, and its first page is the default row (an effect's sliders: its first
+two). A profile still wins. So the context menu is also the first version of Part B's
 "Customise panel".
 
 **A control** has

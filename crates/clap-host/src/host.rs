@@ -23,6 +23,9 @@ use clap_sys::ext::params::{
 use clap_sys::ext::posix_fd_support::{
     CLAP_EXT_POSIX_FD_SUPPORT, clap_host_posix_fd_support, clap_posix_fd_flags,
 };
+use clap_sys::ext::remote_controls::{
+    CLAP_EXT_REMOTE_CONTROLS, CLAP_EXT_REMOTE_CONTROLS_COMPAT, clap_host_remote_controls,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state};
 use clap_sys::ext::thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check};
 use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support};
@@ -74,6 +77,8 @@ pub(crate) struct HostShared {
     pub callback_requested: AtomicBool,
     /// The plugin said its parameter values changed (`params.rescan`).
     pub values_changed: AtomicBool,
+    /// The plugin said its remote-control pages changed.
+    pub remote_controls_changed: AtomicBool,
     pub timers: Mutex<Vec<Timer>>,
     next_timer_id: AtomicU32,
     /// Registered fds and the events they're watched for.
@@ -107,6 +112,7 @@ impl HostShared {
             plugin: AtomicPtr::new(std::ptr::null_mut()),
             callback_requested: AtomicBool::new(false),
             values_changed: AtomicBool::new(false),
+            remote_controls_changed: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
             next_timer_id: AtomicU32::new(1),
             fds: Mutex::new(Vec::new()),
@@ -151,6 +157,8 @@ unsafe extern "C" fn get_extension(_host: *const clap_host, id: *const c_char) -
         &AUDIO_PORTS as *const _ as _
     } else if id == CLAP_EXT_LATENCY {
         &LATENCY as *const _ as _
+    } else if id == CLAP_EXT_REMOTE_CONTROLS || id == CLAP_EXT_REMOTE_CONTROLS_COMPAT {
+        &REMOTE_CONTROLS as *const _ as _
     } else {
         std::ptr::null()
     };
@@ -347,3 +355,19 @@ unsafe extern "C" fn audio_ports_rescan(_host: *const clap_host, _flags: u32) {}
 static LATENCY: clap_host_latency = clap_host_latency { changed: Some(latency_changed) };
 
 unsafe extern "C" fn latency_changed(_host: *const clap_host) {}
+
+/// The pages are read again by the controller (see
+/// `ClapController::take_remote_controls_changed`); a suggested page isn't
+/// acted on.
+static REMOTE_CONTROLS: clap_host_remote_controls = clap_host_remote_controls {
+    changed: Some(remote_controls_changed),
+    suggest_page: Some(remote_controls_suggest_page),
+};
+
+unsafe extern "C" fn remote_controls_changed(host: *const clap_host) {
+    if let Some(host) = unsafe { shared(host) } {
+        host.remote_controls_changed.store(true, Ordering::Release);
+    }
+}
+
+unsafe extern "C" fn remote_controls_suggest_page(_host: *const clap_host, _page_id: clap_id) {}

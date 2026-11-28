@@ -1,9 +1,12 @@
 //! The metronome: its settings, and the click it mixes into the output on the
-//! audio thread. It keeps its own tempo; plugins don't see it (they still get a
-//! fixed tempo, see CLAUDE.md).
+//! audio thread. It's also the transport plugins are told about
+//! ([`Click::transport`]): its tempo and time signature always, and its
+//! position while it plays.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use live_keys_core::Transport;
 
 /// Slowest and fastest tempo the metronome takes, in beats per minute.
 pub const MIN_BPM: f32 = 20.0;
@@ -72,6 +75,9 @@ pub struct MetronomeSettings {
     pub bpm: f32,
     /// Beats per bar; the first one is accented.
     pub beats_per_bar: u8,
+    /// The note value of a beat (4 a quarter, 8 an eighth), for plugins that
+    /// count in quarter notes; the click itself counts beats.
+    pub beat_unit: u8,
     pub subdivision: Subdivision,
     /// Linear gain of the click.
     pub level: f32,
@@ -83,6 +89,7 @@ impl Default for MetronomeSettings {
             playing: false,
             bpm: 120.0,
             beats_per_bar: 4,
+            beat_unit: 4,
             subdivision: Subdivision::Quarter,
             level: 0.5,
         }
@@ -115,6 +122,11 @@ pub(crate) struct Click {
     sample_rate: f64,
     /// Beats since the start of the bar.
     position: f64,
+    /// Since it started playing: the bar it's in, where that bar started (in
+    /// beats), and the frames played. For [`Click::transport`].
+    bar: i64,
+    bar_start: f64,
+    frame: i64,
     frequency: f32,
     amplitude: f32,
     phase: f32,
@@ -130,6 +142,9 @@ impl Click {
             settings: MetronomeSettings { playing: false, ..settings },
             sample_rate,
             position: 0.0,
+            bar: 0,
+            bar_start: 0.0,
+            frame: 0,
             frequency: 0.0,
             amplitude: 0.0,
             phase: 0.0,
@@ -143,12 +158,32 @@ impl Click {
     pub fn set(&mut self, mut settings: MetronomeSettings) {
         settings.bpm = settings.bpm.clamp(MIN_BPM, MAX_BPM);
         settings.beats_per_bar = settings.beats_per_bar.max(1);
+        settings.beat_unit = settings.beat_unit.max(1);
         if settings.playing && !self.settings.playing {
             self.position = 0.0;
+            self.bar = 0;
+            self.bar_start = 0.0;
+            self.frame = 0;
             self.trigger(Accent::Bar);
         }
         self.settings = settings;
         self.publish();
+    }
+
+    /// What plugins are told before the next block: the tempo and time
+    /// signature, and where the metronome is if it plays (else where it
+    /// stopped, as not playing).
+    pub fn transport(&self) -> Transport {
+        Transport {
+            tempo: f64::from(self.settings.bpm),
+            playing: self.settings.playing,
+            beats_per_bar: u32::from(self.settings.beats_per_bar),
+            beat_unit: u32::from(self.settings.beat_unit),
+            beats: self.bar_start + self.position,
+            bar_start: self.bar_start,
+            bar: self.bar,
+            frame: self.frame,
+        }
     }
 
     fn trigger(&mut self, accent: Accent) {
@@ -177,8 +212,11 @@ impl Click {
             if self.settings.playing {
                 let previous = self.position;
                 self.position += step;
+                self.frame += 1;
                 let accent = if self.position >= bar {
                     self.position -= bar;
+                    self.bar += 1;
+                    self.bar_start += bar;
                     Some(Accent::Bar)
                 } else if previous.floor() != self.position.floor() {
                     Some(Accent::Beat)
@@ -235,5 +273,30 @@ mod tests {
         let dotted = MetronomeSettings { subdivision: Subdivision::DottedQuarter, beats_per_bar: 3, ..quarters };
         // Beats at 0/512/1024, the dotted click at 1.5 beats, then the next bar.
         assert_eq!(onsets(dotted, 1600), [0, 512, 768, 1024, 1536]);
+    }
+
+    #[test]
+    fn transport_follows_the_clicks() {
+        let settings = MetronomeSettings { beats_per_bar: 3, ..Default::default() };
+        let mut click = Click::new(settings, 1024.0, Arc::default());
+        let mut data = [0.0f32; 512];
+        // Stopped: the tempo, but nothing moves.
+        click.render(&mut data, 1);
+        assert_eq!(click.transport(), Transport { beats_per_bar: 3, ..Transport::default() });
+        // 120 BPM at 1024 Hz: a beat every 512 frames; a bar of 3 beats.
+        click.set(MetronomeSettings { playing: true, ..settings });
+        for _ in 0..4 {
+            click.render(&mut data, 1);
+        }
+        let transport = click.transport();
+        assert!(transport.playing);
+        assert_eq!((transport.beats, transport.bar, transport.bar_start, transport.frame), (4.0, 1, 3.0, 2048));
+        // Stopping keeps the position; starting again starts a bar.
+        click.set(settings);
+        click.render(&mut data, 1);
+        assert_eq!(click.transport().beats, 4.0);
+        assert!(!click.transport().playing);
+        click.set(MetronomeSettings { playing: true, ..settings });
+        assert_eq!((click.transport().beats, click.transport().bar, click.transport().frame), (0.0, 0, 0));
     }
 }

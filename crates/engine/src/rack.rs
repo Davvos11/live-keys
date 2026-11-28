@@ -575,6 +575,14 @@ impl Rack {
         {
             let frames = data_chunk.len() / channels;
             data_chunk.fill(0.0);
+            // Every plugin (the master chain's too) gets the metronome's time
+            // for this sub-block; the click moves on after them.
+            let transport = self.click.transport();
+            for runtime in &mut self.slots {
+                for plugin in runtime.midi_chain.iter_mut().chain(runtime.chain.iter_mut()).flatten() {
+                    plugin.set_transport(&transport);
+                }
+            }
             for (slot, runtime) in self.slots[..SLOT_COUNT].iter_mut().enumerate() {
                 let input: &[MidiEvent] = if chunk_index == 0 { &runtime.midi } else { &[] };
                 let midi = process_midi_chain(

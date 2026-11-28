@@ -667,6 +667,10 @@ pub struct Profiles {
     /// The user's profile folder; `None` if there's no data dir (nothing is
     /// saved then).
     dir: Option<PathBuf>,
+    /// The parameters each plugin suggests for hardware knobs (a CLAP plugin's
+    /// remote controls), as pages of parameter ids, by plugin id
+    /// ([`Profiles::set_suggested`]).
+    suggested: HashMap<String, Vec<Vec<u32>>>,
 }
 
 impl Profiles {
@@ -700,7 +704,19 @@ impl Profiles {
                 Err(err) => log::warn!("couldn't read {}: {err}", dir.join(ROWS_FILE).display()),
             }
         }
-        Self { profiles, rows, dir }
+        Self { profiles, rows, dir, suggested: HashMap::new() }
+    }
+
+    /// Remembers the parameters a plugin suggests for hardware knobs (pages of
+    /// parameter ids, e.g. a CLAP plugin's remote controls), which a plugin
+    /// without a profile gets as its panel's or sliders' default and first in
+    /// its pool. Per plugin id; empty pages forget them.
+    pub fn set_suggested(&mut self, plugin_id: &str, pages: Vec<Vec<u32>>) {
+        if pages.iter().all(Vec::is_empty) {
+            self.suggested.remove(plugin_id);
+        } else {
+            self.suggested.insert(plugin_id.to_string(), pages);
+        }
     }
 
     /// The panel for an instrument with this plugin id and these parameters.
@@ -733,13 +749,8 @@ impl Profiles {
                 (drawbars, pool, profile.row.clone())
             }
             None => {
-                let default_row = params
-                    .iter()
-                    .filter(|p| p.kind == ParamKind::Continuous)
-                    .take(fallback)
-                    .map(|p| format!("param:{}", p.id))
-                    .collect();
-                (Vec::new(), params.iter().map(param_control).collect(), default_row)
+                let (pool, default_row) = generic_pool(params, self.suggested.get(plugin_id), fallback);
+                (Vec::new(), pool, default_row)
             }
         };
         // Parameters the user picked through "More parameters…".
@@ -909,6 +920,41 @@ fn add(row: &mut Vec<String>, control_id: &str, max: usize, replace: usize) -> R
         bail!("the panel is full");
     }
     Ok(())
+}
+
+/// A plugin without a profile: every parameter as its pool and the first
+/// `fallback` continuous ones as its default row — unless it suggests some
+/// (`suggested`: pages of parameter ids), which then come first in the pool, in
+/// page order, and its first page (up to `fallback`) is the default row.
+/// Suggested ids it doesn't have (hidden ones) are skipped.
+fn generic_pool(params: &[ParamInfo], suggested: Option<&Vec<Vec<u32>>>, fallback: usize) -> (Vec<Control>, Vec<String>) {
+    let by_id = |id: &u32| params.iter().find(|param| param.id == *id);
+    let mut order: Vec<&ParamInfo> = Vec::new();
+    for param in suggested.into_iter().flatten().flatten().filter_map(by_id) {
+        if !order.iter().any(|known| known.id == param.id) {
+            order.push(param);
+        }
+    }
+    let first_page: Vec<String> = suggested
+        .and_then(|pages| pages.iter().find(|page| page.iter().any(|id| by_id(id).is_some())))
+        .map(|page| page.iter().filter_map(by_id).take(fallback).map(|param| format!("param:{}", param.id)).collect())
+        .unwrap_or_default();
+    for param in params {
+        if !order.iter().any(|known| known.id == param.id) {
+            order.push(param);
+        }
+    }
+    let default_row = if first_page.is_empty() {
+        params
+            .iter()
+            .filter(|p| p.kind == ParamKind::Continuous)
+            .take(fallback)
+            .map(|p| format!("param:{}", p.id))
+            .collect()
+    } else {
+        first_page
+    };
+    (order.into_iter().map(param_control).collect(), default_row)
 }
 
 /// The generic control for a parameter (a plugin without a profile, or "More
@@ -1101,5 +1147,36 @@ mod tests {
         profiles.add_control(PanelKind::Effect, "p", &params, "param:3", 0).unwrap();
         profiles.add_control(PanelKind::Effect, "p", &params, "param:4", 1).unwrap();
         assert_eq!(row(&profiles.effect_panel("p", &params)), ["c", "param:4", "b", "param:3"]);
+    }
+
+    #[test]
+    fn suggested_params_lead_a_plugin_without_a_profile() {
+        let mut params: Vec<ParamInfo> =
+            (0..6).map(|id| ParamInfo::continuous(id, format!("P{id}"), 0.0, 0.0, 1.0)).collect();
+        params[4].kind = ParamKind::Toggle;
+        let mut profiles = Profiles::load_from(None);
+        let ids = |panel: &Panel, indices: &[usize]| indices.iter().map(|&index| panel.pool[index].id.clone()).collect::<Vec<_>>();
+        let pool = |panel: &Panel| panel.pool.iter().map(|control| control.id.clone()).collect::<Vec<_>>();
+        // A first page whose ids are all hidden is passed over; 9 isn't a
+        // parameter; a page repeating one doesn't list it twice.
+        profiles.set_suggested("x", vec![vec![99], vec![5, 9, 4, 2], vec![2, 3]]);
+        let panel = profiles.effect_panel("x", &params);
+        assert_eq!(ids(&panel, &panel.row), ["param:5", "param:4"]);
+        assert_eq!(pool(&panel), ["param:5", "param:4", "param:2", "param:3", "param:0", "param:1"]);
+        // An instrument's panel takes the whole page.
+        let panel = profiles.panel("x", &params);
+        assert_eq!(ids(&panel, &panel.row), ["param:5", "param:4", "param:2"]);
+        // Forgotten: back to the first continuous ones.
+        profiles.set_suggested("x", Vec::new());
+        let panel = profiles.effect_panel("x", &params);
+        assert_eq!(ids(&panel, &panel.row), ["param:0", "param:1"]);
+        // A profile still wins.
+        insert(
+            &mut profiles.profiles,
+            serde_json::from_str(r#"{ "plugins": ["x"], "row": ["a"], "controls": [{ "id": "a", "target": { "param": "3" } }] }"#)
+                .unwrap(),
+        );
+        profiles.set_suggested("x", vec![vec![5]]);
+        assert_eq!(ids(&profiles.effect_panel("x", &params), &[0]), ["a"]);
     }
 }

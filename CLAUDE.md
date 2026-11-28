@@ -126,9 +126,14 @@ cargo run -p live-keys-vst3-ui --example open_editor --release -- "surge xt" 10
 # Manual CLAP smoke tests (not part of the app)
 cargo run -p live-keys-clap-host --example smoke --release -- [name filter]
   # scan, then per instrument: render a chord offline (peak), parameter count, a state round
-  # trip, its presets (preset discovery: Surge XT's ~3000 take ~2 s) and loading the first
+  # trip, its presets (preset discovery: Surge XT's ~3000 take ~2 s) and loading the first,
+  # its remote-control pages, and a parameter indication set and cleared
 cargo run -p live-keys-clap-ui --example open_gui --release -- "surge xt" 10
   # opens a CLAP plugin's GUI (name substring, exact match preferred) for N seconds
+
+cargo run -p live-keys-lv2-host --example transport --release
+  # x42's step sequencer synced to the host transport, offline: notes in 4 s at 120 BPM,
+  # at 240 BPM and stopped (5, 9, 0) — the plugins follow the metronome's tempo
 
 # Manual preset smoke tests (not part of the app; they create and delete a "Smoke Test" preset)
 cargo run -p live-keys-lv2-host --example presets --release -- <lv2 uri>   # list/apply/save/delete
@@ -278,7 +283,11 @@ behind format-agnostic cores:
     pre-allocated input buffers for the host to fill before `process` (contents persist, so a
     host with nothing to feed must zero them). `midi_output()` (default: empty) is the MIDI
     the last `process` produced — a MIDI effect's output, fed to the next chain stage.
-    `set_param` applies one `ParamChange`.
+    `set_param` applies one `ParamChange`. `set_transport` (default: ignored) is the musical
+    time for the next block, a `Transport` (also `src/plugin.rs`): tempo, playing, time
+    signature, and the position — beats since the transport started, the bar and where it
+    started, frames — in the signature's beat unit (`quarters`/`quarter_tempo` convert for
+    formats that count quarter notes).
   - Format-agnostic metadata, also in `src/plugin.rs`: `PluginFormat` (`Lv2`/`Vst3`/`Clap`/`Builtin`),
     `PluginKind` (`Instrument` = MIDI → audio, `MidiEffect` = MIDI → MIDI, `AudioEffect` =
     audio → audio and anything else), `PluginInfo` (`id`, name, format, kind — `id` is unique
@@ -392,6 +401,14 @@ behind format-agnostic cores:
   itself, but needed by `live-keys-lv2-ui` to open a plugin's own GUI against the *same* running
   instance (see below). Re-exports `livi`/`lv2_raw` so downstream crates don't each need their
   own dependency on them.
+  **Musical time** (`time_position.rs`): atom inputs that `atom:supports time:Position`
+  (found at instantiation; LSP's plugins, Helm, x42's step sequencer and MIDI filter) get a
+  `time:Position` object — frame, speed (0/1), bar, barBeat, beat, beatUnit, beatsPerBar,
+  beatsPerMinute — at frame 0, ahead of the GUI's atoms, whenever `set_transport` brings a
+  new basis (the first block, start/stop, tempo, signature); in between, plugins
+  extrapolate. Encoded by hand into a fixed buffer (unit-tested). `cargo run -p
+  live-keys-lv2-host --example transport --release` checks it on x42's step sequencer
+  (notes counted at two tempos and stopped).
   **Inline displays** (`inline_display.rs`; Ardour's `http://harrisonconsoles.com/lv2/inlinedisplay`,
   see Part C of `docs/design/plugins.md`): every plugin is offered the `queue_draw` feature (via
   the vendored livi's `instantiate_with_features`), whose callback — called from `run()`, on the
@@ -403,6 +420,15 @@ behind format-agnostic cores:
   `render` may run while the plugin processes (that's how Ardour calls it; x42 and LSP
   synchronise themselves), but not after the instance is dropped, nor on two threads at once.
   The flag starts set, so a display is drawn once at load.
+  **The worker** (`worker.rs`; `work:schedule`/`work:interface`, which every LSP plugin, x42's
+  zeroconvo and setBfree declare): livi queues the jobs a plugin schedules from `run` and hands
+  their responses back in its next `run`, but someone has to do them — `Workers`, a thread
+  of the `Lv2Host`'s (`lv2-worker`), calls `WorkerManager::run_workers` every 2 ms (cheap
+  when idle) until the host is dropped (it's joined then). LV2 forbids `work` during a state
+  save or restore, so `restore_preset`/`save_preset`/`save_file`/`restore_file` hold
+  `Workers::pause` meanwhile (every plugin's jobs wait, briefly). Without it, jobs were queued
+  and never done: setBfree schedules one on a state restore, LSP's samplers and impulse
+  reverbs to load files.
 
 - **`crates/vst3-host`** (`live-keys-vst3-host`) — VST3 hosting on the MIT-licensed `vst3`
   bindings crate (COM smart pointers `ComPtr`/`ComWrapper` from `com-scrape-types`; all calls
@@ -512,7 +538,8 @@ behind format-agnostic cores:
     `params` (`rescan` with values flags sets `values_changed`; nothing else), `gui`
     (`request_resize`/`closed` recorded in `GuiRequests` for the editor), `timer-support` and
     `posix-fd-support` (registries the controller's `idle` services), `state`, `note-ports`
-    (dialects CLAP + MIDI), `audio-ports`, `latency` (no-ops). `request_callback` sets a flag
+    (dialects CLAP + MIDI), `audio-ports`, `latency` (no-ops), `remote-controls` (`changed`
+    sets `remote_controls_changed`; a suggested page is ignored). `request_callback` sets a flag
     for `idle`; `request_restart`/`request_process` are ignored.
   - `plugin.rs` — `instantiate` creates, `init`s and `activate`s the plugin (main thread; `1 ..=
     max_block_size` frames) and splits it, like VST3, into halves sharing an `Arc<Instance>`:
@@ -528,10 +555,17 @@ behind format-agnostic cores:
     notes otherwise) as `CLAP_EVENT_MIDI` if it supports MIDI; a plugin without note input
     gets none. Output events: note on/off and MIDI become `midi_output()` (a MIDI effect's), and
     `PARAM_VALUE`s — **the plugin's own GUI's edits, which the plugin has already applied** —
-    go over a ring to the controller. Transport is null (free-running). Parameters
+    go over a ring to the controller. The transport is a `clap_event_transport` built by
+    `set_transport` (`clap_transport`: tempo, beats and seconds timelines in CLAP's fixed
+    point, quarter notes, bar start and number, time signature, playing), `null` until the
+    host sets one. Parameters
     (`read_params`, once at load): hidden/read-only left out; bypass → toggle, stepped + enum
     (≤ 256 values) → choice labelled by `value_to_text`, stepped spanning 1 → toggle, other
-    stepped → stepped; plain min/max/default. `ClapController`: `params`, `value_text` (the
+    stepped → stepped; plain min/max/default. `ClapController`: `params`, `remote_controls`
+    (`remote.rs`: the plugin's `clap.remote-controls` pages — section, name, up to 8 parameter
+    ids — and `take_remote_controls_changed`), `set_indications` (`clap.param-indication`: the
+    parameters a controller drives now, each with a label and description; it sends only what
+    changed since the last call, clearing the ones gone), `value_text` (the
     plugin's, unit included), `param_value` (`get_value` — CLAP plugins can be asked),
     `state`/`set_state` (`clap.state`, allowed while processing — no lending), `has_gui`/`gui`
     (`ClapGui`: the `clap.gui` calls with X11 as the API, holding the instance alive), and
@@ -617,7 +651,11 @@ behind format-agnostic cores:
     subdivision clicks (positions measured from the bar's start, so dotted and triplet
     subdivisions realign every bar). Starting it starts a bar. The beat it's on goes to the GUI
     through an atomic (`Engine::metronome_beat`). Allocation-free; unit-tested (click onsets).
-    Plugins don't see its tempo (see Known simplifications).
+    It's also the plugins' transport: `Click::transport` (its tempo and time signature —
+    `MetronomeSettings.beat_unit` from the GUI's signature — always; the bar, its start and
+    the frames counted while it plays, kept where it stopped, reset when it starts), which
+    `Rack::render` hands every plugin of every chain (master included) through
+    `HostedPlugin::set_transport` before each sub-block. Unit-tested (`transport_follows_the_clicks`).
   - `midi.rs` — **MIDI inputs**: up to `MAX_MIDI_INPUTS` (8) numbered inputs, each fed by a set
     of devices remembered by `midi_device_name` (the port name minus ALSA's trailing
     `client:port` address, which changes when a device is plugged in again). `MidiInputs`
@@ -781,7 +819,12 @@ behind format-agnostic cores:
   controller's `idle` — call it every ~16 ms from the main thread (the GUI's poll timer, the
   CLI's loop, plugin-check's pump) — handing `on_edit` their GUIs' edits (for
   `send_param_change`) and returning the plugins whose values it re-read (a late-settling
-  state), for refreshing what shows them.
+  state, or a VST3 plugin's `restartComponent(kParamValuesChanged)`), for refreshing what
+  shows them. `suggested_params(key)` is a plugin's suggested parameters as pages (a CLAP
+  plugin's remote controls; empty otherwise) and `take_suggestions_changed` the plugins whose
+  pages changed (the GUI's poll timer rebuilds their panels); `set_param_indications(by
+  plugin)` tells every CLAP plugin which of its parameters a controller drives
+  (`ClapController::set_indications`; a plugin left out has none).
   `send_midi(event)` plays MIDI as if from every MIDI input (the MIDI queue's producer is shared
   with the input callback behind a `Mutex`, neither being the audio thread);
   `take_slot_peak(slot)` is the slot's loudest sample since the last call.
@@ -935,7 +978,10 @@ behind format-agnostic cores:
   conversions go through its panel control, `profiles::Control::to_value`/`position`/
   `steps`/`text_at`, or a plain one) into the engine's setup (`build_setup`; not handed over
   if it does what the last did, so takeover state survives; rebuilt when `setup_dirty`, set
-  by `refresh_slot`, panel rebuilds, surface changes and edits), and runs learn mode: the
+  by `refresh_slot`, panel rebuilds, surface changes and edits; `Installed::indications`
+  collects each plugin parameter a shown control drives, labelled with the control — several
+  joined, "K1, F1" — and described with the device, which `Learn::rebuild_setup` hands to
+  `Engine::set_param_indications` with each new setup), and runs learn mode: the
   selected control (clicked in the panel — `learn-select`, which also starts learn mode,
   there being no button for it, and ends it when the control clicked is the one selected —
   or moved while learning), the targets pane's rows (`LearnTargetRow`s; a target just
@@ -1047,7 +1093,11 @@ behind format-agnostic cores:
   (both take a `PanelKind`: an instrument's panel, or an **effect's** — `effect_panel`: no
   drawbars, at most `MAX_EFFECT_CONTROLS` (4), its profile's row or else its first
   `DEFAULT_EFFECT_CONTROLS` (2) continuous parameters; same `rows.json`, by plugin id). A plugin without a profile gets every parameter
-  (`param_control`) as its pool and its first ten continuous ones shown; a default
+  (`param_control`) as its pool and its first ten continuous ones shown — unless it suggests
+  some (`Profiles::set_suggested`, by plugin id: pages of parameter ids, a CLAP plugin's
+  remote controls from `Engine::suggested_params`, given whenever its panel or sliders are
+  built): those lead the pool in page order, and its first page with any of its parameters
+  is the default row, up to the panel's or sliders' default count (`generic_pool`); a default
   whose controls went missing is filled from the pool, up to its own length; a user's choice
   just loses the missing ones. Unit-tested (value mappings, row resolution and adding, the
   shipped files parsing). `config.rs` handles settings persistence (`dirs` +
@@ -1585,8 +1635,10 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   controller only catches up asynchronously, which doesn't happen without its editor open
   (confirmed: the component's state after loading equals the saved one byte for byte, while
   `getParamNormalized` keeps the old value). The sound is right; the parameter window and the
-  recorded values may not be. Surge also calls `restartComponent(kParamValuesChanged)`, which
-  is ignored.
+  recorded values may not be. Surge also calls `restartComponent(kParamValuesChanged)`, on
+  which the values are read again (`idle_plugins`), but its controller is still stale then
+  (the engine's presets example shows it: "after idling"). Where the controller is current
+  (a preset picked in Surge's own open editor) the re-read brings the panel up to date.
 - Settings an LV2 plugin only exchanges with its GUI as atoms (setBfree's drawbars etc.) aren't
   recorded host-side: they don't show in the parameter window or mark presets "changed" —
   though plugin and slot presets do capture them, through the plugin's state.
@@ -1620,25 +1672,29 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   An effect's main audio inputs get the previous chain stage's output; LV2 CV inputs and
   VST3 secondary input buses (sidechains) are still fed silence, since nothing routes to them.
   MIDI effects run in block steps on the audio thread: output events keep their frame offset
-  within the block, but there's no transport (tempo-synced MIDI effects see the fixed 120 BPM,
-  not playing — the metronome's tempo doesn't reach plugins; passing it on, as VST3's
-  `ProcessContext`, CLAP's transport and LV2's `time:Position`, is a possible next step). Only 3-byte channel messages pass between stages (no sysex); a MIDI effect's
+  within the block; their tempo and position are the metronome's (`set_transport`), which
+  runs only while it plays — there's no song position apart from it, no looping. Only 3-byte channel messages pass between stages (no sysex); a MIDI effect's
   audio output, if any, is ignored, and so is any plugin's MIDI output outside the MIDI
   section (an instrument's MIDI out goes nowhere).
 - VST3 hosting, deliberately minimal so far: messages between a separate controller and its
   processor (`IMessage`/`IAttributeList` over `IConnectionPoint`) work, but are made and sent
   on whatever thread the plugin uses — LSP's processor may allocate one on the audio thread,
-  as with any host. `restartComponent` is acknowledged but ignored (no re-setup for latency/IO
+  as with any host. `restartComponent` only does `kParamValuesChanged`/`kReloadComponent`:
+  a flag (`ComponentHandler::values_changed`, any thread) that `Engine::idle_plugins` takes
+  (`Vst3Controller::take_values_changed`) to read every value again and report the plugin,
+  like a CLAP plugin's late state; the rest is ignored (no re-setup for latency/IO
   changes, no parameter-list refresh). Only the main audio buses are activated (others get
   buffers but stay inactive; only output bus 0 is read). The processor's
-  `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
-  fixed 120 BPM 4/4, not playing). Presets are `.vstpreset` files only — factory programs
+  `outputParameterChanges`/output events are discarded. The `ProcessContext` is the
+  metronome's transport (`set_transport`: tempo, time signature, playing, project time and
+  bar position in quarter notes, samples); no system time or SMPTE. Presets are `.vstpreset` files only — factory programs
   exposed through `IUnitInfo` program lists aren't listed yet.
 - CLAP hosting, minimal like VST3's: `request_restart` is ignored (no deactivate/reactivate for
   new latency or ports), `params.rescan` only re-reads values (no new parameters or metadata),
   no `audio-ports-config`/`audio-ports-activation`, `thread-pool`, `note-name`, `voice-info`,
-  `remote-controls`, `context-menu`, `track-info`, `preset-load`'s host callbacks; no
-  transport (null — free-running); no note expressions, polyphonic modulation, note ids,
+  `context-menu`, `track-info`, `preset-load`'s host callbacks (see
+  `docs/design/plugin-extensions.md`); the
+  transport is the metronome's (no loop); no note expressions, polyphonic modulation, note ids,
   parameter cookies, MIDI 2 or sysex; only output port 0 is read. The plugin's `PARAM_VALUE`
   output events are taken as its GUI's edits (recorded and shown), gesture events ignored.
   Preset discovery reads every preset file the first time a plugin's presets are listed (~2 s

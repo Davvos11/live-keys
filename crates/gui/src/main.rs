@@ -799,6 +799,10 @@ impl Rack {
     /// if there's none yet (or `rebuild`: its row changed).
     fn effect_controls(&self, engine: &Engine, meta: &LoadedPluginMeta, rebuild: bool) -> ModelRc<EffectControl> {
         let mut panels = self.effect_panels.borrow_mut();
+        if rebuild || !panels.contains_key(&meta.key) {
+            // Its own suggestions (CLAP remote controls), if it has no profile.
+            self.profiles.borrow_mut().set_suggested(&meta.id, engine.suggested_params(meta.key));
+        }
         let entry = panels.entry(meta.key).or_insert_with(|| EffectPanel {
             plugin_id: meta.id.clone(),
             panel: self.profiles.borrow().effect_panel(&meta.id, &meta.params),
@@ -1123,6 +1127,8 @@ impl Rack {
                 // Panel positions and learn targets go by the panel.
                 self.mappings.setup_dirty.set(true);
                 self.mappings.view_dirty.set(true);
+                // Its own suggestions (CLAP remote controls), if it has no profile.
+                self.profiles.borrow_mut().set_suggested(&meta.id, engine.suggested_params(meta.key));
                 *current = Some(SlotPanel {
                     key: meta.key,
                     plugin_id: meta.id.clone(),
@@ -3033,6 +3039,16 @@ fn main() -> anyhow::Result<()> {
             });
             for key in reread {
                 rack.refresh_param_rows(&engine.borrow(), key);
+            }
+            // A CLAP plugin's remote controls changed: its panels follow (if
+            // it has no profile).
+            let suggestions_changed = engine.borrow().take_suggestions_changed();
+            for key in suggestions_changed {
+                let engine = engine.borrow();
+                if let Some(id) = engine.plugin(key).map(|meta| meta.id.clone()) {
+                    rack.rebuild_panels(&engine, &id);
+                    rack.rebuild_effect_panels(&engine, &id);
+                }
             }
             edits.extend(edit_rx.try_iter());
             for edit in edits {

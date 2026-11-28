@@ -22,6 +22,6 @@ pub use live_keys_core::{ALL_INPUTS, MidiEvent, MidiFilter};
 pub use live_keys_core::{ParamInfo, ParamKind, PluginFormat, PluginInfo, PluginKind, PresetInfo, note_name};
 pub use live_keys_lv2_host::{GuiLease, GuiLeases, InlinePicture, PortEvent, livi, lv2_raw};
 pub use live_keys_vst3_host::{EditCallback, Vst3Controller};
-pub use live_keys_clap_host::ClapController;
+pub use live_keys_clap_host::{ClapController, ParamIndication};
 pub use midi::{MAX_MIDI_INPUTS, SurfaceEvent, find_midi_port, list_midi_ports, midi_device_name};
 pub use paths::default_plugin_search_paths;

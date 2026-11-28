@@ -1,6 +1,8 @@
 mod control_outputs;
 mod inline_display;
 mod preset;
+mod time_position;
+mod worker;
 
 use std::cell::OnceCell;
 use std::mem::ManuallyDrop;
@@ -20,6 +22,7 @@ pub use inline_display::{InlineDisplay, InlinePicture, argb32_to_rgba};
 use inline_display::QueueDraw;
 pub use preset::InstanceRef;
 use preset::{PresetWorld, StateFeatures};
+use worker::Workers;
 
 /// Capacity, in bytes, of the atom sequence buffer used to hand MIDI events to a
 /// plugin each block. Generous enough for a dense chord/arpeggio burst.
@@ -239,6 +242,8 @@ pub struct Lv2Host {
     max_block_size: usize,
     /// Loaded on first use: it parses every bundle a second time.
     presets: OnceCell<PresetWorld>,
+    /// The thread doing the jobs plugins schedule (see `worker.rs`).
+    workers: Workers,
 }
 
 impl Lv2Host {
@@ -255,11 +260,13 @@ impl Lv2Host {
             min_block_length: 1,
             max_block_length: max_block_size,
         });
+        let workers = Workers::start(features.worker_manager().clone());
         Self {
             world,
             features,
             max_block_size,
             presets: OnceCell::new(),
+            workers,
         }
     }
 
@@ -286,6 +293,7 @@ impl Lv2Host {
         plugin_uri: &str,
         preset_uri: &str,
     ) -> anyhow::Result<Vec<(u32, f32)>> {
+        let _paused = self.workers.pause();
         let features = StateFeatures::new(&self.features);
         unsafe { self.preset_world().restore(&features, instance, plugin_uri, preset_uri) }
     }
@@ -304,6 +312,7 @@ impl Lv2Host {
         name: &str,
         value: &dyn Fn(u32) -> f32,
     ) -> anyhow::Result<PresetInfo> {
+        let _paused = self.workers.pause();
         let features = StateFeatures::new(&self.features);
         unsafe {
             self.preset_world()
@@ -324,6 +333,7 @@ impl Lv2Host {
         bundle: &std::path::Path,
         value: &dyn Fn(u32) -> f32,
     ) -> anyhow::Result<std::path::PathBuf> {
+        let _paused = self.workers.pause();
         let features = StateFeatures::new(&self.features);
         unsafe { self.preset_world().save_file(&features, instance, plugin_uri, bundle, value) }
     }
@@ -339,6 +349,7 @@ impl Lv2Host {
         plugin_uri: &str,
         path: &std::path::Path,
     ) -> anyhow::Result<Vec<(u32, f32)>> {
+        let _paused = self.workers.pause();
         let features = StateFeatures::new(&self.features);
         unsafe { self.preset_world().restore_file(&features, instance, plugin_uri, path) }
     }
@@ -402,6 +413,22 @@ impl Lv2Host {
         };
         let atom_sequence_out = atom_buffers(&atom_out_ports);
         let atom_in = atom_buffers(&atom_in_ports);
+        // Atom inputs that take the host's musical time.
+        let time_position_uri = self.world.raw().new_uri("http://lv2plug.in/ns/ext/time#Position");
+        let time_ports: Vec<usize> = atom_in_ports
+            .iter()
+            .enumerate()
+            .filter(|&(_, &port)| {
+                plugin.raw().port_by_index(port as usize).is_some_and(|port| port.supports_event(&time_position_uri))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let time_position = (!time_ports.is_empty()).then(|| {
+            let urids = time_position::Urids::new(|uri| {
+                self.features.urid(&std::ffi::CString::new(uri).expect("a URI has no NUL"))
+            });
+            time_position::TimePosition::new(urids, time_ports)
+        });
         // Only plugins with atom ports can talk to their GUI through them.
         let (ui_channel, ui_ends) = if atom_in_ports.is_empty() && atom_out_ports.is_empty() {
             (None, None)
@@ -430,6 +457,7 @@ impl Lv2Host {
             atom_in,
             atom_in_ports,
             atom_out_ports,
+            time_position,
             ui_channel,
             ui_ends,
             control_channel,
@@ -479,6 +507,8 @@ pub struct Lv2Plugin {
     /// The port indices of `atom_in` and `atom_sequence_out`, in order.
     atom_in_ports: Vec<u32>,
     atom_out_ports: Vec<u32>,
+    /// The host's musical time, for atom inputs that take it.
+    time_position: Option<time_position::TimePosition>,
     /// The control thread's end of the GUI channel, until taken.
     ui_channel: Option<UiChannel>,
     /// The audio thread's end: atoms from the GUI, and atom output for it.
@@ -624,7 +654,21 @@ impl HostedPlugin for Lv2Plugin {
         for sequence in &mut self.atom_in {
             sequence.clear();
         }
-        // The GUI's (and the mapping thread's) atoms first, at frame 0, so each
+        // The musical time first, if it changed.
+        if let Some(time) = &mut self.time_position {
+            let object = time.object_type();
+            let ports = std::mem::take(&mut time.ports);
+            if let Some(body) = time.take()
+                && let Ok(atom) =
+                    livi::event::LV2AtomEventBuilder::<{ time_position::BODY_BYTES }>::new(0, object, body)
+            {
+                for &index in &ports {
+                    let _ = self.atom_in[index].push_event(&atom);
+                }
+            }
+            time.ports = ports;
+        }
+        // The GUI's (and the mapping thread's) atoms next, at frame 0, so each
         // sequence stays in time order.
         let ui_in = self.ui_ends.as_mut().map(|(ui_in, _)| ui_in);
         for queue in ui_in.into_iter().chain(self.control_in.as_mut()) {
@@ -717,6 +761,12 @@ impl HostedPlugin for Lv2Plugin {
     fn set_param(&mut self, id: u32, value: f32) {
         self.instance
             .set_control_input(livi::PortIndex(id as usize), value);
+    }
+
+    fn set_transport(&mut self, transport: &live_keys_core::Transport) {
+        if let Some(time) = &mut self.time_position {
+            time.set(transport);
+        }
     }
 }
 

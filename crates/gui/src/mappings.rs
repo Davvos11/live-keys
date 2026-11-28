@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use live_keys_engine::{
-    ControlSetup, Engine, Light, Link, MASTER_SLOT, MAX_BPM, MAX_EFFECTS, MAX_MIDI_EFFECTS, MIN_BPM, MapperSetup, Mode, Output, PluginKey, SLOT_COUNT,
+    ControlSetup, Engine, Light, Link, MASTER_SLOT, MAX_BPM, MAX_EFFECTS, MAX_MIDI_EFFECTS, MIN_BPM, MapperSetup, Mode, Output, ParamIndication, PluginKey, SLOT_COUNT,
     Section, SurfaceSetup, Takeover, TargetSpec, ToValue,
 };
 use live_keys_surfaces::driver::{self, Colour, Palette};
@@ -870,6 +870,30 @@ pub struct Installed {
     targets: Vec<SetupTarget>,
     mapped: HashSet<(String, usize)>,
     signature: Signature,
+    /// Per plugin, its parameters a control drives and what to call it there
+    /// (for [`Engine::set_param_indications`]).
+    indications: HashMap<PluginKey, BTreeMap<u32, ParamIndication>>,
+}
+
+impl Installed {
+    /// What plugins may show of the controls driving their parameters.
+    pub fn indications(&self) -> &HashMap<PluginKey, BTreeMap<u32, ParamIndication>> {
+        &self.indications
+    }
+}
+
+/// Adds control `label` of `device` to what parameter `param` shows (several
+/// controls on one parameter are listed together: "K1, F1").
+fn indicate(indications: &mut BTreeMap<u32, ParamIndication>, param: u32, label: &str, device: &str) {
+    match indications.get_mut(&param) {
+        Some(indication) => {
+            indication.label = format!("{}, {label}", indication.label);
+            indication.description = format!("{}, {device} {label}", indication.description);
+        }
+        None => {
+            indications.insert(param, ParamIndication { label: label.to_string(), description: format!("{device} {label}") });
+        }
+    }
 }
 
 /// What a setup does: per mapped control (device, control, its settings),
@@ -1089,6 +1113,7 @@ impl MappingsUi {
         let mut controls: Vec<ControlSetup> = Vec::new();
         let mut mapped = HashSet::new();
         let mut signature = Signature::new();
+        let mut indications: HashMap<PluginKey, BTreeMap<u32, ParamIndication>> = HashMap::new();
         let all = self.all(ctx);
         for (surface_index, shown) in surfaces.iter().enumerate() {
             let (device, surface) = (&shown.device, &shown.surface);
@@ -1121,6 +1146,13 @@ impl MappingsUi {
                     let light = self.engine_light(*entry, ctx, concrete);
                     links.push(Link { target, mode: engine_mode, light });
                     signed.push((concrete.clone(), mode.clone(), light));
+                    // The plugin may show it (CLAP's parameter indication).
+                    if let Concrete::Plugin { key, target: PluginTarget::Param { symbol } } = concrete
+                        && let Some(param) =
+                            ctx.engine.plugin(*key).and_then(|meta| meta.params.iter().find(|p| p.symbol == *symbol))
+                    {
+                        indicate(indications.entry(*key).or_default(), param.id, &control.label, device);
+                    }
                 }
                 if links.is_empty() {
                     continue;
@@ -1141,7 +1173,7 @@ impl MappingsUi {
             }
         }
         let setup = MapperSetup { surfaces: surfaces.to_vec(), controls, targets: specs };
-        (setup, Installed { targets, mapped, signature })
+        (setup, Installed { targets, mapped, signature, indications })
     }
 
     /// Whether `installed` does what the current setup does (then there's

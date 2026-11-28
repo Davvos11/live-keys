@@ -9,6 +9,7 @@ mod host;
 mod module;
 mod plugin;
 mod preset;
+mod remote;
 mod state;
 
 use std::cell::RefCell;
@@ -21,6 +22,7 @@ use live_keys_core::{PluginFormat, PluginInfo, PluginKind, PresetInfo};
 pub use clap_sys;
 pub use module::default_search_paths;
 pub use plugin::{ClapController, ClapGui, ClapPlugin, destroy_pending};
+pub use remote::{ParamIndication, RemoteControlsPage};
 pub use state::EXTENSION as STATE_FILE_EXTENSION;
 
 /// Prefix of every CLAP [`PluginInfo::id`], followed by the plugin's CLAP id.
