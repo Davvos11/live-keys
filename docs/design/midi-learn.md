@@ -315,7 +315,8 @@ feedback):
   its targets over like a control without feedback (jump, glide or pick up).
 - **Invert light**: a position p is shown as 1 − p, lit as unlit. On by default for mute
   targets (a slot's or the master's), so a button is lit while its slot plays and dark
-  while muted, and off for everything else.
+  while muted, and off for everything else. A slot's mute stays dark, inverted or not,
+  while the slot has no instrument (nothing to play or mute).
 - **Colours**, for a control whose device's driver gives it colour pairs (the LX88+'s pads:
   16 unlit/lit pairs, see `nektar-impact.md` §9): a pair from the palette, drawn as two
   swatches; default the driver's (orange/green on the LX88+). The driver colours each pad

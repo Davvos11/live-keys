@@ -1072,7 +1072,7 @@ impl MappingsUi {
                     let (low, high) = engine_mode.reach();
                     let reach = &mut targets[target].reach;
                     *reach = (reach.0 + low, reach.1 + high);
-                    let light = self.engine_light(*entry);
+                    let light = self.engine_light(*entry, ctx, concrete);
                     links.push(Link { target, mode: engine_mode, light });
                     signed.push((concrete.clone(), mode.clone(), light));
                 }
@@ -1455,9 +1455,13 @@ impl MappingsUi {
     }
 
     /// `entry`'s light as the mapping thread takes it.
-    fn engine_light(&self, entry: Entry) -> Light {
+    fn engine_light(&self, entry: Entry, ctx: &Ctx, concrete: &Concrete) -> Light {
         let light = self.light_of(entry);
+        // A slot's mute lights only while there's an instrument to mute.
+        let dark = matches!(concrete, Concrete::Mute(slot)
+            if *slot != MASTER_SLOT && ctx.engine.slot(*slot).is_none_or(|chain| chain.instrument.is_none()));
         Light {
+            dark,
             follows: light.light_follows,
             invert: self.inverts_light(entry),
             lit: light.lit_value.unwrap_or(DEFAULT_LIT).clamp(1, 127),

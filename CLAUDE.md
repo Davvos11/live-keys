@@ -641,11 +641,13 @@ behind format-agnostic cores:
     event)`); a page change shows that page's (and page-less) controls' feedback again.
     A control with feedback (`ControlSetup::feedback`: the surface says it can show a
     value) shows its **light's link**, `ControlSetup::light` — the first whose `Link::light`
-    (`Light`: `follows`, `invert`, `lit`, `colour`; the GUI's per-mapping light settings)
+    (`Light`: `follows`, `invert`, `lit`, `colour`; the GUI's per-mapping light settings —
+    and `dark`, set by the GUI for a slot's mute while the slot has no instrument)
     follows; with one it always jumps and is sent that target's state (turned around —
-    1 − p, lit ↔ unlit — when `invert`; a pad or button lit with the `lit` value, carried in
-    `Feedback` to `Surface::feedback`) when it changes from elsewhere (`take_feedback`;
-    `resync_feedback` sends all), its own echo ignored; with none following it's sent
+    1 − p, lit ↔ unlit — when `invert`; never lit when `dark`; a pad or button lit with the
+    `lit` value, carried in `Feedback` to `Surface::feedback`) when it changes from
+    elsewhere (`take_feedback`; `resync_feedback` sends all, and a page change that page's
+    controls, past the output's "same as last sent" check), its own echo ignored; with none following it's sent
     nothing and takes its targets over like a control without feedback.
     `Mappings::mapped` gives a driver each control's colour pair (the light's link's, else
     the first's; `None` unmapped, `Some(None)` the driver's default). The thread sends those through `midir` output

@@ -98,11 +98,14 @@ pub struct Light {
     /// The colour pair its driver gives the control (a code of the driver's
     /// palette; `None`: the driver's default).
     pub colour: Option<u8>,
+    /// Nothing is behind the target (a mute of a slot without an
+    /// instrument): a pad or button stays dark, whatever its value.
+    pub dark: bool,
 }
 
 impl Default for Light {
     fn default() -> Self {
-        Self { follows: true, invert: false, lit: 127, colour: None }
+        Self { follows: true, invert: false, lit: 127, colour: None, dark: false }
     }
 }
 
@@ -306,7 +309,7 @@ impl Mappings {
                 let on_page = device.controls.get(setup.control).is_some_and(|control| control.page.is_none_or(|p| Some(p) == page));
                 if setup.surface == surface && on_page {
                     self.controls[index].shown = None;
-                    self.show(index, false);
+                    self.show_with(index, false, true);
                 }
             }
         }
@@ -446,6 +449,10 @@ impl Mappings {
             Shown::Position(position) => Shown::Position(1.0 - position),
             Shown::Lit(lit) => Shown::Lit(!lit),
         };
+        let shown = match shown {
+            Shown::Lit(_) if link.light.dark => Shown::Lit(false),
+            shown => shown,
+        };
         Some((shown, link.light.lit))
     }
 
@@ -453,6 +460,12 @@ impl Mappings {
     /// move, a position it's at already isn't sent back (motor faders fight
     /// that), only noted.
     fn show(&mut self, index: usize, own: bool) {
+        self.show_with(index, own, false);
+    }
+
+    /// [`Self::show`]; `again`: sent even if it's what the control was sent
+    /// last (a page change, after which the device cleared its lights).
+    fn show_with(&mut self, index: usize, own: bool, again: bool) {
         let Some((shown, lit)) = self.feedback_value(index) else { return };
         let control = &mut self.controls[index];
         if control.shown == Some(shown) {
@@ -465,7 +478,7 @@ impl Mappings {
                 control: control.setup.control,
                 shown,
                 lit,
-                again: false,
+                again,
             });
         }
     }
@@ -950,7 +963,7 @@ mod tests {
         button.feedback = true;
         button.links[0].light.follows = false;
         button.links[0].light.colour = Some(3);
-        let light = Light { follows: true, invert: true, lit: 5, colour: Some(6) };
+        let light = Light { follows: true, invert: true, lit: 5, colour: Some(6), dark: false };
         button.links.push(Link { target: 1, mode: toggle, light });
         // A fader with feedback whose one target doesn't follow: it's sent
         // nothing, and picks its target up like a fader without.
@@ -1029,11 +1042,12 @@ mod tests {
         mappings.take_feedback();
         let mut press = |cc: u8| {
             mappings.event(0, 1, &MidiEvent::from_raw(0, &[0xB0, cc, 127]).unwrap(), Instant::now());
-            mappings.take_feedback().iter().map(|f| f.control).collect::<Vec<_>>()
+            mappings.take_feedback().iter().map(|f| (f.control, f.again)).collect::<Vec<_>>()
         };
-        // On page A already: nothing changes.
+        // On page A already: nothing changes. Otherwise sent again, though
+        // it's what the control was last sent: the device cleared it.
         assert!(press(113).is_empty());
-        assert_eq!(press(114), [1]);
-        assert_eq!(press(113), [0]);
+        assert_eq!(press(114), [(1, true)]);
+        assert_eq!(press(113), [(0, true)]);
     }
 }
