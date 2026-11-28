@@ -53,6 +53,10 @@ pub struct Case {
     /// It has an inline display (Ardour's LV2 extension) that draws something,
     /// and asks to be redrawn (`queue_draw`) after a note or parameter change.
     pub inline_display: bool,
+    /// Its GUI shows control outputs (meters) the host must send it
+    /// (`ui:floatProtocol`): while a note plays through it, the GUI should be
+    /// sent values that change.
+    pub meters: bool,
     /// Time to let the plugin get ready before playing.
     pub warmup: Duration,
 }
@@ -75,6 +79,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::NoGui,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -87,6 +92,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::NoGui,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -100,6 +106,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -112,6 +119,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: true,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -124,6 +132,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::NotByHost,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -136,6 +145,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -149,6 +159,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: true,
         inline_display: true,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -162,6 +173,22 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: false,
         inline_display: true,
+        meters: false,
+        warmup: NO_WAIT,
+    },
+    Case {
+        name: "lv2-lsp-effect",
+        plugin: "http://lsp-plug.in/plugins/lv2/compressor_stereo",
+        quirks: "LSP audio effect whose GUI meters are control output ports: the host has to \
+                 send their values (ui:floatProtocol), or the meters stay empty while its \
+                 graph (atoms) still moves",
+        role: Role::AudioEffect,
+        sound: true,
+        param: param("Output gain", Target::Min, Some(20.0)),
+        resize: Resize::Follows,
+        atoms: false,
+        inline_display: true,
+        meters: true,
         warmup: NO_WAIT,
     },
     Case {
@@ -175,6 +202,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::NoGui,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -188,6 +216,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -202,6 +231,22 @@ pub const CASES: &[Case] = &[
         resize: Resize::Fixed,
         atoms: false,
         inline_display: false,
+        meters: false,
+        warmup: NO_WAIT,
+    },
+    Case {
+        name: "vst3-lsp-effect",
+        plugin: "vst3:647370206B31732020202020756E7363",
+        quirks: "LSP: a controller apart from its processor, talking over IConnectionPoint \
+                 with host-made IMessages (its GUI asks for meters and graphs that way; \
+                 without them it shows nothing of the audio)",
+        role: Role::AudioEffect,
+        sound: true,
+        param: param("Output gain", Target::Min, Some(20.0)),
+        resize: Resize::Follows,
+        atoms: false,
+        inline_display: false,
+        meters: true,
         warmup: NO_WAIT,
     },
     Case {
@@ -214,6 +259,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Fixed,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: Duration::from_secs(10),
     },
     Case {
@@ -226,6 +272,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::NoGui,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -239,6 +286,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Follows,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -251,6 +299,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Fixed,
         atoms: false,
         inline_display: false,
+        meters: false,
         warmup: NO_WAIT,
     },
     Case {
@@ -264,6 +313,7 @@ pub const CASES: &[Case] = &[
         resize: Resize::Fixed,
         atoms: false,
         inline_display: false,
+        meters: true,
         warmup: NO_WAIT,
     },
 ];

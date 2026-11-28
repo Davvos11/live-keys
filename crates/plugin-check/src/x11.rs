@@ -35,6 +35,17 @@ impl Display {
 
     /// How many distinct colours a sample of `window`'s pixels has (capped at
     /// 64): 1 or 2 means nothing was drawn (a blank white window).
+    /// The window's pixels (32 bits each), to compare two moments.
+    pub fn pixels(&self, window: u32) -> Result<Vec<u8>> {
+        let (width, height) = self.size(window)?;
+        let image = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, width as u16, height as u16, !0)?
+            .reply()
+            .context("couldn't read the window's pixels (is it mapped and on screen?)")?;
+        Ok(image.data)
+    }
+
     pub fn colours(&self, window: u32) -> Result<usize> {
         let (width, height) = self.size(window)?;
         let image = self

@@ -413,6 +413,9 @@ enum Edit {
 struct Traffic {
     to_dsp: usize,
     to_gui: usize,
+    /// Control output values (meters) sent to the GUI, and their ports.
+    outputs: usize,
+    output_ports: std::collections::BTreeSet<u32>,
 }
 
 fn open_editor(engine: &Engine, key: PluginKey, tx: mpsc::Sender<Edit>) -> Result<(Editor, &'static str)> {
@@ -440,6 +443,9 @@ fn open_editor(engine: &Engine, key: PluginKey, tx: mpsc::Sender<Edit>) -> Resul
             for param in &meta.params {
                 let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
                 handle.notify(PortMessage::Control { port: param.id, value });
+            }
+            for (port, value) in engine.control_outputs(key) {
+                handle.notify(PortMessage::Control { port, value });
             }
             Ok((Editor::Lv2(handle), kind))
         }
@@ -495,10 +501,23 @@ fn pump(engine: &mut Engine, key: PluginKey, editor: &mut Editor, rx: &mpsc::Rec
                 handle.notify(PortMessage::Atom { port, atom: event.to_atom() });
             }
         });
+        engine.drain_control_outputs(|from, port, value| {
+            if from == key
+                && let Editor::Lv2(handle) = editor
+            {
+                traffic.outputs += 1;
+                traffic.output_ports.insert(port);
+                handle.notify(PortMessage::Control { port, value });
+            }
+        });
         engine.collect_retired();
         std::thread::sleep(Duration::from_millis(16));
     }
 }
+
+/// How many of a GUI's pixels a note playing through it should change (its
+/// meters and graphs), compared with silence.
+const METERS_MIN_PIXELS: usize = 500;
 
 fn check_gui(engine: &mut Engine, key: PluginKey, case: &Case) {
     let (tx, rx) = mpsc::channel();
@@ -577,6 +596,42 @@ fn check_gui(engine: &mut Engine, key: PluginKey, case: &Case) {
             Ok(skip) => report("resize", "FAIL", skip.0),
             Err(err) => report("resize", "FAIL", format!("{err:#}")),
         },
+    }
+
+    // Meters: while a note plays through the plugin, its GUI should show it.
+    // An LV2 GUI is sent its control outputs (values that change); every GUI's
+    // window should change from what it showed in silence.
+    if case.meters {
+        let midi = |bytes: [u8; 3]| MidiEvent::from_raw(0, &bytes).unwrap();
+        let window = editor.window();
+        let silent = window.and_then(|window| x.as_ref().ok()?.pixels(window).ok());
+        traffic.outputs = 0;
+        traffic.output_ports.clear();
+        let _ = engine.send_midi(midi([0x90, 60, 100]));
+        pump(engine, key, &mut editor, &rx, &mut traffic, Duration::from_millis(800));
+        let playing = window.and_then(|window| x.as_ref().ok()?.pixels(window).ok());
+        let _ = engine.send_midi(midi([0x80, 60, 0]));
+        pump(engine, key, &mut editor, &rx, &mut traffic, Duration::from_millis(300));
+        let mut detail = Vec::new();
+        let mut ok = true;
+        if matches!(editor, Editor::Lv2(_)) {
+            detail.push(format!(
+                "{} control output values sent on {} ports",
+                traffic.outputs,
+                traffic.output_ports.len()
+            ));
+            // More than one port moving: the level meters, not one stray value.
+            ok &= traffic.output_ports.len() > 1;
+        }
+        match (silent, playing) {
+            (Some(silent), Some(playing)) if silent.len() == playing.len() => {
+                let changed = silent.chunks_exact(4).zip(playing.chunks_exact(4)).filter(|(a, b)| a != b).count();
+                detail.push(format!("{changed} pixels changed from silence"));
+                ok &= changed >= METERS_MIN_PIXELS;
+            }
+            _ => detail.push("the window couldn't be compared".into()),
+        }
+        report("meters", if ok { "PASS" } else { "FAIL" }, detail.join(", "));
     }
 
     let counts = format!("{} messages GUI → plugin, {} plugin → GUI", traffic.to_dsp, traffic.to_gui);

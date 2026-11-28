@@ -2055,6 +2055,10 @@ fn main() -> anyhow::Result<()> {
                         let value = engine.param_value(key, param.id).unwrap_or(param.default_value);
                         handle.notify(PortMessage::Control { port: param.id, value });
                     }
+                    // And its control outputs (meters); changes follow from the poll timer.
+                    for (port, value) in engine.control_outputs(key) {
+                        handle.notify(PortMessage::Control { port, value });
+                    }
                     OpenEditor::Lv2(handle)
                 }),
                 PluginEditor::Vst3(controller) => {
@@ -2822,6 +2826,12 @@ fn main() -> anyhow::Result<()> {
                 engine.borrow_mut().drain_ui_events(|key, port, event| {
                     if let Some(OpenEditor::Lv2(handle)) = open_uis.get(&key) {
                         handle.notify(PortMessage::Atom { port, atom: event.to_atom() });
+                    }
+                });
+                // Their control outputs (meters…) too: LV2 GUIs learn them only from us.
+                engine.borrow_mut().drain_control_outputs(|key, port, value| {
+                    if let Some(OpenEditor::Lv2(handle)) = open_uis.get(&key) {
+                        handle.notify(PortMessage::Control { port, value });
                     }
                 });
             }

@@ -5,7 +5,7 @@ use live_keys_core::{
     PluginInfo, PluginKind, PresetInfo, Producer, PushError, ring_buffer,
 };
 use live_keys_lv2_host::{
-    GuiLeases, InlineDisplay, InlinePicture, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw,
+    ControlOutputWatcher, GuiLeases, InlineDisplay, InlinePicture, InstanceRef, Lv2Host, Lv2Scan, PortEvent, UiChannel, livi, lv2_raw,
 };
 use live_keys_vst3_host::{Vst3Controller, Vst3Host, Vst3Scan};
 use live_keys_builtin::BuiltinHost;
@@ -96,6 +96,9 @@ pub enum PluginEditor {
         /// Ardour's inline display, if the plugin has one (see
         /// [`Engine::render_inline_display`]).
         inline_display: Option<InlineDisplay>,
+        /// Its control outputs (meters…) for its GUI, if it has any (see
+        /// [`Engine::drain_control_outputs`]).
+        control_outputs: Option<ControlOutputWatcher>,
     },
     /// The plugin's main-thread half. Its editor is created from it.
     Vst3(Vst3Controller),
@@ -940,6 +943,30 @@ impl Engine {
         }
     }
 
+    /// Hands every control output (meter, gain reduction…) of an LV2 plugin
+    /// that changed since the last call to `forward` (the plugin's key, the
+    /// port and its value), for its open GUI: LV2 GUIs learn them only from the
+    /// host (`ui:floatProtocol`). Call it at the GUI's pace (~60 Hz): that's
+    /// the rate meters move at.
+    pub fn drain_control_outputs(&mut self, mut forward: impl FnMut(PluginKey, u32, f32)) {
+        for chain in &mut self.slots {
+            for meta in chain.plugins_mut() {
+                if let PluginEditor::Lv2 { control_outputs: Some(watcher), .. } = &mut meta.editor {
+                    watcher.changed(|port, value| forward(meta.key, port, value));
+                }
+            }
+        }
+    }
+
+    /// Every control output of the LV2 plugin with `key` (port and value), for
+    /// a GUI just opened; empty for a plugin without any.
+    pub fn control_outputs(&self, key: PluginKey) -> Vec<(u32, f32)> {
+        match self.plugin(key).map(|meta| &meta.editor) {
+            Some(PluginEditor::Lv2 { control_outputs: Some(watcher), .. }) => watcher.current().collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Sets setBfree control `function` ("upper.drawbar16", "percussion.enable")
     /// of the plugin with `key` to `value` (0..=127), by its control message, and
     /// records it. Returns the messages as the plugin would report them on its
@@ -1314,6 +1341,9 @@ impl Engine {
                     ui_channel,
                     gui_leases: plugin.gui_leases(),
                     inline_display: plugin.inline_display(),
+                    control_outputs: Some(plugin.control_outputs())
+                        .filter(|outputs| !outputs.is_empty())
+                        .map(|outputs| outputs.watch()),
                 },
                 values: HashMap::new(),
                 setbfree,

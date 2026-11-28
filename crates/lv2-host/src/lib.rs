@@ -1,3 +1,4 @@
+mod control_outputs;
 mod inline_display;
 mod preset;
 
@@ -14,6 +15,7 @@ use livi::event::LV2AtomSequence;
 
 pub use livi;
 pub use lv2_raw;
+pub use control_outputs::{ControlOutputWatcher, ControlOutputs};
 pub use inline_display::{InlineDisplay, InlinePicture, argb32_to_rgba};
 use inline_display::QueueDraw;
 pub use preset::InstanceRef;
@@ -414,7 +416,11 @@ impl Lv2Host {
             let (producer, consumer) = rtrb::RingBuffer::new(PORT_EVENT_CAPACITY);
             (Some(producer), Some(consumer))
         };
+        let control_outputs = ControlOutputs::new(
+            instance.iter_control_outputs().map(|port| (port.port_index.0 as u32, port.value)),
+        );
         let mut lv2 = Lv2Plugin {
+            control_outputs,
             params,
             name,
             plugin,
@@ -450,6 +456,8 @@ impl Lv2Host {
 
 /// A running instance of an LV2 instrument plugin.
 pub struct Lv2Plugin {
+    /// Its control output ports' values after each block, for its GUI.
+    control_outputs: ControlOutputs,
     params: Vec<ParamInfo>,
     name: String,
     plugin: livi::Plugin,
@@ -557,6 +565,13 @@ impl Lv2Plugin {
         self.control_channel.take()
     }
 
+    /// The plugin's control output ports (meters and the like), as the audio
+    /// thread last stored them, for its GUI: LV2 GUIs learn them only from the
+    /// host. Empty if it has none.
+    pub fn control_outputs(&self) -> ControlOutputs {
+        self.control_outputs.clone()
+    }
+
     /// Where the plugin's GUIs get their [`GuiLease`]s.
     pub fn gui_leases(&self) -> GuiLeases {
         GuiLeases(Arc::downgrade(&self.gui_leases))
@@ -658,6 +673,8 @@ impl HostedPlugin for Lv2Plugin {
         if let Err(err) = unsafe { self.instance.run(frames, ports) } {
             log::error!("LV2 plugin '{}' failed to run: {err:?}", self.name);
         }
+        let instance = &self.instance;
+        self.control_outputs.store(|port| instance.control_output(livi::PortIndex(port as usize)));
 
         self.midi_out.clear();
         for (index, sequence) in self.atom_sequence_out.iter().enumerate() {

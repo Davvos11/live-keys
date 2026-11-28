@@ -341,7 +341,11 @@ behind format-agnostic cores:
   setBfree has no control ports at all: settings go GUI → `control` input, and its state and
   lit keys come back on `notify` (`ui:portNotification`). Atom buffers are
   `MIDI_EVENT_BUFFER_BYTES`, or a port's `rsz:minimumSize` if larger (x42-eq wants 4320). CV
-  outputs go to a discarded scratch buffer. `plugin_kind` classifies at scan time: an instrument by class (or audio out + MIDI in
+  outputs go to a discarded scratch buffer. **Control outputs** (meters, gain reduction,
+  latency — LSP's meters are these) are stored after every `run` into a `ControlOutputs`
+  (`control_outputs.rs`: one atomic per port, `Lv2Plugin::control_outputs()`), which the
+  control thread reads through a `ControlOutputWatcher` (`changed`: the ones that moved since
+  it last looked; unit-tested) — LV2 GUIs learn them only from the host. `plugin_kind` classifies at scan time: an instrument by class (or audio out + MIDI in
   and no audio in), a MIDI effect by having atom outputs (or the "MIDI Plugin" class) and no
   audio ports at all, an audio effect otherwise (onset triggers — audio in, MIDI out — included,
   since a MIDI chain has no audio to give them). `Lv2Plugin::process` pushes
@@ -419,7 +423,11 @@ behind format-agnostic cores:
     rescan would otherwise do exactly that. Scanning has to load every module (VST3 has no
     metadata-only discovery), so a plugin that crashes on load crashes the scan.
   - `com.rs` — host-side COM objects implemented in Rust: `HostApplication` (the `initialize`
-    context), `ComponentHandler` (receives `performEdit` from the plugin's editor and forwards
+    context; its `createInstance` makes `HostMessage`s — `IMessage`, an id and an
+    `AttributeList` — and `AttributeList`s — `IAttributeList`: ints, floats, UTF-16 strings,
+    binary, behind a mutex —, which a separate controller and its processor send each other over
+    `IConnectionPoint`: LSP's editor gets its meters and graphs that way; unit-tested),
+    `ComponentHandler` (receives `performEdit` from the plugin's editor and forwards
     it to a settable `EditCallback`), and the per-block `EventList`/`ParameterChanges`/
     `ParamValueQueue` — fixed-capacity, pre-allocated, never reallocating, using
     `UnsafeCell`/`Cell` with `unsafe impl Send/Sync` justified by only ever being touched by the
@@ -782,7 +790,11 @@ behind format-agnostic cores:
   plugin is only dropped after its meta is gone, and lending is on the main thread too).
   `send_ui_atom(key, port, atom)` passes an atom from an LV2 plugin's GUI to the plugin, and
   `drain_ui_events` hands over everything LV2 plugins wrote to their atom outputs (keyed by
-  plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`).
+  plugin), emptying their channels (`PluginEditor::Lv2 { ui_channel }`);
+  `drain_control_outputs` hands over their control outputs that changed since the last call
+  (`PluginEditor::Lv2 { control_outputs }`, a `ControlOutputWatcher`; called at the GUI's pace,
+  ~60 Hz, which is the rate meters move at), and `control_outputs(key)` all of one plugin's,
+  for a GUI just opened.
   **setBfree** (`setbfree.rs`; `SETBFREE_URI`) has no control ports: every setting is an
   `sb3:controlmsg` atom object (`sb3:controlkey` string, e.g. `upper.drawbar16`; `sb3:controlval`
   int 0..=127) on its `control` input and `notify` output (see "setBfree's protocol" in
@@ -1287,7 +1299,9 @@ behind format-agnostic cores:
   `Rack::show_param_value` updates an open window's row, so a window shows current values, not
   defaults. An open LV2 GUI is told host-side changes (`Rack::notify_ui`; every value on opening
   and after a preset load, in `refresh_param_rows`), and the poll timer forwards
-  `Engine::drain_ui_events` to open LV2 GUIs (dropping events of plugins without one).
+  `Engine::drain_ui_events` to open LV2 GUIs (dropping events of plugins without one), and
+  `Engine::drain_control_outputs` as `PortMessage::Control` (meters; a GUI opening is sent
+  `Engine::control_outputs` first).
   Meant as the base for
   future macro knobs/MIDI-bound parameters. Each slot also has channel (`Select`, index 0 =
   omni), note-range and velocity-range (each one two-handle `RangeSlider` — a custom component
@@ -1369,7 +1383,10 @@ behind format-agnostic cores:
   is the table of plugin classes and their quirks (`Case`: plugin id, role — instrument, or an
   effect around `mda EPiano` — whether a note should sound, a `ParamCheck` by exact name with an
   optional dB drop it must cause, what resizing should do — `Resize::Follows`/`Fixed`/
-  `NotByHost`/`NoGui` — whether atoms should cross both ways, a warm-up). `main.rs` runs each
+  `NotByHost`/`NoGui` — whether atoms should cross both ways, whether its GUI shows meters, a
+  warm-up). A meters case holds a note with the GUI open: an LV2 GUI must be sent control
+  output values on more than one port, and every GUI's window must change from silence
+  (`METERS_MIN_PIXELS`; LSP's LV2, VST3 and CLAP compressors). `main.rs` runs each
   case as `plugin-check --case <name>` in a child (the child prints `STEP\t<step>\t<PASS|FAIL|
   SKIP>\t<detail>` lines; a crash, hang — `CASE_TIMEOUT` — or nonzero exit fails the case, and
   the child's stderr is shown). Sound is measured with `Engine::take_slot_peak`, GUI windows
@@ -1565,10 +1582,10 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
   `ProcessContext`, CLAP's transport and LV2's `time:Position`, is a possible next step). Only 3-byte channel messages pass between stages (no sysex); a MIDI effect's
   audio output, if any, is ignored, and so is any plugin's MIDI output outside the MIDI
   section (an instrument's MIDI out goes nowhere).
-- VST3 hosting, deliberately minimal so far: no `IMessage`/`IAttributeList` (`createInstance`
-  returns `kNotImplemented`) — plugins whose separate controller talks to its processor through
-  `IConnectionPoint` messages won't get those messages; every plugin tested is JUCE-based and
-  works without them. `restartComponent` is acknowledged but ignored (no re-setup for latency/IO
+- VST3 hosting, deliberately minimal so far: messages between a separate controller and its
+  processor (`IMessage`/`IAttributeList` over `IConnectionPoint`) work, but are made and sent
+  on whatever thread the plugin uses — LSP's processor may allocate one on the audio thread,
+  as with any host. `restartComponent` is acknowledged but ignored (no re-setup for latency/IO
   changes, no parameter-list refresh). Only the main audio buses are activated (others get
   buffers but stay inactive; only output bus 0 is read). The processor's
   `outputParameterChanges`/output events are discarded. No transport (the `ProcessContext` is a
@@ -1593,7 +1610,9 @@ When touching the audio callback path (`Engine::start`'s closure, everything in
 - LV2 UI hosting: Gtk/Qt-wrapped UIs may work via suil's adapter modules but aren't the
   validated/primary target (bare X11UI and External UI are); only `ui:floatProtocol` and
   `atom:eventTransfer` are handled (not `ui:peakProtocol` and the like), every atom output
-  goes to the GUI whether it asked for that port or not, and no `ui:portSubscribe`. An External
+  and control output goes to the GUI whether it asked for that port or not, and no
+  `ui:portSubscribe`. Control outputs go at the GUI's pace (~60 Hz), each the latest block's
+  value: a peak between two ticks is missed unless the plugin holds it itself. An External
   UI can't be resized by the host (it owns its window).
 - `PluginUiHandle` never joins its hosting thread (see its doc comment in
   `crates/lv2-ui-host/src/lib.rs`) — closing/reopening a plugin's GUI must never block the
