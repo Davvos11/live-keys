@@ -1,0 +1,105 @@
+Package: live-keys
+Architecture: amd64
+Version: 0.5.1
+Priority: optional
+Section: sound
+Maintainer: David Vos <vosdavid2@gmail.com>
+Installed-Size: 45584
+Depends: ca-certificates, libasound2t64 (>= 1.1.0), libc6 (>= 2.34), libc6 (>= 2.39), libfontconfig1 (>= 2.12.6), liblilv-0-0 (>= 0.22.0~dfsg0), libserd-0-0 (>= 0.30.2), libsuil-0-0 (>= 0.10.0~dfsg0)
+Filename: pool/main/live-keys_0.5.1_amd64.deb
+Size: 13358624
+MD5sum: d25c745900855b4f430f8711760b2b4c
+SHA1: 543bd1ff23c0235b3662d9568d61db6d95e84f1d
+SHA256: 2798e908159ca20d3651402a47e29ff6c480a8669dfde58c0aea3941e3dd2342
+SHA512: 29427e713dd9cb80c61dfa517a9e4992cc818dc864922fb757f9029bd59672ff8d5274cd6c5ec4b7ffe3444a36d7ec86c1b981b190cf85a6b49d5c95464d060e
+Description: Plugin host (LV2, VST3 and CLAP) for playing a MIDI keyboard live
+ An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP
+ instruments and effects in a few parallel slots, each with its own keyboard
+ zone, presets and scenes, and a sampled grand piano of its own (its samples are
+ downloaded from within the app). Contains the app (live-keys-gui) and a
+ headless command-line host (live-keys).
+
+Package: live-keys
+Architecture: amd64
+Version: 0.5.2
+Priority: optional
+Section: sound
+Maintainer: David Vos <vosdavid2@gmail.com>
+Installed-Size: 45717
+Depends: ca-certificates, libasound2t64 (>= 1.1.0), libc6 (>= 2.34), libc6 (>= 2.39), libfontconfig1 (>= 2.12.6), liblilv-0-0 (>= 0.22.0~dfsg0), libserd-0-0 (>= 0.30.2), libsuil-0-0 (>= 0.10.0~dfsg0)
+Filename: pool/main/live-keys_0.5.2_amd64.deb
+Size: 13375932
+MD5sum: 5b92d455d8134593266e65608a834507
+SHA1: f7fa919beb6bc1ca2ad68eaa3599fd3ed62de49f
+SHA256: 002818d839aa0d5d158f14941e03ba4025ebb1a5e541d55dcdf6e724d193fdf6
+SHA512: 00d80c9e5a7890bb5636a570ea8c0f69254dbbd7d328c7791fc2b2fc42839ece4d82c477cadae47d484f085912958f098964f25f8f6895cdb779b6d0800dc6ee
+Description: Plugin host (LV2, VST3 and CLAP) for playing a MIDI keyboard live
+ An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP
+ instruments and effects in a few parallel slots, each with its own keyboard
+ zone, presets and scenes, and a sampled grand piano of its own (its samples are
+ downloaded from within the app). Contains the app (live-keys-gui) and a
+ headless command-line host (live-keys).
+
+Package: live-keys
+Architecture: amd64
+Version: 0.5.3
+Priority: optional
+Section: sound
+Maintainer: David Vos <vosdavid2@gmail.com>
+Installed-Size: 45909
+Depends: ca-certificates, libasound2t64 (>= 1.1.0), libc6 (>= 2.34), libc6 (>= 2.39), libfontconfig1 (>= 2.12.6), liblilv-0-0 (>= 0.22.0~dfsg0), libserd-0-0 (>= 0.30.2), libsuil-0-0 (>= 0.10.0~dfsg0)
+Filename: pool/main/live-keys_0.5.3_amd64.deb
+Size: 13449488
+MD5sum: bedab1283e9a402a1c694cbdb373f0e6
+SHA1: bd1055ea1eb52173853d85980ea0b8e606f0a3f3
+SHA256: d780f1ebbac4190b10865f1062ebf984ed35345a5a9c71f998f16212658cd858
+SHA512: 11624be24ec5eb67da091a20a181b79898d268ab1e05f5c40574ab4aeed8948ad8d1b3e3b120947bc829b89cc48a72c85a47954dbf55239b0ad74c8a8ce09630
+Description: Plugin host (LV2, VST3 and CLAP) for playing a MIDI keyboard live
+ An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP
+ instruments and effects in a few parallel slots, each with its own keyboard
+ zone, presets and scenes, and a sampled grand piano of its own (its samples are
+ downloaded from within the app). Contains the app (live-keys-gui) and a
+ headless command-line host (live-keys).
+
+Package: live-keys
+Architecture: amd64
+Version: 0.5.4
+Priority: optional
+Section: sound
+Maintainer: David Vos <vosdavid2@gmail.com>
+Installed-Size: 45916
+Depends: ca-certificates, libasound2t64 (>= 1.1.0), libc6 (>= 2.34), libc6 (>= 2.39), libfontconfig1 (>= 2.12.6), liblilv-0-0 (>= 0.22.0~dfsg0), libserd-0-0 (>= 0.30.2), libsuil-0-0 (>= 0.10.0~dfsg0)
+Filename: pool/main/live-keys_0.5.4_amd64.deb
+Size: 13455576
+MD5sum: 79ae3cb9d3bac75e768473a6d20f8f79
+SHA1: a56a3bd23aeb6fa59d1102f656b36a39cecc4621
+SHA256: 4f44731a3fe04fc066880f3e8fd3610d35a75b904dd8a72c761e1cf54c5dd4fc
+SHA512: 546da296d566d4e1e2306a86b4f2e12c689052eba306709c66aa020cc940e571c05d9ce64f2a03765329f032769932f0097f32dbe1d27454c49dcc9d3323b7f8
+Description: Plugin host (LV2, VST3 and CLAP) for playing a MIDI keyboard live
+ An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP
+ instruments and effects in a few parallel slots, each with its own keyboard
+ zone, presets and scenes, and a sampled grand piano of its own (its samples are
+ downloaded from within the app). Contains the app (live-keys-gui) and a
+ headless command-line host (live-keys).
+
+Package: live-keys
+Architecture: amd64
+Version: 0.6.0
+Priority: optional
+Section: sound
+Maintainer: David Vos <vosdavid2@gmail.com>
+Installed-Size: 46604
+Depends: ca-certificates, libasound2t64 (>= 1.1.0), libc6 (>= 2.34), libc6 (>= 2.39), libfontconfig1 (>= 2.12.6), liblilv-0-0 (>= 0.22.0~dfsg0), libserd-0-0 (>= 0.30.2), libsuil-0-0 (>= 0.10.0~dfsg0)
+Filename: pool/main/live-keys_0.6.0_amd64.deb
+Size: 13576340
+MD5sum: fbc97b1f7fcf1b58718e3bb17fe5185b
+SHA1: 7544644d44c75e4fb36ed7b3abcfa870c53324dc
+SHA256: f883ea2ce7cf816e980cff33b11617d11524d5e94fd1e26980cf8810e63dafd4
+SHA512: d92e18ecbbc830d3f79853dbe930e4a3f59806c6971d3d65da044b01a1792628ef9945536ba002848fe4da3b8e769fd3ee84314232e71eec506783cb9fedcbc7
+Description: Plugin host (LV2, VST3 and CLAP) for playing a MIDI keyboard live
+ An instrument rack for playing live from a MIDI keyboard: LV2, VST3 and CLAP
+ instruments and effects in a few parallel slots, each with its own keyboard
+ zone, presets and scenes, and a sampled grand piano of its own (its samples are
+ downloaded from within the app). Contains the app (live-keys-gui) and a
+ headless command-line host (live-keys).
+
