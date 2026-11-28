@@ -49,6 +49,9 @@ struct HostWindow {
     /// Last size we set or were told about, to tell real resizes apart from moves
     /// and from the echo of our own resizes.
     size: Cell<(u32, u32)>,
+    /// The window manager is told the size can't change (the view can't
+    /// resize): a resize of ours has to move that size along.
+    pinned: Cell<bool>,
 }
 
 impl HostWindow {
@@ -91,26 +94,34 @@ impl HostWindow {
             wm_protocols,
             wm_delete_window,
             size: Cell::new((width, height)),
+            pinned: Cell::new(false),
         };
-        if !resizable {
-            window.pin_size(width, height)?;
-        }
+        window.set_resizable(resizable)?;
         window.conn.map_window(id)?;
         window.conn.flush()?;
         Ok(window)
     }
 
-    /// Stops the window manager from offering resizes the plugin can't follow.
-    fn pin_size(&self, width: u32, height: u32) -> Result<()> {
+    /// Whether the window manager may offer resizes: not ones the plugin
+    /// can't follow (min = max = the current size).
+    fn set_resizable(&self, resizable: bool) -> Result<()> {
+        self.pinned.set(!resizable);
         let mut hints = WmSizeHints::new();
-        hints.min_size = Some((width as i32, height as i32));
-        hints.max_size = Some((width as i32, height as i32));
+        if !resizable {
+            let (width, height) = self.size.get();
+            hints.min_size = Some((width as i32, height as i32));
+            hints.max_size = Some((width as i32, height as i32));
+        }
         hints.set_normal_hints(&self.conn, self.id)?;
         Ok(())
     }
 
     fn resize(&self, width: u32, height: u32) -> Result<()> {
         self.size.set((width, height));
+        if self.pinned.get() {
+            // Or the window manager keeps it at the old size.
+            self.set_resizable(false)?;
+        }
         self.conn.configure_window(
             self.id,
             &ConfigureWindowAux::new().width(width).height(height),
@@ -320,16 +331,18 @@ impl Vst3Editor {
             }
         }
 
-        // Some editors only settle on their size once attached.
+        // Some editors only settle on their size once attached, and may only
+        // know then whether they can resize.
         let mut rect: ViewRect = unsafe { std::mem::zeroed() };
         if unsafe { view.getSize(&mut rect) } == kResultOk
             && let Some(actual) = rect_size(&rect)
-            && actual != size
+            && actual != window.size.get()
         {
             window.resize(actual.0, actual.1)?;
-            if !resizable {
-                window.pin_size(actual.0, actual.1)?;
-            }
+        }
+        let attached_resizable = unsafe { view.canResize() } == kResultTrue;
+        if attached_resizable != resizable {
+            window.set_resizable(attached_resizable)?;
         }
 
         Ok(Self {

@@ -482,7 +482,9 @@ behind format-agnostic cores:
   records registered fds and timers and services them non-blockingly in `idle()` (`poll` with
   zero timeout; due timers fire once, missed ticks skipped). Handler lists are snapshotted
   before dispatch since callbacks may (un)register re-entrantly. `resizeView` from the plugin
-  resizes the window, then calls `onSize`. Non-resizable editors get min=max WM size hints.
+  resizes the window, then calls `onSize` — also for a non-resizable editor, which gets min=max WM
+  size hints that move along with it (a fixed-size editor can still resize itself: Sledge
+  Distortion's display-scale setting; with the old hints, the window manager kept the old size).
   `Vst3Editor::window()` is its X11 window (for the plugin check).
   Confirmed with Surge XT (JUCE) and OT P1ANO S (HISE/JUCE).
 

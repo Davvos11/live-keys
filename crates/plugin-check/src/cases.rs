@@ -191,6 +191,20 @@ pub const CASES: &[Case] = &[
         warmup: NO_WAIT,
     },
     Case {
+        name: "vst3-juce-effect",
+        plugin: "vst3:ABCDEF019182FAEB4D62647344697374",
+        quirks: "JUCE VST3 effect (Sledge Distortion): fixed size (canResize false), yet resizes \
+                 itself through resizeView (its display-scale setting), so the window's pinned \
+                 size has to move along (not checked here: it takes clicks in its settings)",
+        role: Role::AudioEffect,
+        sound: true,
+        param: param("Output Gain", Target::Min, None),
+        resize: Resize::Fixed,
+        atoms: false,
+        inline_display: false,
+        warmup: NO_WAIT,
+    },
+    Case {
         name: "vst3-hise",
         plugin: "vst3:ABCDEF019182FAEB4162636441626364",
         quirks: "HISE VST3 (OT P1ANO S): loads its samples only while processing runs",
